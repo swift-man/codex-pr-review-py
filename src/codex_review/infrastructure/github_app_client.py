@@ -1,15 +1,22 @@
 import json
 import logging
+import ssl
 import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
 
+import certifi
 import jwt
 
 from codex_review.domain import Finding, PullRequest, RepoRef, ReviewEvent, ReviewResult
 
 logger = logging.getLogger(__name__)
+
+# macOS · python.org 빌드 Python 은 시스템 CA 번들을 자동으로 신뢰하지 않아
+# urllib 로 https://api.github.com 호출 시 CERTIFICATE_VERIFY_FAILED 가 뜬다.
+# certifi 가 배포하는 루트 번들을 명시적으로 지정해 이 문제를 회피한다.
+_TLS_CONTEXT = ssl.create_default_context(cafile=certifi.where())
 
 
 @dataclass(frozen=True)
@@ -147,7 +154,7 @@ class GitHubAppClient:
 
         req = urllib.request.Request(url, data=data, method=method, headers=headers)
         try:
-            with urllib.request.urlopen(req, timeout=30) as resp:  # noqa: S310
+            with urllib.request.urlopen(req, timeout=30, context=_TLS_CONTEXT) as resp:  # noqa: S310
                 return json.loads(resp.read().decode("utf-8") or "{}")
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
