@@ -1,15 +1,24 @@
 import json
 import logging
+import ssl
 import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
 
+import certifi
 import jwt
 
 from codex_review.domain import Finding, PullRequest, RepoRef, ReviewEvent, ReviewResult
 
 logger = logging.getLogger(__name__)
+
+# macOS · python.org 빌드 Python 은 시스템 CA 번들을 자동으로 신뢰하지 않아
+# urllib 로 https://api.github.com 호출 시 CERTIFICATE_VERIFY_FAILED 가 뜬다.
+# certifi 가 배포하는 루트 번들을 기본값으로 잡아 이 문제를 회피한다. 필요 시
+# GitHubAppClient 생성자에 `tls_context=` 를 주입해 교체 가능하다.
+def _default_tls_context() -> ssl.SSLContext:
+    return ssl.create_default_context(cafile=certifi.where())
 
 
 @dataclass(frozen=True)
@@ -30,11 +39,15 @@ class GitHubAppClient:
         private_key_pem: str,
         api_base: str = "https://api.github.com",
         dry_run: bool = False,
+        tls_context: ssl.SSLContext | None = None,
     ) -> None:
         self._app_id = app_id
         self._private_key = private_key_pem
         self._api_base = api_base.rstrip("/")
         self._dry_run = dry_run
+        # DIP: 기본값은 certifi 기반 컨텍스트지만 테스트/다른 CA 번들 주입이 필요할 때
+        # 생성자에서 SSLContext 를 교체할 수 있도록 열어 둔다.
+        self._tls_context = tls_context or _default_tls_context()
         self._token_cache: dict[int, _CachedToken] = {}
 
     # --- Auth ---------------------------------------------------------------
@@ -155,7 +168,7 @@ class GitHubAppClient:
 
         req = urllib.request.Request(url, data=data, method=method, headers=headers)
         try:
-            with urllib.request.urlopen(req, timeout=30) as resp:  # noqa: S310
+            with urllib.request.urlopen(req, timeout=30, context=self._tls_context) as resp:  # noqa: S310
                 return json.loads(resp.read().decode("utf-8") or "{}")
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
