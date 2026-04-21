@@ -32,3 +32,10 @@ def test_render_body_without_findings_does_not_mention_inline_comments() -> None
     )
     body = result.render_body()
     assert "기술 단위 코멘트" not in body
+
+
+def test_render_body_does_not_include_model_footer() -> None:
+    result = ReviewResult(summary="요약", event=ReviewEvent.COMMENT)
+    body = result.render_body()
+    assert "리뷰 모델" not in body
+    assert "<sub>" not in body

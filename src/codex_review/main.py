@@ -23,6 +23,7 @@ def build_handler(settings: Settings) -> WebhookHandler:
         private_key_pem=settings.load_private_key(),
         api_base=settings.github_api_base,
         dry_run=settings.dry_run,
+        review_model_label=settings.codex_model,
     )
     repo_fetcher = GitRepoFetcher(cache_dir=settings.repo_cache_dir)
     collector = FileDumpCollector(

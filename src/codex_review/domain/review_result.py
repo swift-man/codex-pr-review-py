@@ -5,12 +5,8 @@ from .finding import Finding, ReviewEvent
 
 @dataclass(frozen=True)
 class ReviewResult:
-    """Structured review output.
-
-    Three sections are rendered in the top-level review body:
-    - 좋은 점 (positives)
-    - 개선할 점 (improvements)
-    - 기술 단위 코멘트 (findings) — posted as inline, line-anchored comments
+    """Structured review output rendered as three sections:
+    좋은 점 (positives) / 개선할 점 (improvements) / 기술 단위 코멘트 (findings).
     """
 
     summary: str
