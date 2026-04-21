@@ -70,14 +70,12 @@ async def test_verify_auth_raises_when_binary_missing(monkeypatch: pytest.Monkey
 
 
 async def test_verify_auth_raises_on_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
-    class _HangingProc(_FakeProc):
-        async def communicate(self, input: bytes | None = None) -> tuple[bytes, bytes]:
-            await asyncio.sleep(60)
-            return b"", b""
-
-    _patch_subprocess(monkeypatch, _HangingProc(0))
+    _patch_subprocess(monkeypatch, _FakeProc(0))
 
     async def fake_wait_for(coro: Any, timeout: float) -> Any:
+        # 중요: coro 를 await 해서 async generator 를 확실히 닫아야 "coroutine was never
+        # awaited" 경고가 뜨지 않는다. 그 뒤 TimeoutError 로 실제 경로 재현.
+        coro.close()
         raise asyncio.TimeoutError()
 
     monkeypatch.setattr(

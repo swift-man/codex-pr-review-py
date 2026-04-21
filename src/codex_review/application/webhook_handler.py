@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import hashlib
 import hmac
 import logging
@@ -13,6 +14,9 @@ from .review_pr_use_case import ReviewPullRequestUseCase
 logger = logging.getLogger(__name__)
 
 _SUPPORTED_ACTIONS = {"opened", "synchronize", "reopened", "ready_for_review"}
+
+# Graceful shutdown 의 기본 타임아웃(초). 진행 중 리뷰가 이보다 오래 걸리면 강제 취소.
+_DEFAULT_SHUTDOWN_TIMEOUT = 60.0
 
 
 @dataclass(frozen=True)
@@ -38,14 +42,18 @@ class WebhookHandler:
         github: GitHubClient,
         use_case: ReviewPullRequestUseCase,
         concurrency: int = 1,
+        shutdown_timeout: float = _DEFAULT_SHUTDOWN_TIMEOUT,
     ) -> None:
         self._secret = secret.encode("utf-8")
         self._github = github
         self._use_case = use_case
         self._concurrency = max(1, concurrency)
-        self._queue: asyncio.Queue[WebhookJob] = asyncio.Queue()
+        # `None` 은 종료 신호(tombstone). 큐 pop 시점에 워커가 자연스럽게 빠져나간다 —
+        # 진행 중 `_process` 를 도중에 끊어 리뷰가 유실되는 것을 방지한다.
+        self._queue: asyncio.Queue[WebhookJob | None] = asyncio.Queue()
         self._workers: list[asyncio.Task[None]] = []
         self._sem = asyncio.Semaphore(self._concurrency)
+        self._shutdown_timeout = shutdown_timeout
 
     # --- Lifecycle ----------------------------------------------------------
 
@@ -60,14 +68,36 @@ class WebhookHandler:
         logger.info("webhook handler started with concurrency=%d", self._concurrency)
 
     async def stop(self) -> None:
-        # 서버 종료 시 큐에 남은 작업 없이 깔끔히 마무리하도록 워커를 취소한다.
-        for task in self._workers:
-            task.cancel()
-        for task in self._workers:
-            try:
-                await task
-            except (asyncio.CancelledError, Exception):  # noqa: BLE001
-                pass
+        """Graceful shutdown — 진행 중 리뷰는 완료시키고 큐 잔여는 drain 후 종료.
+
+        타임아웃(기본 60s) 을 넘기면 워커를 강제 취소한다 — 운영 환경의 짧은 graceful
+        window (k8s/systemd) 를 넘지 않도록 제한을 둔다.
+        """
+        # 각 워커 앞으로 tombstone 하나씩 — 진행 중 작업을 완료한 뒤 자연 종료.
+        for _ in self._workers:
+            await self._queue.put(None)
+
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*self._workers, return_exceptions=True),
+                timeout=self._shutdown_timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "graceful shutdown exceeded %.0fs; cancelling workers",
+                self._shutdown_timeout,
+            )
+            for task in self._workers:
+                task.cancel()
+            # 취소 후에도 최종 await 로 리소스 정리. CancelledError 는 정상 신호이므로 suppress,
+            # 그 외 예외는 조용히 넘기지 말고 가시성을 위해 exception 로그로 남긴다.
+            for task in self._workers:
+                with contextlib.suppress(asyncio.CancelledError):
+                    try:
+                        await task
+                    except Exception:
+                        logger.exception("worker task crashed during shutdown")
+
         self._workers.clear()
         logger.info("webhook handler stopped")
 
@@ -141,6 +171,9 @@ class WebhookHandler:
         while True:
             job = await self._queue.get()
             try:
+                if job is None:
+                    # Graceful shutdown tombstone. 워커 하나를 종료.
+                    return
                 async with self._sem:
                     await self._process(job)
             finally:

@@ -54,9 +54,11 @@ def _inject_token(clone_url: str, token: str) -> str:
 
 async def _run(cmd: list[str], *, check: bool = True) -> None:
     logger.debug("git %s", " ".join(cmd[1:]))
+    # stdout 은 소비하지 않으므로 DEVNULL 로 보내 파이프 버퍼링/메모리 오버헤드를 피한다.
+    # stderr 는 실패 시 메시지 확인용이라 PIPE 로 유지.
     proc = await asyncio.create_subprocess_exec(
         *cmd,
-        stdout=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.PIPE,
     )
     _, stderr = await proc.communicate()

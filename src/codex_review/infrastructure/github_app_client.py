@@ -2,6 +2,7 @@ import asyncio
 import logging
 import ssl
 import time
+from collections import defaultdict
 from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any
@@ -65,9 +66,9 @@ class GitHubAppClient:
         # 본문 footer 에 표시할 모델 라벨. None 이면 footer 생략.
         self._review_model_label = review_model_label
         self._token_cache: dict[int, _CachedToken] = {}
-        # 동일 installation token 캐시 동시 갱신 방지용 락. 동시성 N>1 상황에서 두 워커가
-        # 같은 만료 토큰을 동시에 재발급하면 네트워크 낭비 + 경쟁 조건.
-        self._token_lock = asyncio.Lock()
+        # installation_id 별 개별 락. 단일 전역 락은 서로 다른 installation 의 동시 재발급까지
+        # 직렬화해 병목을 만든다. defaultdict 로 id 별 독립 락을 lazy 하게 생성한다.
+        self._token_locks: defaultdict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
 
     # --- Auth ---------------------------------------------------------------
 
@@ -83,8 +84,8 @@ class GitHubAppClient:
         if cached and cached.is_valid():
             return cached.token
 
-        async with self._token_lock:
-            # lock 진입 후 재확인: 대기 중 다른 워커가 이미 갱신했을 수 있다.
+        async with self._token_locks[installation_id]:
+            # lock 진입 후 재확인: 대기 중 같은 installation 의 다른 워커가 이미 갱신했을 수 있다.
             cached = self._token_cache.get(installation_id)
             if cached and cached.is_valid():
                 return cached.token
@@ -99,12 +100,9 @@ class GitHubAppClient:
             # GitHub installation token 은 1시간 유효. 만료 직전 요청이 실패하지 않도록 5분 여유.
             expires_at = time.time() + 55 * 60
             if expires:
-                # GitHub 은 expires_at 을 UTC (..Z) 로 반환. time.mktime 경로는 로컬
-                # TZ 기준이라 오프셋만큼 어긋나므로 aware datetime 으로 파싱.
+                # Python 3.11+ 의 fromisoformat 은 "Z" 접미사를 UTC 로 네이티브 지원.
                 try:
-                    expires_at = datetime.fromisoformat(
-                        expires.replace("Z", "+00:00")
-                    ).timestamp()
+                    expires_at = datetime.fromisoformat(expires).timestamp()
                 except ValueError:
                     pass
             self._token_cache[installation_id] = _CachedToken(token, expires_at)
@@ -117,7 +115,17 @@ class GitHubAppClient:
     ) -> PullRequest:
         token = await self.get_installation_token(installation_id)
         pr_path = f"/repos/{repo.full_name}/pulls/{number}"
-        pr_data = await self._request("GET", pr_path, auth=f"token {token}")
+
+        # PR 메타와 첫 페이지 files 는 상호 독립적이라 병렬로 조회해 네트워크 대기 단축.
+        # (페이지 2부터는 이전 페이지 크기를 봐야 하므로 순차 유지.)
+        pr_data, first_page = await asyncio.gather(
+            self._request("GET", pr_path, auth=f"token {token}"),
+            self._request(
+                "GET",
+                f"{pr_path}/files?per_page=100&page=1",
+                auth=f"token {token}",
+            ),
+        )
         assert isinstance(pr_data, dict)
 
         # 변경 파일 전체를 가져와야 우선순위 정렬(변경 파일 먼저)이 정확해진다.
@@ -125,12 +133,8 @@ class GitHubAppClient:
         changed: list[str] = []
         diff_right_lines: dict[str, frozenset[int]] = {}
         page = 1
+        files = first_page
         while True:
-            files = await self._request(
-                "GET",
-                f"{pr_path}/files?per_page=100&page={page}",
-                auth=f"token {token}",
-            )
             if not isinstance(files, list) or not files:
                 break
             for f in files:
@@ -154,6 +158,11 @@ class GitHubAppClient:
             if len(files) < 100:
                 break
             page += 1
+            files = await self._request(
+                "GET",
+                f"{pr_path}/files?per_page=100&page={page}",
+                auth=f"token {token}",
+            )
 
         head = pr_data["head"]
         base = pr_data["base"]
