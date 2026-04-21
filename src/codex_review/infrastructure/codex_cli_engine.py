@@ -53,6 +53,11 @@ class CodexCliEngine:
             proc.kill()
             await proc.wait()
             raise CodexAuthError("codex login status 가 10초 내에 응답하지 않았습니다.") from exc
+        except asyncio.CancelledError:
+            # 워커 취소/서버 종료 신호 시 하위 프로세스가 좀비로 남지 않도록 반드시 정리.
+            proc.kill()
+            await proc.wait()
+            raise
 
         # codex CLI 는 TTY 가 아닐 때 상태 메시지를 stderr 로 보내므로 두 스트림 모두 확인.
         combined = (stdout.decode(errors="replace") + stderr.decode(errors="replace")).strip()
@@ -96,6 +101,12 @@ class CodexCliEngine:
             raise RuntimeError(
                 f"codex exec timed out after {self._timeout_sec}s"
             ) from exc
+        except asyncio.CancelledError:
+            # 서버 종료/워커 취소 시 `codex exec` 하위 프로세스가 좀비로 남아 토큰·쿼터·CPU 를
+            # 계속 소모하지 않도록 확실히 kill + wait 후 취소를 재전파한다.
+            proc.kill()
+            await proc.wait()
+            raise
 
         if proc.returncode != 0:
             err = stderr.decode(errors="replace").strip()

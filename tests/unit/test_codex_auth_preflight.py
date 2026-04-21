@@ -81,3 +81,30 @@ async def test_verify_auth_raises_on_timeout(monkeypatch: pytest.MonkeyPatch) ->
     with pytest.raises(CodexAuthError) as exc:
         await _engine().verify_auth()
     assert "10초" in str(exc.value)
+
+
+async def test_verify_auth_kills_subprocess_on_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """서버 종료/워커 취소로 `CancelledError` 가 전파되면 하위 프로세스가 좀비로 남지 않도록
+    반드시 kill 되고 취소는 재전파돼야 한다.
+    """
+    events: list[str] = []
+
+    class _CancelledInCommunicate(_FakeProc):
+        async def communicate(self, input: bytes | None = None) -> tuple[bytes, bytes]:
+            raise asyncio.CancelledError()
+
+        def kill(self) -> None:
+            events.append("kill")
+
+        async def wait(self) -> int:
+            events.append("wait")
+            return -9
+
+    _patch_subprocess(monkeypatch, _CancelledInCommunicate(0))
+
+    with pytest.raises(asyncio.CancelledError):
+        await _engine().verify_auth()
+
+    assert events == ["kill", "wait"], "취소 시 kill → wait 순으로 정리돼야 한다"

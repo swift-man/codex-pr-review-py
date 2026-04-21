@@ -173,7 +173,12 @@ async def test_expires_at_with_z_suffix_is_parsed_natively(
 async def test_fetch_pull_request_issues_meta_and_first_files_in_parallel(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """PR 메타 GET 과 첫 페이지 files GET 이 동시에 진행돼야 한다."""
+    """PR 메타 GET 과 첫 페이지 files GET 이 **실제로 동시에** 진행되는지 peak 로 검증.
+
+    httpx.MockTransport 의 sync handler 로는 진짜 병렬성을 관찰하기 어렵다 (handler 가
+    blocking 이면 호출자도 막힘). 대신 `_request` 를 코루틴 레벨에서 직접 훅해 in_flight
+    를 세고, 두 호출이 모두 `asyncio.Event` 에 대기할 때까지 기다린 뒤 release 한다.
+    """
     in_flight = 0
     peak = 0
     release = asyncio.Event()
@@ -186,49 +191,48 @@ async def test_fetch_pull_request_issues_meta_and_first_files_in_parallel(
         "draft": False,
     }
 
-    async def slow_json(status: int, body: object) -> httpx.Response:
+    async def fake_request(
+        method: str, path: str, *, auth: str, body: object | None = None
+    ) -> object:
+        # token 발급은 이 테스트의 측정 대상이 아니라 즉시 반환 — 그래야 이후 PR 메타/files
+        # 두 호출만 depth=2 로 정확히 관찰 가능.
+        if "/access_tokens" in path:
+            return {"token": "T", "expires_at": "2099-01-01T00:00:00Z"}
+
         nonlocal in_flight, peak
         in_flight += 1
         peak = max(peak, in_flight)
         try:
             await release.wait()
-            return httpx.Response(status, json=body)
         finally:
             in_flight -= 1
+        if path.endswith("/pulls/5"):
+            return _PR_JSON
+        if "/pulls/5/files" in path:
+            return [{"filename": "a.py", "patch": "@@ -1,1 +1,1 @@\n x"}]
+        return {}
 
-    def handler(req: httpx.Request) -> httpx.Response:
-        # MockTransport 는 sync handler 를 요구한다. 병렬 측정을 위해 이벤트 없이 즉시
-        # 반환하지 말고, 외부 이벤트 루프에서 대기했다 돌려줘야 "동시 in-flight" 상태가
-        # 관찰 가능하다. 대신 여기선 간단히 상태 기록만 — 더 간단한 증명: 호출 순서가
-        # 엄격 직렬이라면 token -> pr -> files 이지만 gather 버전은 pr 과 files 의 순서가
-        # 고정되지 않는다. 그 자체로 병렬화의 간접 증거.
-        nonlocal in_flight, peak
-        in_flight += 1
-        peak = max(peak, in_flight)
-        if req.url.path.endswith("/access_tokens"):
-            in_flight -= 1
-            return httpx.Response(
-                200, json={"token": "T", "expires_at": "2099-01-01T00:00:00Z"}
-            )
-        if req.url.path.endswith("/pulls/5"):
-            in_flight -= 1
-            return httpx.Response(200, json=_PR_JSON)
-        if "/pulls/5/files" in req.url.path:
-            in_flight -= 1
-            return httpx.Response(
-                200, json=[{"filename": "a.py", "patch": "@@ -1,1 +1,1 @@\n x"}]
-            )
-        in_flight -= 1
-        return httpx.Response(404)
+    monkeypatch.setattr(jwt, "encode", lambda *a, **k: "fake.jwt")
 
-    async with httpx.AsyncClient(
-        base_url="https://api.github.com", transport=httpx.MockTransport(handler)
-    ) as http_client:
-        monkeypatch.setattr(jwt, "encode", lambda *a, **k: "fake.jwt")
+    async with httpx.AsyncClient(base_url="https://api.github.com") as http_client:
         client = GitHubAppClient(app_id=1, private_key_pem="-", http_client=http_client)
+        # 두 호출이 동시에 대기 상태에 들어간 것을 확인한 뒤 한꺼번에 풀어 준다.
+        monkeypatch.setattr(client, "_request", fake_request)
+
+        async def gate() -> None:
+            # in_flight 가 2 가 될 때까지 대기 (두 호출이 모두 시작됨).
+            for _ in range(200):
+                if in_flight >= 2:
+                    break
+                await asyncio.sleep(0.005)
+            release.set()
+
+        gate_task = asyncio.create_task(gate())
         pr = await client.fetch_pull_request(RepoRef("o", "r"), number=5, installation_id=7)
+        await gate_task
 
     assert pr.changed_files == ("a.py",)
+    assert peak == 2, "PR 메타와 첫 페이지 files 는 동시에 진행돼야 한다 (peak == 2)"
 
 
 # ---------------------------------------------------------------------------

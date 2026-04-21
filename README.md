@@ -13,7 +13,7 @@ GitHub App 웹훅으로 PR 이벤트를 받아, 레포를 체크아웃하고 전
 - **리뷰 3분류**: `좋은 점` / `개선할 점` / `기술 단위 코멘트(라인 고정)`
 - 라인 고정 코멘트만 인라인으로 게시, 라인 번호 없는 지적은 `개선할 점`으로 이동
 - 기초 타입(`str`/`list`/`String`/`Array` 등) 수준의 팁 배제, **Python/TypeScript/React 공식 상위 API**에 초점
-- 리뷰는 **단일 슬롯 직렬화** 처리 (동시 1건, 나머지 큐 대기)
+- 리뷰 큐는 **제한된 동시성**으로 처리 — `REVIEW_CONCURRENCY` env(기본 `1`=직렬)로 동시 리뷰 개수 조절. 같은 저장소에 대한 checkout 은 저장소별 lock 으로 직렬화되어 작업 트리 경쟁을 방지
 - 컨텍스트 예산 초과 시 리뷰 대신 안내 코멘트 게시
 - SOLID — 계층 분리, `Protocol`로 의존성 역전
 
@@ -22,7 +22,7 @@ GitHub App 웹훅으로 PR 이벤트를 받아, 레포를 체크아웃하고 전
 ```
 GitHub PR event
   → FastAPI /github/webhook (HMAC 검증, 202 즉시 응답)
-  → serialized queue
+  → asyncio.Queue (Semaphore(REVIEW_CONCURRENCY) 로 제한된 동시성)
       1. Installation Token 발급 (JWT → GitHub App API)
       2. PR 메타 / 변경 파일 조회
       3. git clone --filter=blob:none + checkout head SHA (캐시)
@@ -37,7 +37,7 @@ src/codex_review/
 ├── domain/           # PullRequest, ReviewResult, Finding, FileDump (frozen dataclass)
 ├── application/
 │   ├── review_pr_use_case.py   # 오케스트레이션
-│   └── webhook_handler.py      # HMAC 검증 + 직렬화 큐 워커
+│   └── webhook_handler.py      # HMAC 검증 + asyncio.Queue + Semaphore(N) 워커
 ├── infrastructure/
 │   ├── github_app_client.py    # JWT → installation token → REST
 │   ├── git_repo_fetcher.py     # clone/fetch/checkout
