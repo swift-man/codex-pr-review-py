@@ -1,8 +1,7 @@
+import asyncio
 import hashlib
 import hmac
 import logging
-import queue
-import threading
 from dataclasses import dataclass
 
 from codex_review.domain import RepoRef
@@ -25,49 +24,65 @@ class WebhookJob:
 
 
 class WebhookHandler:
-    """Verifies webhooks, enqueues review jobs, and drains them serially."""
+    """Verifies webhooks, enqueues review jobs, drains them with bounded concurrency.
+
+    구조:
+      asyncio.Queue <- `accept()` 가 넣고
+      N 개의 워커 코루틴 <- 병렬로 꺼내 처리하되, `asyncio.Semaphore(concurrency)` 로
+                         동시 실행 수를 제한. 기본 N=1 (직렬) — 필요 시 env 로 상향.
+    """
 
     def __init__(
         self,
         secret: str,
         github: GitHubClient,
         use_case: ReviewPullRequestUseCase,
+        concurrency: int = 1,
     ) -> None:
         self._secret = secret.encode("utf-8")
         self._github = github
         self._use_case = use_case
-        self._queue: queue.Queue[WebhookJob] = queue.Queue()
-        self._worker: threading.Thread | None = None
-        self._stop = threading.Event()
+        self._concurrency = max(1, concurrency)
+        self._queue: asyncio.Queue[WebhookJob] = asyncio.Queue()
+        self._workers: list[asyncio.Task[None]] = []
+        self._sem = asyncio.Semaphore(self._concurrency)
 
     # --- Lifecycle ----------------------------------------------------------
 
-    def start(self) -> None:
-        if self._worker is not None:
+    async def start(self) -> None:
+        if self._workers:
             return
-        self._stop.clear()
-        self._worker = threading.Thread(
-            target=self._run, name="review-worker", daemon=True
-        )
-        self._worker.start()
+        # Semaphore 가 동시 실행 상한을 관리하므로 워커 수를 concurrency 와 맞춰 만들면
+        # "큐에서 꺼내는 일" 과 "실제 실행" 이 모두 병렬 가능.
+        for i in range(self._concurrency):
+            task = asyncio.create_task(self._run(), name=f"review-worker-{i}")
+            self._workers.append(task)
+        logger.info("webhook handler started with concurrency=%d", self._concurrency)
 
-    def stop(self) -> None:
-        self._stop.set()
+    async def stop(self) -> None:
+        # 서버 종료 시 큐에 남은 작업 없이 깔끔히 마무리하도록 워커를 취소한다.
+        for task in self._workers:
+            task.cancel()
+        for task in self._workers:
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+        self._workers.clear()
+        logger.info("webhook handler stopped")
 
     # --- Verification -------------------------------------------------------
 
     def verify_signature(self, signature_header: str | None, body: bytes) -> bool:
-        # 원문 body 로 HMAC 을 계산해야 함. json.loads 후 재직렬화하면 키 순서/공백 차이로
-        # 서명이 달라져 정상 요청을 거부하게 된다. 따라서 검증은 반드시 raw bytes 단계에서.
+        # 원문 body 로 HMAC 계산. json.loads 후 재직렬화하면 서명이 달라져 정상 요청을 거부.
         if not signature_header or not signature_header.startswith("sha256="):
             return False
         expected = hmac.new(self._secret, body, hashlib.sha256).hexdigest()
-        # hmac.compare_digest 는 타이밍 공격 방지용 상수-시간 비교.
         return hmac.compare_digest(signature_header.removeprefix("sha256="), expected)
 
     # --- Dispatch -----------------------------------------------------------
 
-    def accept(
+    async def accept(
         self,
         event: str,
         delivery_id: str,
@@ -86,8 +101,7 @@ class WebhookHandler:
             return 202, "ignored-action"
 
         pr = payload.get("pull_request") or {}
-        # webhook payload 의 draft 값과 실제 처리 시점의 PR 상태가 다를 수 있어
-        # _process() 에서 한 번 더 확인한다(여기선 큐 진입 전 1차 필터).
+        # webhook payload 의 draft 값과 실제 처리 시점 상태가 다를 수 있어 _process 에서 재확인.
         if bool(pr.get("draft")):
             dlog.info("skipping draft PR")
             return 202, "skipped-draft"
@@ -110,7 +124,7 @@ class WebhookHandler:
             number=number,
             installation_id=installation_id,
         )
-        self._queue.put(job)
+        await self._queue.put(job)
         dlog.info(
             "queued review for %s#%d (queue_depth=%d)",
             job.repo.full_name,
@@ -121,29 +135,30 @@ class WebhookHandler:
 
     # --- Worker -------------------------------------------------------------
 
-    def _run(self) -> None:
-        # 완전 직렬화: 한 번에 한 리뷰만 돌린다(동시성 1). 이유는 Codex CLI 가 사용자 ChatGPT
-        # OAuth 를 공유하므로 동시 호출은 rate-limit 에 걸릴 위험이 크고, `codex exec` 가 리뷰 하나당
-        # 수 분 수준이라 큐가 길어져도 순차 처리가 운영상 단순하기 때문.
-        while not self._stop.is_set():
+    async def _run(self) -> None:
+        # 동시성 상한은 Semaphore 로 통제. 모든 워커가 같은 세마포어를 공유하므로 워커 수와
+        # 무관하게 순간 병렬 실행 수는 `concurrency` 를 넘지 않는다.
+        while True:
+            job = await self._queue.get()
             try:
-                # timeout 으로 주기적으로 깨어나 _stop 을 확인. 이렇게 해야 서버 종료 시 블로킹 없이
-                # 스레드가 빠져나온다.
-                job = self._queue.get(timeout=1.0)
-            except queue.Empty:
-                continue
-            self._process(job)
-            self._queue.task_done()
+                async with self._sem:
+                    await self._process(job)
+            finally:
+                self._queue.task_done()
 
-    def _process(self, job: WebhookJob) -> None:
+    async def _process(self, job: WebhookJob) -> None:
         dlog = get_delivery_logger(__name__, job.delivery_id)
         try:
             dlog.info("processing %s#%d", job.repo.full_name, job.number)
-            pr = self._github.fetch_pull_request(job.repo, job.number, job.installation_id)
+            pr = await self._github.fetch_pull_request(
+                job.repo, job.number, job.installation_id
+            )
             if pr.is_draft:
                 dlog.info("skipping draft at fetch time")
                 return
-            self._use_case.execute(pr)
+            await self._use_case.execute(pr)
             dlog.info("done %s#%d", job.repo.full_name, job.number)
+        except asyncio.CancelledError:
+            raise
         except Exception:
             dlog.exception("review failed for %s#%d", job.repo.full_name, job.number)

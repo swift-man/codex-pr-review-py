@@ -1,5 +1,5 @@
+import asyncio
 import logging
-import subprocess
 from pathlib import Path
 
 from codex_review.domain import FileDump, FileEntry, TokenBudget
@@ -185,7 +185,7 @@ class FileDumpCollector:
         # 적용할 더 엄격한 상한. 설정/매니페스트는 작아서 이 한도에 항상 통과한다.
         self._data_file_max_bytes = data_file_max_bytes
 
-    def collect(
+    async def collect(
         self,
         root: Path,
         changed_files: tuple[str, ...],
@@ -193,7 +193,7 @@ class FileDumpCollector:
     ) -> FileDump:
         # git ls-files 로 .gitignore 를 존중하는 "진짜 소스" 파일만 뽑는다.
         # 레포 루트 파일을 os.walk 로 순회하면 로컬 빌드 산출물까지 섞여 들어온다.
-        tracked = _git_ls_files(root)
+        tracked = await _git_ls_files(root)
         changed_set = set(changed_files)
 
         # 변경 파일 → 핵심 소스 디렉터리 → 기타 순으로 정렬하는 이유:
@@ -267,14 +267,18 @@ class FileDumpCollector:
         )
 
 
-def _git_ls_files(root: Path) -> list[str]:
-    result = subprocess.run(  # noqa: S603
-        ["git", "-C", str(root), "ls-files"],
-        capture_output=True,
-        text=True,
-        check=True,
+async def _git_ls_files(root: Path) -> list[str]:
+    proc = await asyncio.create_subprocess_exec(
+        "git", "-C", str(root), "ls-files",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
     )
-    return [line for line in result.stdout.splitlines() if line]
+    stdout, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"git ls-files failed: {stderr.decode(errors='replace').strip()}"
+        )
+    return [line for line in stdout.decode(errors="replace").splitlines() if line]
 
 
 def _sort_by_priority(paths: list[str], changed: set[str]) -> list[str]:

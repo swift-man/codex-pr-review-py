@@ -1,5 +1,5 @@
+import asyncio
 import logging
-import subprocess
 
 from codex_review.domain import FileDump, PullRequest, ReviewResult
 
@@ -14,7 +14,7 @@ class CodexAuthError(RuntimeError):
 
 
 class CodexCliEngine:
-    """Calls the Codex CLI (`codex exec`) over stdin and parses a JSON review."""
+    """Async wrapper around `codex exec`. stdin 으로 프롬프트를 넘기고 stdout JSON 을 파싱."""
 
     def __init__(
         self,
@@ -28,32 +28,34 @@ class CodexCliEngine:
         self._reasoning_effort = reasoning_effort
         self._timeout_sec = timeout_sec
 
-    def verify_auth(self) -> str:
+    async def verify_auth(self) -> str:
         """Run `codex login status` and return the status line, or raise CodexAuthError.
 
-        Called once at startup so the process fails fast instead of surfacing auth
-        errors during the first PR review. The server operator must run
-        `codex login` manually (server stays out of the interactive browser flow).
+        기동 시 호출해 토큰이 살아 있는지 선점검한다. 실패하면 서버 기동 자체를 막아
+        운영자가 `codex login` 을 먼저 실행하도록 유도.
         """
         try:
-            result = subprocess.run(  # noqa: S603
-                [self._binary, "login", "status"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-                check=False,
+            proc = await asyncio.create_subprocess_exec(
+                self._binary, "login", "status",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
         except FileNotFoundError as exc:
             raise CodexAuthError(
                 f"CODEX_BIN='{self._binary}' 을(를) 실행할 수 없습니다. "
                 "경로를 확인하거나 `codex` CLI를 설치하세요."
             ) from exc
-        except subprocess.TimeoutExpired as exc:
+
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10.0)
+        except asyncio.TimeoutError as exc:
+            proc.kill()
+            await proc.wait()
             raise CodexAuthError("codex login status 가 10초 내에 응답하지 않았습니다.") from exc
 
-        # codex CLI 는 TTY 가 아닐 때 상태 메시지를 stderr 로 보내므로 두 스트림을 함께 본다.
-        combined = (result.stdout + result.stderr).strip()
-        if result.returncode != 0 or "Logged in" not in combined:
+        # codex CLI 는 TTY 가 아닐 때 상태 메시지를 stderr 로 보내므로 두 스트림 모두 확인.
+        combined = (stdout.decode(errors="replace") + stderr.decode(errors="replace")).strip()
+        if proc.returncode != 0 or "Logged in" not in combined:
             raise CodexAuthError(
                 "Codex CLI 가 로그인되어 있지 않습니다.\n"
                 f"출력: {combined or '(empty)'}\n"
@@ -61,21 +63,10 @@ class CodexCliEngine:
             )
         return combined.splitlines()[0] if combined else "Logged in"
 
-    def review(self, pr: PullRequest, dump: FileDump) -> ReviewResult:
+    async def review(self, pr: PullRequest, dump: FileDump) -> ReviewResult:
         prompt = build_prompt(pr, dump)
-        # "-" positional: Codex CLI 에 stdin 에서 프롬프트를 읽도록 지시.
-        # argv 로 넘기지 않는 이유는 전체 레포 덤프가 수백 KB ~ 수 MB 라 ARG_MAX 를 초과할 수 있어서.
-        cmd = [
-            self._binary,
-            "exec",
-            "--model",
-            self._model,
-            # reasoning_effort 는 config 오버라이드로 넘긴다. `codex exec` 가 별도 CLI 플래그로
-            # 지원하지 않고 ~/.codex/config.toml 값만 읽기 때문에 `-c key=value` 가 정석 경로.
-            "--config",
-            f"model_reasoning_effort={self._reasoning_effort}",
-            "-",
-        ]
+        # "-" positional 은 codex exec 에 stdin 에서 프롬프트를 읽으라는 지시.
+        # argv 로 넘기면 전체 레포 덤프가 ARG_MAX 를 초과할 수 있어 stdin 이 안전.
         logger.info(
             "invoking codex: files=%d chars=%d model=%s effort=%s",
             len(dump.entries),
@@ -83,23 +74,34 @@ class CodexCliEngine:
             self._model,
             self._reasoning_effort,
         )
+        proc = await asyncio.create_subprocess_exec(
+            self._binary, "exec",
+            "--model", self._model,
+            # reasoning_effort 는 config 오버라이드로 넘긴다 — `codex exec` 가 별도 CLI 플래그로
+            # 지원하지 않고 ~/.codex/config.toml 값만 읽기 때문.
+            "--config", f"model_reasoning_effort={self._reasoning_effort}",
+            "-",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+
         try:
-            result = subprocess.run(  # noqa: S603
-                cmd,
-                input=prompt,
-                capture_output=True,
-                text=True,
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(input=prompt.encode("utf-8")),
                 timeout=self._timeout_sec,
-                check=False,
             )
-        except subprocess.TimeoutExpired as exc:
+        except asyncio.TimeoutError as exc:
+            proc.kill()
+            await proc.wait()
             raise RuntimeError(
                 f"codex exec timed out after {self._timeout_sec}s"
             ) from exc
 
-        if result.returncode != 0:
+        if proc.returncode != 0:
+            err = stderr.decode(errors="replace").strip()
             raise RuntimeError(
-                f"codex exec failed ({result.returncode}): {result.stderr.strip()[:1000]}"
+                f"codex exec failed ({proc.returncode}): {err[:1000]}"
             )
 
-        return parse_review(result.stdout)
+        return parse_review(stdout.decode(errors="replace"))

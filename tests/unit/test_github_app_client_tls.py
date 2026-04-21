@@ -1,81 +1,92 @@
-import ssl
-import urllib.request
-from typing import Any
+"""Regression coverage for the httpx.AsyncClient wiring in GitHubAppClient.
 
+이전에는 urllib 에 certifi CA 번들을 주입하는 흐름이 핵심이었다. 지금은
+httpx.AsyncClient 생성 시 `verify=_default_tls_context()` 를 넘기면 되며,
+이 파일은 "certifi 번들이 실제로 SSLContext 의 cafile 로 전달되는지" 를 고정한다.
+"""
+
+import ssl
+from collections.abc import Iterator
+
+import httpx
 import jwt
 import pytest
 
 from codex_review.infrastructure import github_app_client
-from codex_review.infrastructure.github_app_client import GitHubAppClient
 
 
-class _FakeResponse:
-    def __init__(self, body: bytes) -> None:
-        self._body = body
+def test_default_tls_context_uses_certifi_bundle(monkeypatch: pytest.MonkeyPatch) -> None:
+    """회귀 방지: `_default_tls_context` 가 `certifi.where()` 결과를 `cafile` 로 넘긴다.
+    누군가 certifi 호출을 제거해도 정확히 이 테스트가 실패하도록 훅을 건다.
+    """
+    captured: dict[str, object] = {}
 
-    def __enter__(self) -> "_FakeResponse":
-        return self
+    monkeypatch.setattr(
+        github_app_client.certifi, "where", lambda: "/fake/certifi/bundle.pem"
+    )
+    original = github_app_client.ssl.create_default_context
 
-    def __exit__(self, *_args: object) -> None:
-        return None
+    def spy(*args: object, cafile: str | None = None, **kwargs: object) -> ssl.SSLContext:
+        captured["cafile"] = cafile
+        # 유효한 컨텍스트를 돌려줘야 이후 로직이 깨지지 않음. 단, 가짜 cafile 경로라
+        # 실제 신뢰할 수 있는 컨텍스트는 못 만들므로 certifi 검증용 호출을 제외하고 원본 호출.
+        return original()
 
-    def read(self) -> bytes:
-        return self._body
+    monkeypatch.setattr(
+        github_app_client.ssl, "create_default_context", spy
+    )
+
+    github_app_client._default_tls_context()
+    assert captured["cafile"] == "/fake/certifi/bundle.pem"
 
 
 @pytest.fixture()
-def captured(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
-    """Intercept urlopen + jwt.encode so we can inspect GitHubAppClient wiring
-    without making real network calls or needing a real RSA key."""
-    sink: dict[str, Any] = {}
+def mock_http() -> Iterator[httpx.AsyncClient]:
+    """요청/응답을 캡처해 테스트가 호출 경로를 검증할 수 있게 하는 MockTransport 기반 클라이언트."""
+    def handler(req: httpx.Request) -> httpx.Response:
+        # 기본 응답: 토큰 발급 응답만 돌려주고 나머지는 빈 객체.
+        if req.url.path.endswith("/access_tokens"):
+            return httpx.Response(
+                200, json={"token": "ITOK", "expires_at": "2026-04-22T00:00:00Z"}
+            )
+        return httpx.Response(200, json={})
 
-    def fake_urlopen(
-        req: urllib.request.Request,
-        *,
-        timeout: float | None = None,
-        context: ssl.SSLContext | None = None,
-    ) -> _FakeResponse:
-        sink["url"] = req.full_url
-        sink["timeout"] = timeout
-        sink["context"] = context
-        return _FakeResponse(b'{"token": "tkn", "expires_at": ""}')
-
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
-    monkeypatch.setattr(jwt, "encode", lambda *a, **k: "fake.jwt")
-    return sink
+    transport = httpx.MockTransport(handler)
+    client = httpx.AsyncClient(base_url="https://api.github.com", transport=transport)
+    try:
+        yield client
+    finally:
+        import asyncio
+        asyncio.get_event_loop().run_until_complete(client.aclose())
 
 
-def test_request_passes_injected_tls_context_to_urlopen(captured: dict[str, Any]) -> None:
-    """회귀 방지: `_request()` 는 `ssl.SSLContext` 를 `urlopen(context=...)` 로 전달해야 한다.
-    이걸 빠뜨리면 python.org 빌드 Python 에서 CERTIFICATE_VERIFY_FAILED 로 파이프라인이 죽는다.
+async def test_request_uses_injected_http_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DIP 검증: GitHubAppClient 가 주입된 httpx.AsyncClient 로만 요청한다.
+    테스트 transport 가 기록한 경로·헤더를 본다.
     """
-    injected = ssl.create_default_context()
-    client = GitHubAppClient(app_id=1, private_key_pem="-", tls_context=injected)
+    captured: list[httpx.Request] = []
 
-    client.get_installation_token(installation_id=42)
+    def handler(req: httpx.Request) -> httpx.Response:
+        captured.append(req)
+        return httpx.Response(
+            200, json={"token": "ITOK", "expires_at": "2026-04-22T00:00:00Z"}
+        )
 
-    assert captured["context"] is injected
-    assert "installations/42/access_tokens" in captured["url"]
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(
+        base_url="https://api.github.com", transport=transport
+    ) as http_client:
+        monkeypatch.setattr(jwt, "encode", lambda *a, **k: "fake.jwt")
+        client = github_app_client.GitHubAppClient(
+            app_id=1, private_key_pem="-", http_client=http_client
+        )
 
+        token = await client.get_installation_token(installation_id=7)
 
-def test_default_tls_context_is_a_verifying_sslcontext(captured: dict[str, Any]) -> None:
-    """기본 TLS 컨텍스트는 인증서 검증을 켠 상태여야 한다.
-    (certifi 번들을 끄거나 검증을 비활성화하는 회귀를 잡는다.)
-    """
-    client = GitHubAppClient(app_id=1, private_key_pem="-")
-
-    client.get_installation_token(installation_id=42)
-
-    ctx = captured["context"]
-    assert isinstance(ctx, ssl.SSLContext)
-    assert ctx.verify_mode == ssl.CERT_REQUIRED
-    assert ctx.check_hostname is True
-
-
-def test_default_tls_context_factory_is_fresh_instance() -> None:
-    """생성자 기본값이 싱글톤 모듈 변수가 아니라 팩토리 함수로 만들어지는지 확인.
-    덕분에 테스트·환경별로 독립된 SSLContext 를 가질 수 있다.
-    """
-    a = github_app_client._default_tls_context()
-    b = github_app_client._default_tls_context()
-    assert a is not b
+    assert token == "ITOK"
+    assert captured, "request should have been issued"
+    assert captured[0].url.path == "/app/installations/7/access_tokens"
+    assert captured[0].headers["Accept"] == "application/vnd.github+json"
+    assert captured[0].headers["Authorization"].startswith("Bearer ")

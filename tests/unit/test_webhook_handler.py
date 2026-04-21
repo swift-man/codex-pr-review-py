@@ -1,6 +1,6 @@
+import asyncio
 import hashlib
 import hmac
-import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -16,7 +16,6 @@ from codex_review.domain import (
     TokenBudget,
 )
 
-
 SECRET = "top-secret"
 
 
@@ -26,19 +25,19 @@ class FakeGitHub:
     posted_comments: list[tuple[PullRequest, str]] = field(default_factory=list)
     pr_to_return: PullRequest | None = None
 
-    def fetch_pull_request(
+    async def fetch_pull_request(
         self, repo: RepoRef, number: int, installation_id: int
     ) -> PullRequest:
         assert self.pr_to_return is not None
         return self.pr_to_return
 
-    def post_review(self, pr: PullRequest, result: ReviewResult) -> None:
+    async def post_review(self, pr: PullRequest, result: ReviewResult) -> None:
         self.posted_reviews.append((pr, result))
 
-    def post_comment(self, pr: PullRequest, body: str) -> None:
+    async def post_comment(self, pr: PullRequest, body: str) -> None:
         self.posted_comments.append((pr, body))
 
-    def get_installation_token(self, installation_id: int) -> str:
+    async def get_installation_token(self, installation_id: int) -> str:
         return "fake-token"
 
 
@@ -46,7 +45,7 @@ class FakeGitHub:
 class FakeFetcher:
     path: Path
 
-    def checkout(self, pr: PullRequest, installation_token: str) -> Path:
+    async def checkout(self, pr: PullRequest, installation_token: str) -> Path:
         return self.path
 
 
@@ -54,7 +53,9 @@ class FakeCollector:
     def __init__(self, dump: FileDump) -> None:
         self._dump = dump
 
-    def collect(self, root: Path, changed_files: tuple[str, ...], budget: TokenBudget) -> FileDump:
+    async def collect(
+        self, root: Path, changed_files: tuple[str, ...], budget: TokenBudget
+    ) -> FileDump:
         return self._dump
 
 
@@ -62,7 +63,7 @@ class FakeEngine:
     def __init__(self, result: ReviewResult) -> None:
         self._result = result
 
-    def review(self, pr: PullRequest, dump: FileDump) -> ReviewResult:
+    async def review(self, pr: PullRequest, dump: FileDump) -> ReviewResult:
         return self._result
 
 
@@ -92,6 +93,7 @@ def _build_handler(
     dump: FileDump,
     result: ReviewResult,
     tmp: Path,
+    concurrency: int = 1,
 ) -> WebhookHandler:
     use_case = ReviewPullRequestUseCase(
         github=github,
@@ -100,7 +102,9 @@ def _build_handler(
         engine=FakeEngine(result),
         max_input_tokens=1000,
     )
-    return WebhookHandler(secret=SECRET, github=github, use_case=use_case)
+    return WebhookHandler(
+        secret=SECRET, github=github, use_case=use_case, concurrency=concurrency
+    )
 
 
 def test_verify_signature_accepts_valid_and_rejects_invalid(tmp_path: Path) -> None:
@@ -114,18 +118,18 @@ def test_verify_signature_accepts_valid_and_rejects_invalid(tmp_path: Path) -> N
     assert handler.verify_signature(None, body) is False
 
 
-def test_accept_ignores_non_pr_events(tmp_path: Path) -> None:
+async def test_accept_ignores_non_pr_events(tmp_path: Path) -> None:
     handler = _build_handler(
         FakeGitHub(),
         FileDump(entries=(), total_chars=0),
         ReviewResult(summary="ok", event=ReviewEvent.COMMENT),
         tmp_path,
     )
-    code, _ = handler.accept("issues", "d1", {})
+    code, _ = await handler.accept("issues", "d1", {})
     assert code == 202
 
 
-def test_accept_ignores_draft(tmp_path: Path) -> None:
+async def test_accept_ignores_draft(tmp_path: Path) -> None:
     handler = _build_handler(
         FakeGitHub(),
         FileDump(entries=(), total_chars=0),
@@ -138,12 +142,12 @@ def test_accept_ignores_draft(tmp_path: Path) -> None:
         "repository": {"full_name": "o/r"},
         "installation": {"id": 7},
     }
-    code, reason = handler.accept("pull_request", "d2", payload)
+    code, reason = await handler.accept("pull_request", "d2", payload)
     assert code == 202
     assert reason == "skipped-draft"
 
 
-def test_accept_ignores_unsupported_action(tmp_path: Path) -> None:
+async def test_accept_ignores_unsupported_action(tmp_path: Path) -> None:
     handler = _build_handler(
         FakeGitHub(),
         FileDump(entries=(), total_chars=0),
@@ -156,11 +160,11 @@ def test_accept_ignores_unsupported_action(tmp_path: Path) -> None:
         "repository": {"full_name": "o/r"},
         "installation": {"id": 7},
     }
-    code, _ = handler.accept("pull_request", "d3", payload)
+    code, _ = await handler.accept("pull_request", "d3", payload)
     assert code == 202
 
 
-def test_use_case_posts_comment_when_budget_exceeded(tmp_path: Path) -> None:
+async def test_use_case_posts_comment_when_budget_exceeded(tmp_path: Path) -> None:
     github = FakeGitHub()
     pr = _sample_pr()
     dump = FileDump(
@@ -178,14 +182,14 @@ def test_use_case_posts_comment_when_budget_exceeded(tmp_path: Path) -> None:
         max_input_tokens=1,
     )
 
-    use_case.execute(pr)
+    await use_case.execute(pr)
 
     assert github.posted_reviews == []
     assert len(github.posted_comments) == 1
     assert "예산 초과" in github.posted_comments[0][1]
 
 
-def test_use_case_posts_review_when_budget_fits(tmp_path: Path) -> None:
+async def test_use_case_posts_review_when_budget_fits(tmp_path: Path) -> None:
     github = FakeGitHub()
     pr = _sample_pr()
     from codex_review.domain import FileEntry
@@ -204,14 +208,14 @@ def test_use_case_posts_review_when_budget_fits(tmp_path: Path) -> None:
         max_input_tokens=1000,
     )
 
-    use_case.execute(pr)
+    await use_case.execute(pr)
 
     assert github.posted_comments == []
     assert len(github.posted_reviews) == 1
     assert github.posted_reviews[0][1] is expected
 
 
-def test_accept_queues_valid_pr_and_returns_202(tmp_path: Path) -> None:
+async def test_accept_queues_valid_pr_and_returns_202(tmp_path: Path) -> None:
     handler = _build_handler(
         FakeGitHub(),
         FileDump(entries=(), total_chars=0),
@@ -224,6 +228,84 @@ def test_accept_queues_valid_pr_and_returns_202(tmp_path: Path) -> None:
         "repository": {"full_name": "o/r"},
         "installation": {"id": 7},
     }
-    code, reason = handler.accept("pull_request", "d4", payload)
+    code, reason = await handler.accept("pull_request", "d4", payload)
     assert code == 202
     assert reason == "queued"
+
+
+# ---------------------------------------------------------------------------
+# Concurrency behavior: Semaphore(N) 이 실제로 동시 실행 상한을 지키는지
+# ---------------------------------------------------------------------------
+
+
+class _SlowEngine:
+    """review() 를 두 단계로 나눈 엔진 — 테스트가 '지금 몇 개가 병렬 실행 중인지' 관찰 가능."""
+
+    def __init__(self) -> None:
+        self.in_flight = 0
+        self.peak = 0
+        self.release = asyncio.Event()
+
+    async def review(self, pr: PullRequest, dump: FileDump) -> ReviewResult:
+        self.in_flight += 1
+        self.peak = max(self.peak, self.in_flight)
+        try:
+            await self.release.wait()
+            return ReviewResult(summary="done", event=ReviewEvent.COMMENT)
+        finally:
+            self.in_flight -= 1
+
+
+async def _queue_two_prs(handler: WebhookHandler) -> None:
+    for n in (1, 2):
+        await handler.accept(
+            "pull_request",
+            f"d-{n}",
+            {
+                "action": "opened",
+                "pull_request": {"draft": False, "number": n},
+                "repository": {"full_name": "o/r"},
+                "installation": {"id": 7},
+            },
+        )
+
+
+async def _run_handler_with_engine(engine: _SlowEngine, concurrency: int) -> None:
+    github = FakeGitHub(pr_to_return=_sample_pr())
+    use_case = ReviewPullRequestUseCase(
+        github=github,
+        repo_fetcher=FakeFetcher(Path(".")),
+        file_collector=FakeCollector(FileDump(entries=(), total_chars=0)),
+        engine=engine,
+        max_input_tokens=1000,
+    )
+    handler = WebhookHandler(
+        secret=SECRET, github=github, use_case=use_case, concurrency=concurrency
+    )
+    await handler.start()
+    try:
+        await _queue_two_prs(handler)
+        # 워커가 작업을 picking up 할 때까지 잠시 대기 (공평한 스케줄링 허용).
+        for _ in range(100):
+            if engine.in_flight > 0:
+                break
+            await asyncio.sleep(0.01)
+        # 한 번 더 양보해 두 번째 워커도 진입할 기회를 준다.
+        await asyncio.sleep(0.05)
+        engine.release.set()
+        # 큐 소진 대기.
+        await asyncio.wait_for(handler._queue.join(), timeout=2.0)  # type: ignore[attr-defined]
+    finally:
+        await handler.stop()
+
+
+async def test_concurrency_1_runs_one_at_a_time() -> None:
+    engine = _SlowEngine()
+    await _run_handler_with_engine(engine, concurrency=1)
+    assert engine.peak == 1
+
+
+async def test_concurrency_2_runs_two_in_parallel() -> None:
+    engine = _SlowEngine()
+    await _run_handler_with_engine(engine, concurrency=2)
+    assert engine.peak == 2
