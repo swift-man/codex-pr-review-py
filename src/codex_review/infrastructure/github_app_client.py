@@ -5,6 +5,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, replace
+from datetime import datetime
 
 import certifi
 import jwt
@@ -86,8 +87,14 @@ class GitHubAppClient:
         # GitHub installation token 은 1시간 유효. 만료 직전 요청이 실패하지 않도록 5분 여유.
         expires_at = time.time() + 55 * 60
         if expires:
+            # GitHub 은 `expires_at` 을 UTC (..Z) 로 반환한다. `time.strptime` 은 타임존 정보를
+            # 버린 naive 값을 반환하고 `time.mktime` 은 **로컬 타임존** 기준으로 해석하므로
+            # 결과가 타임존 오프셋만큼 어긋난다 (예: KST 환경에서 9시간 일찍 만료로 판정).
+            # `datetime.fromisoformat` 에 UTC 오프셋을 명시해 aware 값으로 파싱한 뒤 epoch 변환.
             try:
-                expires_at = time.mktime(time.strptime(expires, "%Y-%m-%dT%H:%M:%SZ"))
+                expires_at = datetime.fromisoformat(
+                    expires.replace("Z", "+00:00")
+                ).timestamp()
             except ValueError:
                 pass
         self._token_cache[installation_id] = _CachedToken(token, expires_at)
