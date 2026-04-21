@@ -1,3 +1,4 @@
+import contextlib
 import json
 import logging
 import re
@@ -33,22 +34,20 @@ def parse_review(raw: str) -> ReviewResult:
 def _extract_json(text: str) -> dict[str, object] | None:
     stripped = text.strip()
     if stripped.startswith("{"):
-        try:
+        # 통째로 JSON 이면 그대로 사용. 파싱 실패는 "JSON 아닐 수 있다" 는 정상 신호이므로 의도적으로 무시.
+        with contextlib.suppress(json.JSONDecodeError):
             return json.loads(stripped)
-        except json.JSONDecodeError:
-            pass
 
     # Codex agentic 실행은 "추론 → 최종 답" 순서로 여러 JSON 조각을 내뱉을 수 있다.
     # 예: 중간에 `{"note": "..."}` 같은 로그 성격의 JSON 이 섞여도 최종 리뷰 JSON 은 맨 뒤.
     # 따라서 뒤에서부터 훑으며 "summary" 키를 가진 첫 후보를 리뷰 결과로 채택한다.
     candidates = _JSON_BLOCK.findall(text)
     for candidate in reversed(candidates):
-        try:
+        # 후보 하나가 JSON 이 아니면 다음 후보로 넘어간다 — JSONDecodeError 는 의도적으로 삼킨다.
+        with contextlib.suppress(json.JSONDecodeError):
             data = json.loads(candidate)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(data, dict) and "summary" in data:
-            return data
+            if isinstance(data, dict) and "summary" in data:
+                return data
     return None
 
 
