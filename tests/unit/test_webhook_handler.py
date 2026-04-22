@@ -316,9 +316,85 @@ async def test_concurrency_2_runs_two_in_parallel() -> None:
     assert engine.peak == 2
 
 
+async def test_stop_preserves_in_flight_work_when_queue_is_full() -> None:
+    """회귀(gemini inline webhook_handler.py:91): 큐가 가득 찼다는 이유로 graceful
+    shutdown 이 즉시 `cancel()` 로 전환되면, 진행 중 리뷰까지 중도 취소된다.
+    수정된 `stop()` 은 `대기 job drop → tombstone 삽입 → 타임아웃` 순서로 동작해야
+    한다. 이 테스트는 '진행 중 리뷰가 정상 완료된 뒤 자연 종료' 됨을 검증한다.
+    """
+    github = FakeGitHub(pr_to_return=_sample_pr())
+
+    review_started = asyncio.Event()
+    completed_reviews: list[int] = []
+    resume = asyncio.Event()
+
+    class _ControlledEngine:
+        """워커가 꺼낸 직후 event 를 set → 테스트에서 큐에 추가 job 을 채워 full 상태로 만든 후
+        resume 을 set 하면 진행 중 리뷰가 정상 완료되도록 한 엔진.
+        """
+        async def review(self, pr: PullRequest, dump: FileDump) -> ReviewResult:
+            review_started.set()
+            await resume.wait()
+            completed_reviews.append(pr.number)
+            return ReviewResult(summary="done", event=ReviewEvent.COMMENT)
+
+    use_case = ReviewPullRequestUseCase(
+        github=github,
+        repo_fetcher=FakeFetcher(Path(".")),
+        file_collector=FakeCollector(FileDump(entries=(), total_chars=0)),
+        engine=_ControlledEngine(),
+        max_input_tokens=1000,
+    )
+    handler = WebhookHandler(
+        secret=SECRET,
+        github=github,
+        use_case=use_case,
+        concurrency=1,
+        queue_maxsize=1,           # 워커 1 + 큐 1 — 두 번째 accept 로 full 상태가 된다.
+        shutdown_timeout=2.0,      # 취소로 빠지지 않도록 충분히 길게.
+    )
+    await handler.start()
+    try:
+        payload = {
+            "action": "opened",
+            "pull_request": {"draft": False, "number": 1},
+            "repository": {"full_name": "o/r"},
+            "installation": {"id": 7},
+        }
+        # 1) 첫 번째 → 워커가 꺼내 review 시작까지 대기.
+        await handler.accept("pull_request", "d-1", payload)
+        await asyncio.wait_for(review_started.wait(), timeout=1.0)
+        # 2) 두 번째 → 큐에 남는다 (queue_depth=1=max)
+        payload2 = {**payload, "pull_request": {"draft": False, "number": 2}}
+        code, reason = await handler.accept("pull_request", "d-2", payload2)
+        assert (code, reason) == (202, "queued")
+        # 3) 이 시점에 stop() 을 호출 — drain 으로 #2 는 drop, 진행 중 #1 은 살아야 한다.
+        stop_task = asyncio.create_task(handler.stop())
+        await asyncio.sleep(0.05)     # drain+tombstone 까지 도달할 시간.
+        assert not stop_task.done(), "shutdown 은 진행 중 리뷰 완료까지 기다려야 한다"
+        # 4) 진행 중 리뷰 완료 허가.
+        resume.set()
+        await asyncio.wait_for(stop_task, timeout=2.0)
+    finally:
+        resume.set()
+
+    # 기대 계약:
+    # - in-flight #1 은 정상 완료 → completed_reviews 에 기록되고 post_review 까지 도달.
+    # - drained #2 는 워커가 꺼내기 전 drop → review() 자체가 호출되지 않음.
+    assert len(completed_reviews) == 1, (
+        f"in-flight 리뷰 1건만 완료돼야 한다 (실제: {completed_reviews})"
+    )
+    assert len(github.posted_reviews) == 1, (
+        "in-flight 리뷰의 post_review 가 정상적으로 호출돼야 한다"
+    )
+
+
 async def test_stop_does_not_deadlock_when_queue_is_full() -> None:
-    """회귀(codex/gemini 지적): 큐가 가득 찬 상태에서 `stop()` 이 `await put(None)` 으로
-    무한 대기하면 안 된다. 타임아웃보다 훨씬 빨리 종료되는지 확인.
+    """회귀(codex/gemini 지적): 큐가 가득 찬 상태에서도 `stop()` 이 유한 시간 안에
+    끝나야 한다. 이전 구현은 `await put(None)` 이 무한 대기했거나, 그 패치조차
+    `put_nowait` 실패 즉시 in-flight 까지 취소했다. 현재 구현은 drain→tombstone→
+    graceful timeout→cancel 순서라서, 워커가 끝나지 않아도 `shutdown_timeout` 을
+    약간 넘기는 선에서 확실히 종료돼야 한다.
     """
     github = FakeGitHub(pr_to_return=_sample_pr())
     # engine.review 가 절대 완료되지 않는 엔진 — 워커는 영원히 busy, 큐는 가득 참.
@@ -360,11 +436,12 @@ async def test_stop_does_not_deadlock_when_queue_is_full() -> None:
     # 3) 이후 들어오는 건 503 queue-full. 그래도 stop 은 블록되면 안 됨.
 
     started = asyncio.get_running_loop().time()
-    # put_nowait + 즉시 취소 경로를 타면 shutdown_timeout(0.5s) 보다 훨씬 빨리 종료된다.
+    # drain 으로 대기 job 버린 뒤 tombstone, 워커는 블로킹이라 timeout 후 cancel 경로.
+    # → `shutdown_timeout`(0.5s) + 약간의 cleanup 시간 안에 반드시 끝나야 한다.
     await asyncio.wait_for(handler.stop(), timeout=2.0)
     elapsed = asyncio.get_running_loop().time() - started
 
-    # 1.5s 이내 종료면 "블록 없이 즉시 취소 경로" 를 탄 것.
+    # 1.5s 이내 종료면 "블록 없이 정상적인 종료 경로" 를 탄 것.
     assert elapsed < 1.5, f"stop() 이 {elapsed:.2f}s 걸림 — 큐 full 시 블록됐을 가능성"
 
     # teardown

@@ -148,6 +148,55 @@ async def test_remote_url_is_restored_even_when_fetch_fails(
     assert restored_url == "https://github.com/o/r.git"
 
 
+async def test_run_kills_subprocess_and_reraises_on_cancel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """회귀(codex inline git_repo_fetcher.py:138): `_run()` 가 취소될 때 생성된 하위 git
+    프로세스를 `kill()/wait()` 로 정리하지 않으면, 토큰이 들어간 remote URL 로 백그라운드
+    통신을 계속하거나 프로세스 누수가 발생한다.
+    """
+    kill_calls: list[int] = []
+    wait_calls: list[int] = []
+
+    class _HangingProc:
+        returncode: int | None = None
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            # 호출자가 `cancel()` 할 때까지 영원히 대기 — 실제 communicate 의 취소 경로를 모사.
+            await asyncio.Event().wait()
+            return b"", b""  # pragma: no cover - 도달 불가
+
+        def kill(self) -> None:
+            kill_calls.append(1)
+            self.returncode = -9
+
+        async def wait(self) -> int:
+            wait_calls.append(1)
+            return -9
+
+    async def fake_create(*_args: Any, **_kwargs: Any) -> _HangingProc:
+        return _HangingProc()
+
+    monkeypatch.setattr(
+        "codex_review.infrastructure.git_repo_fetcher.asyncio.create_subprocess_exec",
+        fake_create,
+    )
+
+    task = asyncio.create_task(
+        git_repo_fetcher._run(["git", "clone", "https://x-access-token:S@h/r.git", "/tmp"])
+    )
+    # `_run` 안의 `communicate()` 대기 지점까지 진입할 시간을 준다.
+    await asyncio.sleep(0.02)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # 취소 전파 이전에 하위 프로세스가 반드시 정리돼야 한다 — 토큰 누수·좀비 프로세스 방지.
+    assert kill_calls, "취소 시 proc.kill() 이 호출돼야 한다"
+    assert wait_calls, "취소 시 proc.wait() 로 수거까지 이뤄져야 한다"
+
+
 async def test_remote_url_restored_on_cancellation_too(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

@@ -77,25 +77,36 @@ class WebhookHandler:
         )
 
     async def stop(self) -> None:
-        """Graceful shutdown — 진행 중 리뷰는 완료시키고 큐 잔여는 drain 후 종료.
+        """Graceful shutdown — 진행 중 리뷰는 끝까지, 큐 대기분은 drop 후 종료.
 
-        큐가 가득 찬 상태에서도 `stop()` 이 블록되면 안 된다. 이전 구현은
-        `await self._queue.put(None)` 이 큐 가득 시 무한 대기해, 짧은 graceful window
-        안에 종료를 보장하지 못했다.
-        수정: tombstone 은 `put_nowait` 로 비블로킹 주입 → 하나라도 실패하면 즉시 강제
-        취소 경로로 전환해 빠른 종료를 보장한다.
+        순서:
+          1) 큐에서 '아직 워커가 꺼내지 않은' job 을 먼저 비운다 (GitHub 가 재전송하거나
+             운영자가 수동 재처리). busy 워커 본인은 건드리지 않으므로 진행 중 리뷰는
+             그대로 완료까지 진행된다.
+          2) 이제 확보된 큐 공간에 worker 수만큼 tombstone 을 `put_nowait` — 블로킹 없음.
+          3) `shutdown_timeout` 동안 tombstone 도달 후 자연 종료를 기다린다.
+          4) 타임아웃을 초과하면 그때서야 `cancel()` 로 강제 종료.
+
+        이전 구현은 큐가 가득 찬 상태에서 `put_nowait` 이 실패하자마자 즉시
+        `_cancel_workers()` 로 진행 중 리뷰까지 죽였다 — Gemini 지적.
         """
-        enqueued = 0
+        dropped = self._drain_pending_jobs()
+
+        failed_tombstone = False
         for _ in self._workers:
             try:
                 self._queue.put_nowait(None)
-                enqueued += 1
             except asyncio.QueueFull:
-                # 나머지 tombstone 은 못 넣으므로 즉시 강제 취소 경로로 전환.
+                # maxsize < concurrency 인 엣지 케이스에만 해당. graceful 보장이 어렵다.
+                logger.warning(
+                    "cannot enqueue tombstone after draining %d job(s); "
+                    "queue_maxsize=%d < concurrency=%d",
+                    dropped, self._queue.maxsize, self._concurrency,
+                )
+                failed_tombstone = True
                 break
 
-        if enqueued == len(self._workers):
-            # 정상 경로: 모든 워커에 tombstone 전달됨. 진행 중 작업 완료 후 자연 종료.
+        if not failed_tombstone:
             try:
                 async with asyncio.timeout(self._shutdown_timeout):
                     await asyncio.gather(*self._workers, return_exceptions=True)
@@ -106,10 +117,6 @@ class WebhookHandler:
                 )
                 self._cancel_workers()
         else:
-            logger.warning(
-                "webhook queue full at shutdown (tombstones %d/%d); cancelling workers",
-                enqueued, len(self._workers),
-            )
             self._cancel_workers()
 
         # 최종 정리 — CancelledError 는 정상 신호로 suppress, 다른 예외는 가시성 위해 로그.
@@ -121,7 +128,35 @@ class WebhookHandler:
                     logger.exception("worker task crashed during shutdown")
 
         self._workers.clear()
-        logger.info("webhook handler stopped")
+        logger.info(
+            "webhook handler stopped (dropped %d pending job(s) at shutdown)", dropped
+        )
+
+    def _drain_pending_jobs(self) -> int:
+        """큐에 남아 있는 `WebhookJob` 만 버려서 tombstone 삽입 공간을 확보.
+
+        이 메서드는 워커가 실제로 '처리 중' 인 job 은 건드리지 않는다 — 그 job 은 이미
+        `queue.get()` 으로 꺼내져 워커 로컬 상태에 있기 때문. 따라서 '취소하지 않고
+        완료까지 기다린다' 는 graceful 의 계약은 유지된다.
+
+        tombstone(None) 이 어떤 이유로 이미 들어 있다면 다시 삽입할 것이므로 여기서
+        함께 비워도 무방하다.
+        """
+        dropped = 0
+        while True:
+            try:
+                item = self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            self._queue.task_done()
+            if item is None:
+                continue
+            dropped += 1
+            logger.warning(
+                "dropping pending webhook at shutdown: %s#%d (delivery=%s)",
+                item.repo.full_name, item.number, item.delivery_id,
+            )
+        return dropped
 
     def _cancel_workers(self) -> None:
         for task in self._workers:
