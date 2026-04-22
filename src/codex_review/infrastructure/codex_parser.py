@@ -4,7 +4,25 @@ import logging
 import re
 
 from codex_review.domain import Finding, ReviewEvent, ReviewResult
-from codex_review.domain.finding import SEVERITY_MUST_FIX, SEVERITY_SUGGEST
+from codex_review.domain.finding import (
+    SEVERITY_CRITICAL,
+    SEVERITY_MINOR,
+    SEVERITY_SUGGESTION,
+    VALID_SEVERITIES,
+)
+
+# 레거시 값 → 새 4단계 매핑. 이전 프롬프트가 "must_fix"/"suggest" 만 쓰던 시기의
+# 응답도 무해하게 받아들이기 위함 — 신규 프롬프트 배포 직후 쌓여 있던 작업 큐 방어.
+_LEGACY_SEVERITY_ALIASES: dict[str, str] = {
+    "must_fix": SEVERITY_CRITICAL,
+    "mustfix": SEVERITY_CRITICAL,
+    "must-fix": SEVERITY_CRITICAL,
+    "blocker": SEVERITY_CRITICAL,
+    "suggest": SEVERITY_SUGGESTION,
+    "nit": SEVERITY_MINOR,
+    "nitpick": SEVERITY_MINOR,
+    "info": SEVERITY_SUGGESTION,
+}
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +40,17 @@ def parse_review(raw: str) -> ReviewResult:
 
     event = _parse_event(payload.get("event"))
     findings = tuple(_parse_findings(payload.get("comments")))
+
+    # 모델 프롬프트에 `critical/major → REQUEST_CHANGES` 규칙을 명시했지만 LLM 이 가끔
+    # COMMENT 로 내려보낸다 (자기 확신 부족·프롬프트 경합). 차단 등급 계약을 코드 레벨에서
+    # 보장해 심각한 지적이 APPROVE/COMMENT 로 묻히지 않도록 강제 승격.
+    # APPROVE 는 그대로 둔다 — 모델이 "아무 이슈 없음" 을 단언한 상태에서 반례가 있으면
+    # 리뷰 결과 자체가 비일관이라 운영자가 볼 수 있도록 그대로 게시.
+    if (
+        event == ReviewEvent.COMMENT
+        and any(f.is_blocking for f in findings)
+    ):
+        event = ReviewEvent.REQUEST_CHANGES
 
     return ReviewResult(
         summary=str(payload.get("summary", "")).strip() or "요약 없음",
@@ -81,10 +110,20 @@ def _parse_findings(raw: object) -> list[Finding]:
 
 
 def _coerce_severity(value: object) -> str:
+    """4단계 등급 중 하나로 변환. 모르는 값/레거시 값/비문자열은 안전한 기본값으로 강등.
+
+    - 공백·대소문자·하이픈/언더스코어 차이는 흡수한다.
+    - 이전 스키마의 "must_fix"/"suggest" 등은 `_LEGACY_SEVERITY_ALIASES` 로 승격/매핑.
+    - 그 외는 `suggestion` — Finding 생성자에서도 같은 강등을 수행하므로 이중 안전망.
+    """
     if not isinstance(value, str):
-        return SEVERITY_SUGGEST
+        return SEVERITY_SUGGESTION
     normalized = value.strip().lower().replace("-", "_")
-    return SEVERITY_MUST_FIX if normalized == SEVERITY_MUST_FIX else SEVERITY_SUGGEST
+    if normalized in VALID_SEVERITIES:
+        return normalized
+    if normalized in _LEGACY_SEVERITY_ALIASES:
+        return _LEGACY_SEVERITY_ALIASES[normalized]
+    return SEVERITY_SUGGESTION
 
 
 def _coerce_line(value: object) -> int | None:

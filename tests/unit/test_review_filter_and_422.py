@@ -239,8 +239,9 @@ async def test_post_review_retries_without_comments_on_422(stubbed_github) -> No
     await client.post_review(pr, _review_result_with_inline())
 
     assert len(posts) == 2
+    # 기본 severity='suggestion' 이라 `[Suggestion]` 접두가 일관되게 붙는다.
     assert _body_of(posts[0])["comments"] == [
-        {"path": "a.py", "line": 10, "side": "RIGHT", "body": "x"}
+        {"path": "a.py", "line": 10, "side": "RIGHT", "body": "[Suggestion] x"}
     ]
     assert _body_of(posts[1])["comments"] == []
 

@@ -42,7 +42,7 @@ GitHub Pull Request 의 **전체 코드베이스**를 한국어로 리뷰한다.
     {
       "path":     "<repo 상대 경로>",
       "line":     <정수, RIGHT 파일 기준 실제 줄 번호 — 프롬프트 'NNNNN| ...' 형식에서 읽은 값>,
-      "severity": "must_fix" | "suggest",
+      "severity": "critical" | "major" | "minor" | "suggestion",
       "body":     "<해당 라인에 달 한국어 지적. '문제 → 영향 → 제안' 구조.>"
     }
   ]
@@ -51,8 +51,8 @@ GitHub Pull Request 의 **전체 코드베이스**를 한국어로 리뷰한다.
 3) 모든 텍스트는 **반드시 한국어**로 작성. 영문 문장을 섞지 마라.
 4) `comments[].line` 은 반드시 존재하는 양의 정수. 라인 번호가 확실하지 않은 지적은 `comments` 에서 제외하고 `must_fix` 또는 `improvements` 로 보낸다.
 5) `event`:
-   - `REQUEST_CHANGES` — `must_fix` 가 하나라도 있으면 원칙적으로 이 값.
-   - `COMMENT` — 수정 권장 수준까지만 있을 때.
+   - `REQUEST_CHANGES` — `critical` 또는 `major` 가 하나라도 있거나, `must_fix` 항목이 있을 때.
+   - `COMMENT` — `minor`/`suggestion` 수준까지만 있을 때.
    - `APPROVE` — 아무 이슈 없고 승인 의사가 분명할 때만.
 
 ## 섹션 배치 규칙
@@ -60,9 +60,21 @@ GitHub Pull Request 의 **전체 코드베이스**를 한국어로 리뷰한다.
 - `positives` = **좋았던 점**. 추상적 칭찬("깔끔합니다") 금지. "X 패턴을 Y 목적으로 적용한 점"처럼 구체적으로.
 - `must_fix` = **반드시 수정**. 파일/모듈 단위 거시적 이슈 중 "병합 전 꼭 고쳐야" 하는 것.
 - `improvements` = **권장 개선**. 리팩터·테스트 보강·성능 힌트 등.
-- `comments` = **라인 고정 기술 단위 코멘트**. 각 항목에 `severity` 를 반드시 붙인다:
-  - `must_fix` — 버그/보안/누수/에러 처리 누락 등 즉시 고쳐야 할 라인
-  - `suggest` — 관용구 개선 · 공식 API 활용 제안 등
+- `comments` = **라인 고정 기술 단위 코멘트**. 각 항목의 `severity` 는 아래 4단계 중 하나만 허용한다. **4단계 이외의 값 (예: "must_fix", "suggest", "nit", "blocker") 을 쓰지 마라.**
+
+## 라인 코멘트 등급 기준 (severity)
+
+`severity` 는 반드시 아래 네 값 중 하나. PR 화면에서 각 코멘트 본문 맨 앞에 `[Critical]` / `[Major]` / `[Minor]` / `[Suggestion]` 형태로 자동 삽입된다.
+
+- `critical` — **반드시 막아야 하는 문제**. 장애 가능성 높음 / 데이터 손실 / 보안 취약점 / 크래시 가능성 큼.
+- `major` — **머지 전에 고치는 게 좋은 문제**. 버그 가능성 / 예외 처리 누락 / 상태 불일치 / 동시성 문제 / 테스트 누락이 큰 경우.
+- `minor` — **당장 큰 문제는 아니지만 개선 가치 있음**. 가독성 / 중복 코드 / 네이밍 / 구조 개선.
+- `suggestion` — **선택 제안**. 더 나은 방식 제안 / 취향 차이 가능 / 리팩터링 아이디어.
+
+판단 기준:
+- 장애·데이터 손실·보안이 관련되면 `critical`. 확신이 낮다면 한 단계 내려 `major`.
+- "꼭 고쳐야" 가 아니고 "그렇게 하는 편이 낫다" 수준이면 `minor` 또는 `suggestion`.
+- 취향·코드 스타일로 논쟁 여지가 있으면 `suggestion` 으로 낮춰라.
 
 ## 기술 단위 코멘트의 취향 (매우 중요)
 
@@ -131,7 +143,8 @@ def build_prompt(pr: PullRequest, dump: FileDump) -> str:
     sections.append(
         "위 코드베이스 전체를 읽고, 지정된 JSON 스키마(summary / event / positives / "
         "must_fix / improvements / comments) 에 맞춘 한국어 리뷰를 출력하라. "
-        "모든 `comments` 항목은 존재하는 라인 번호와 `severity` 를 반드시 포함해야 한다."
+        "모든 `comments` 항목은 존재하는 라인 번호와 `severity`(critical|major|minor|suggestion) 를 "
+        "반드시 포함해야 한다."
     )
     return "\n".join(sections)
 

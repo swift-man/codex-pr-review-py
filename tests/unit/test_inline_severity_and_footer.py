@@ -21,26 +21,52 @@ from codex_review.domain import (
     ReviewEvent,
     ReviewResult,
 )
-from codex_review.domain.finding import SEVERITY_MUST_FIX, SEVERITY_SUGGEST
+from codex_review.domain.finding import (
+    SEVERITY_CRITICAL,
+    SEVERITY_MAJOR,
+    SEVERITY_MINOR,
+    SEVERITY_SUGGESTION,
+)
 from codex_review.infrastructure.github_app_client import (
     GitHubAppClient,
     _finding_to_comment,
 )
 
 
-def test_finding_to_comment_prefixes_must_fix_body() -> None:
+def test_finding_to_comment_prefixes_critical_with_bracket_label() -> None:
     body = _finding_to_comment(
-        Finding(path="a.py", line=1, body="None 체크 누락", severity=SEVERITY_MUST_FIX)
+        Finding(path="a.py", line=1, body="None 체크 누락", severity=SEVERITY_CRITICAL)
     )
-    assert body["body"].startswith("🔴 **반드시 수정**")
-    assert "None 체크 누락" in body["body"]
+    assert body["body"] == "[Critical] None 체크 누락"
 
 
-def test_finding_to_comment_leaves_suggest_body_unprefixed() -> None:
+def test_finding_to_comment_prefixes_major_with_bracket_label() -> None:
     body = _finding_to_comment(
-        Finding(path="a.py", line=1, body="pathlib.Path 사용 고려", severity=SEVERITY_SUGGEST)
+        Finding(path="a.py", line=1, body="예외 처리 누락", severity=SEVERITY_MAJOR)
     )
-    assert body["body"] == "pathlib.Path 사용 고려"
+    assert body["body"] == "[Major] 예외 처리 누락"
+
+
+def test_finding_to_comment_prefixes_minor_with_bracket_label() -> None:
+    body = _finding_to_comment(
+        Finding(path="a.py", line=1, body="네이밍 개선", severity=SEVERITY_MINOR)
+    )
+    assert body["body"] == "[Minor] 네이밍 개선"
+
+
+def test_finding_to_comment_prefixes_suggestion_with_bracket_label() -> None:
+    """핵심 계약: 접두는 **항상** 붙는다 — 과거 suggest 가 접두 없이 나가던 동작은 버림.
+    등급이 낮다고 해서 접두를 생략하면 리뷰어가 각 코멘트의 등급을 추론해야 한다.
+    """
+    body = _finding_to_comment(
+        Finding(path="a.py", line=1, body="pathlib.Path 사용 고려", severity=SEVERITY_SUGGESTION)
+    )
+    assert body["body"] == "[Suggestion] pathlib.Path 사용 고려"
+
+
+def test_finding_defaults_to_suggestion_when_severity_omitted() -> None:
+    body = _finding_to_comment(Finding(path="a.py", line=1, body="힌트"))
+    assert body["body"] == "[Suggestion] 힌트"
 
 
 def _pr() -> PullRequest:
@@ -97,7 +123,7 @@ async def capturing_client(
 async def test_post_review_sends_severity_prefixed_comments_and_model_footer(
     capturing_client: tuple[GitHubAppClient, list[httpx.Request]],
 ) -> None:
-    """회귀 방지: severity 접두 + footer 가 실제 POST 페이로드에 함께 들어간다."""
+    """회귀 방지: `[등급] 내용` 접두 + footer 가 실제 POST 페이로드에 함께 들어간다."""
     client, posts = capturing_client
 
     result = ReviewResult(
@@ -107,7 +133,11 @@ async def test_post_review_sends_severity_prefixed_comments_and_model_footer(
         findings=(
             Finding(
                 path="a.py", line=10, body="덮어쓰기 경쟁",
-                severity=SEVERITY_MUST_FIX,
+                severity=SEVERITY_CRITICAL,
+            ),
+            Finding(
+                path="a.py", line=11, body="취향 차이지만 고려",
+                severity=SEVERITY_SUGGESTION,
             ),
         ),
     )
@@ -116,10 +146,11 @@ async def test_post_review_sends_severity_prefixed_comments_and_model_footer(
     assert len(posts) == 1
     posted = json.loads(posts[0].content.decode("utf-8"))
 
-    # (1) 본문 섹션: 반드시 수정 + footer
+    # (1) 본문 섹션: 반드시 수정 + footer 는 그대로 유지.
     assert "**🔴 반드시 수정할 사항**" in posted["body"]
     assert posted["body"].rstrip().endswith("<code>gpt-5.4</code></sub>")
 
-    # (2) 인라인 코멘트: severity 접두 적용
-    assert len(posted["comments"]) == 1
-    assert posted["comments"][0]["body"].startswith("🔴 **반드시 수정**")
+    # (2) 인라인 코멘트: 등급별 대괄호 접두 — 모든 항목에 일관되게.
+    assert len(posted["comments"]) == 2
+    assert posted["comments"][0]["body"] == "[Critical] 덮어쓰기 경쟁"
+    assert posted["comments"][1]["body"] == "[Suggestion] 취향 차이지만 고려"
