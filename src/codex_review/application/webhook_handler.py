@@ -23,6 +23,28 @@ _DEFAULT_SHUTDOWN_TIMEOUT = 60.0
 _DEFAULT_QUEUE_MULTIPLIER = 10
 
 
+def _coerce_positive_int(value: object) -> int | None:
+    """webhook payload 의 `pull_request.number`, `installation.id` 처럼 반드시 양의
+    정수여야 하는 필드를 안전하게 변환한다.
+
+    - bool 은 `isinstance(True, int) == True` 때문에 `int(...)` 가 조용히 1/0 으로
+      통과시킨다 → 명시적으로 차단 (webhook payload 에 bool 이 오면 스키마 위반).
+    - 그 외 변환 실패(문자열·None·dict·float) 는 `None` 으로 수렴시켜 호출자가
+      400 을 돌려주도록 한다.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if isinstance(value, str):
+        try:
+            parsed = int(value)
+        except ValueError:
+            return None
+        return parsed if parsed > 0 else None
+    return None
+
+
 @dataclass(frozen=True)
 class WebhookJob:
     delivery_id: str
@@ -203,10 +225,18 @@ class WebhookHandler:
             return 400, "invalid-payload"
         owner, name = repo_full.split("/", 1)
 
-        number = int(pr.get("number", 0))
-        installation_id = int(payload.get("installation", {}).get("id", 0))
-        if number == 0 or installation_id == 0:
-            dlog.warning("missing number=%s or installation_id=%s", number, installation_id)
+        # 외부 입력 경계 — `int(...)` 직접 호출은 악의적 payload (중첩 dict, "NaN", bool 등)
+        # 에서 ValueError/TypeError 를 던져 FastAPI 가 500 으로 올려 보낸다. 모든 타입 오류는
+        # 일관되게 400 으로 수렴시키는 편이 운영·공격 탐지 측면에서 안전.
+        installation = payload.get("installation")
+        raw_installation_id = installation.get("id") if isinstance(installation, dict) else None
+        number = _coerce_positive_int(pr.get("number"))
+        installation_id = _coerce_positive_int(raw_installation_id)
+        if number is None or installation_id is None:
+            dlog.warning(
+                "invalid or missing number=%r or installation_id=%r",
+                pr.get("number"), raw_installation_id,
+            )
             return 400, "invalid-payload"
 
         job = WebhookJob(
