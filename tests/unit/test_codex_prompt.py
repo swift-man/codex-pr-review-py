@@ -43,6 +43,25 @@ def test_prompt_requires_line_numbers_and_severity_for_comments() -> None:
     assert "반드시" in prompt
 
 
+def test_prompt_declares_four_severity_levels() -> None:
+    """회귀: LLM 에 네 단계 등급(critical/major/minor/suggestion) 을 명확히 지시한다."""
+    prompt = build_prompt(_pr(), FileDump(entries=(), total_chars=0))
+    # 각 값이 JSON 스키마 선언에 등장해야 한다.
+    assert '"critical"' in prompt
+    assert '"major"' in prompt
+    assert '"minor"' in prompt
+    assert '"suggestion"' in prompt
+    # 각 등급의 판단 기준 키워드가 함께 설명돼야 모델이 의미 있게 고른다.
+    assert "장애" in prompt or "데이터 손실" in prompt
+    assert "버그 가능성" in prompt
+    assert "가독성" in prompt
+    assert "선택 제안" in prompt or "리팩터링" in prompt
+    # 레거시 값을 쓰지 말라는 명시적 경고.
+    assert "must_fix" in prompt  # must_fix 섹션 자체는 유지되므로 단어 존재는 OK
+    # 다만 severity 에서는 네 값만 허용됨이 명시돼야 한다.
+    assert "4단계 이외의 값" in prompt or "네 값 중 하나" in prompt
+
+
 def test_prompt_lists_review_priority() -> None:
     """1~8 우선순위 리스트가 프롬프트에 포함돼 모델이 이 순서로 훑도록 한다."""
     prompt = build_prompt(_pr(), FileDump(entries=(), total_chars=0))

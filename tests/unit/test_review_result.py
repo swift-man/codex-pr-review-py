@@ -1,5 +1,10 @@
 from codex_review.domain import Finding, ReviewEvent, ReviewResult
-from codex_review.domain.finding import SEVERITY_MUST_FIX, SEVERITY_SUGGEST
+from codex_review.domain.finding import (
+    SEVERITY_CRITICAL,
+    SEVERITY_MAJOR,
+    SEVERITY_MINOR,
+    SEVERITY_SUGGESTION,
+)
 
 
 def test_render_body_includes_four_sections() -> None:
@@ -55,17 +60,33 @@ def test_render_body_does_not_include_model_footer() -> None:
     assert "<sub>" not in body
 
 
-def test_finding_default_severity_is_suggest() -> None:
+def test_finding_default_severity_is_suggestion() -> None:
     f = Finding(path="a.py", line=1, body="x")
-    assert f.severity == SEVERITY_SUGGEST
-    assert f.is_must_fix is False
+    assert f.severity == SEVERITY_SUGGESTION
+    assert f.is_blocking is False
+    assert f.label == "Suggestion"
 
 
-def test_finding_unknown_severity_falls_back_to_suggest() -> None:
-    f = Finding(path="a.py", line=1, body="x", severity="critical")
-    assert f.severity == SEVERITY_SUGGEST
+def test_finding_unknown_severity_falls_back_to_suggestion() -> None:
+    f = Finding(path="a.py", line=1, body="x", severity="apocalyptic")
+    assert f.severity == SEVERITY_SUGGESTION
+    assert f.label == "Suggestion"
 
 
-def test_finding_must_fix_severity_marks_is_must_fix_true() -> None:
-    f = Finding(path="a.py", line=1, body="x", severity=SEVERITY_MUST_FIX)
-    assert f.is_must_fix is True
+def test_finding_blocking_severities_are_critical_and_major() -> None:
+    crit = Finding(path="a.py", line=1, body="x", severity=SEVERITY_CRITICAL)
+    major = Finding(path="a.py", line=1, body="x", severity=SEVERITY_MAJOR)
+    minor = Finding(path="a.py", line=1, body="x", severity=SEVERITY_MINOR)
+    suggestion = Finding(path="a.py", line=1, body="x", severity=SEVERITY_SUGGESTION)
+    assert crit.is_blocking is True
+    assert major.is_blocking is True
+    assert minor.is_blocking is False
+    assert suggestion.is_blocking is False
+
+
+def test_finding_label_is_human_readable_for_each_severity() -> None:
+    """`[Label]` 접두로 직접 쓰이므로 대소문자·공백이 계약이다."""
+    assert Finding(path="a", line=1, body="x", severity=SEVERITY_CRITICAL).label == "Critical"
+    assert Finding(path="a", line=1, body="x", severity=SEVERITY_MAJOR).label == "Major"
+    assert Finding(path="a", line=1, body="x", severity=SEVERITY_MINOR).label == "Minor"
+    assert Finding(path="a", line=1, body="x", severity=SEVERITY_SUGGESTION).label == "Suggestion"

@@ -311,9 +311,11 @@ class GitHubAppClient:
 
 
 def _finding_to_comment(f: Finding) -> dict[str, object]:
-    # 심각도에 따라 본문 앞에 시각적 구분 접두를 붙인다. PR 화면에서 수십 개 라인 코멘트가
-    # 붙을 때 "반드시 수정" 건을 한눈에 찾기 위함. 기본(suggest)은 접두 없이 깔끔히 유지.
-    body = f"🔴 **반드시 수정** — {f.body}" if f.is_must_fix else f.body
+    # PR 화면에서 수십 개 라인 코멘트가 쌓일 때 등급별로 한눈에 훑기 위해 본문 최상단에
+    # `[Critical]` / `[Major]` / `[Minor]` / `[Suggestion]` 접두를 **일관되게** 붙인다.
+    # 접두는 등급에 따라 없거나 있거나 달라지지 않음 — 리뷰어가 "이 코멘트는 어떤 등급인가"
+    # 를 추론할 필요 없이 즉시 읽을 수 있도록 한다.
+    body = f"[{f.label}] {f.body}"
     return {"path": f.path, "line": f.line, "side": "RIGHT", "body": body}
 
 
