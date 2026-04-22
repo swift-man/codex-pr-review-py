@@ -234,7 +234,10 @@ class GitHubAppClient:
 
 
 def _finding_to_comment(f: Finding) -> dict[str, object]:
-    return {"path": f.path, "line": f.line, "side": "RIGHT", "body": f.body}
+    # 심각도에 따라 본문 앞에 시각적 구분 접두를 붙인다. PR 화면에서 수십 개 라인 코멘트가
+    # 붙을 때 "반드시 수정" 건을 한눈에 찾기 위함. 기본(suggest)은 접두 없이 깔끔히 유지.
+    body = f"🔴 **반드시 수정** — {f.body}" if f.is_must_fix else f.body
+    return {"path": f.path, "line": f.line, "side": "RIGHT", "body": body}
 
 
 __all__ = ["GitHubAppClient", "ReviewEvent"]
