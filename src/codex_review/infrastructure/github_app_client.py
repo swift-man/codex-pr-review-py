@@ -1,3 +1,4 @@
+import contextlib
 import json
 import logging
 import ssl
@@ -86,10 +87,9 @@ class GitHubAppClient:
         # GitHub installation token 은 1시간 유효. 만료 직전 요청이 실패하지 않도록 5분 여유.
         expires_at = time.time() + 55 * 60
         if expires:
-            try:
+            # 포맷이 어긋나면 5분 여유가 걸린 기본값을 그대로 사용한다 (의도적 무시).
+            with contextlib.suppress(ValueError):
                 expires_at = time.mktime(time.strptime(expires, "%Y-%m-%dT%H:%M:%SZ"))
-            except ValueError:
-                pass
         self._token_cache[installation_id] = _CachedToken(token, expires_at)
         return token
 
