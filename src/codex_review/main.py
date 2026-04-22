@@ -10,6 +10,7 @@ from codex_review.application.review_pr_use_case import ReviewPullRequestUseCase
 from codex_review.application.webhook_handler import WebhookHandler
 from codex_review.config import Settings
 from codex_review.infrastructure.codex_cli_engine import CodexAuthError, CodexCliEngine
+from codex_review.infrastructure.diff_context_collector import DiffContextCollector
 from codex_review.infrastructure.file_dump_collector import FileDumpCollector
 from codex_review.infrastructure.git_repo_fetcher import GitRepoFetcher
 from codex_review.infrastructure.github_app_client import (
@@ -61,12 +62,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 logger.error("codex auth preflight failed:\n%s", exc)
                 raise
 
+            # 컨텍스트 예산 초과 시 자동 diff-only 모드 fallback 에 쓰일 collector.
+            # 리뷰를 아예 포기하는 대신 PR unified patch 만 가지고라도 리뷰를 돌린다.
+            diff_collector = DiffContextCollector()
+
             use_case = ReviewPullRequestUseCase(
                 github=github,
                 repo_fetcher=repo_fetcher,
                 file_collector=collector,
                 engine=engine,
                 max_input_tokens=settings.codex_max_input_tokens,
+                diff_context_collector=diff_collector,
             )
             handler = WebhookHandler(
                 secret=settings.github_webhook_secret,

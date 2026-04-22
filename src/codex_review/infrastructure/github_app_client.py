@@ -160,6 +160,7 @@ class GitHubAppClient:
         # per_page=100 은 GitHub 허용 최대치라 PR 이 큰 경우의 라운드트립 수를 최소화.
         changed: list[str] = []
         diff_right_lines: dict[str, frozenset[int]] = {}
+        diff_patches: dict[str, str] = {}
         files: Any = first_page
         while True:
             if not isinstance(files, list) or not files:
@@ -169,7 +170,8 @@ class GitHubAppClient:
                 changed.append(path)
                 # GitHub 는 큰 diff / rename / delete / binary 상태에서 `patch` 키를 생략한다.
                 # 그 파일에 대한 인라인 코멘트는 use-case 필터에서 전부 사라지므로 운영자가
-                # 알아볼 수 있도록 경고 로그로 남긴다.
+                # 알아볼 수 있도록 경고 로그로 남긴다. diff-only fallback 모드에서는
+                # 이 파일을 통째로 리뷰에서 제외하고 본문 배지에 명시한다.
                 patch = f.get("patch")
                 if patch is None:
                     logger.warning(
@@ -180,6 +182,8 @@ class GitHubAppClient:
                         path,
                         f.get("status"),
                     )
+                else:
+                    diff_patches[path] = str(patch)
                 diff_right_lines[path] = parse_right_lines(patch)
             if not next_url:
                 break
@@ -203,6 +207,7 @@ class GitHubAppClient:
             installation_id=installation_id,
             is_draft=bool(pr_data.get("draft", False)),
             diff_right_lines=diff_right_lines,
+            diff_patches=diff_patches,
         )
 
     async def post_review(self, pr: PullRequest, result: ReviewResult) -> None:

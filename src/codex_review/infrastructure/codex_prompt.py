@@ -1,4 +1,4 @@
-from codex_review.domain import FileDump, FileEntry, PullRequest
+from codex_review.domain import DUMP_MODE_DIFF, FileDump, FileEntry, PullRequest
 
 SYSTEM_RULES = """\
 당신은 시니어 소프트웨어 엔지니어이자 엄격한 PR 리뷰어다.
@@ -113,7 +113,79 @@ GitHub Pull Request 의 **전체 코드베이스**를 한국어로 리뷰한다.
 """
 
 
+# Diff-only 모드 전용 시스템 규칙. 전체 코드베이스를 볼 수 없다는 사실을 명시적으로
+# 인지시키고, 보이지 않는 코드에 대한 추측성 지적을 차단한다.
+DIFF_MODE_SYSTEM_RULES = """\
+당신은 시니어 소프트웨어 엔지니어이자 엄격한 PR 리뷰어다. 한국어로 리뷰한다.
+
+## 이번 리뷰의 특수 조건 (반드시 숙지)
+
+이 리뷰는 **PR 의 unified diff patch 만** 제공받는다. 전체 파일 내용이나 주변 코드베이스
+맥락은 볼 수 없다. 이유: 전체 코드베이스 컨텍스트가 LLM 입력 예산을 초과했기 때문에
+서버가 자동으로 diff-only 모드로 전환했다.
+
+## 이 모드의 리뷰 규칙
+
+- **보이지 않는 코드에 대한 추측 금지**. diff 로 변경된 라인, 그 위아래의 `@@ -..+..@@`
+  hunk 헤더가 제공한 ±3 라인 컨텍스트 안에서만 판단한다.
+- 특정 함수·클래스·import 의 존재 여부나 시그니처를 모르는 상태에서 단정하지 마라.
+  필요하면 "<X> 의 정의가 diff 에 없어 확정 불가하지만 … 가능성" 같은 가능성 표현을 써라.
+- diff 에 포함되지 않은 파일의 리뷰 지적은 **하지 마라** — 어차피 인라인으로 달리지
+  않고 거절된다.
+- 확신이 없으면 지적하지 않는다. 이 모드에서는 **적은 수의 고확신 지적** 만 달아라.
+
+## 리뷰 우선순위 (이 순서로 훑어라)
+
+1) 버그 가능성 (변경 라인 자체에서 보이는 null/경계/누수/에러 처리 누락)
+2) 보안 · 데이터 손실 가능성
+3) 동시성 / 스레드 안전성 — diff 에서 관찰 가능한 수준
+4) 테스트 누락 (변경된 로직에 대응 테스트가 같은 PR 에 없으면 지적)
+5) 가독성 · 네이밍 — 등급은 `minor` 이하로 유지
+
+스타일 지적은 1~4 를 모두 본 뒤에만, 그것도 정말 필요할 때만.
+
+## 출력 형식
+
+- `positives` / `must_fix` / `improvements` / `comments` 를 가진 JSON 객체 한 개만 출력.
+- 전체 스키마·등급 체계는 표준 리뷰와 동일 (critical|major|minor|suggestion).
+- `comments[].line` 은 반드시 diff 의 RIGHT-side(`+` 측) 에 실제 존재하는 양의 정수여야 한다.
+  hunk 헤더 `@@ -a,b +c,d @@` 에서 `c` 가 첫 RIGHT 라인 번호다. 거기부터 `+` 와 ` `(공백)
+  접두의 라인마다 +1 씩 증가한다 (`-` 접두 라인은 RIGHT 에 없으므로 번호를 올리지 않는다).
+- 라인 번호가 확실하지 않으면 `comments` 에서 제외하고 `must_fix` 또는 `improvements`
+  섹션으로 보낸다.
+- 모든 텍스트는 한국어. 영문 섞지 마라.
+
+## 라인 코멘트 등급 (동일)
+
+- `critical` — 장애 / 데이터 손실 / 보안 / 크래시 가능성 큼.
+- `major`    — 버그 · 예외 누락 · 상태 불일치 · 동시성 · 큰 테스트 누락.
+- `minor`    — 가독성 · 중복 · 네이밍 · 구조.
+- `suggestion` — 대안 · 취향 · 리팩터링 제안.
+
+취향·스타일로 논쟁 여지가 있으면 `suggestion` 으로 낮춘다.
+
+## diff 해석 가이드
+
+- 각 파일은 `=== PATCH: <path> ===` 헤더로 시작한다.
+- `@@ -a,b +c,d @@` 는 LEFT(삭제 전) a..a+b-1 라인이 RIGHT(변경 후) c..c+d-1 로 대응됨을 의미.
+- ` ` (공백) 접두 = 양쪽에 동일하게 존재하는 컨텍스트 라인.
+- `+` 접두 = RIGHT 에 새로 추가된 라인 (인라인 코멘트 타깃).
+- `-` 접두 = LEFT 에서 제거된 라인 (인라인 코멘트 대상 아님).
+"""
+
+
 def build_prompt(pr: PullRequest, dump: FileDump) -> str:
+    """모드에 따라 시스템 규칙과 파일 포매팅을 다르게 내보낸다.
+
+    - `full` (기본) — 전체 파일 내용 + 1-based 줄 번호 접두.
+    - `diff`       — unified patch 원문 + diff-only 전용 규칙.
+    """
+    if dump.mode == DUMP_MODE_DIFF:
+        return _build_diff_prompt(pr, dump)
+    return _build_full_prompt(pr, dump)
+
+
+def _build_full_prompt(pr: PullRequest, dump: FileDump) -> str:
     sections: list[str] = [
         SYSTEM_RULES.strip(),
         "",
@@ -147,6 +219,68 @@ def build_prompt(pr: PullRequest, dump: FileDump) -> str:
         "반드시 포함해야 한다."
     )
     return "\n".join(sections)
+
+
+def _build_diff_prompt(pr: PullRequest, dump: FileDump) -> str:
+    """diff-only 모드 프롬프트. `FileEntry.content` 는 이미 `=== PATCH: … ===` 헤더를
+    포함한 unified patch 원문이므로 그대로 이어 붙인다.
+    """
+    patch_missing = dump.patch_missing
+    budget_trimmed = tuple(p for p in dump.excluded if p not in set(patch_missing))
+
+    sections: list[str] = [
+        DIFF_MODE_SYSTEM_RULES.strip(),
+        "",
+        "=== PR METADATA ===",
+        f"repo: {pr.repo.full_name}",
+        f"number: {pr.number}",
+        f"title: {pr.title}",
+        f"base: {pr.base_ref}  head: {pr.head_ref}",
+        f"head_sha: {pr.head_sha}",
+        f"changed_files ({len(pr.changed_files)}):",
+        *(f"  - {p}" for p in pr.changed_files),
+        "",
+        "=== PR BODY ===",
+        pr.body or "(empty)",
+        "",
+        _diff_mode_scope_notice(dump, patch_missing, budget_trimmed),
+        "",
+        "=== PATCHES ===",
+        "아래는 PR 의 unified patch 원문이다. 각 파일은 `=== PATCH: <path> ===` 헤더 다음에 온다.",
+        "",
+    ]
+    for entry in dump.entries:
+        sections.append(entry.content)
+        sections.append("")
+
+    sections.append(
+        "위 diff 만을 근거로 지정된 JSON 스키마(summary / event / positives / "
+        "must_fix / improvements / comments) 에 맞춘 한국어 리뷰를 출력하라. "
+        "보이지 않는 코드에 대한 추측은 금지한다. `comments[].line` 은 반드시 RIGHT-side "
+        "실제 라인 번호여야 한다."
+    )
+    return "\n".join(sections)
+
+
+def _diff_mode_scope_notice(
+    dump: FileDump, patch_missing: tuple[str, ...], budget_trimmed: tuple[str, ...]
+) -> str:
+    """diff 모드에서 모델이 인지해야 할 리뷰 범위 정보."""
+    lines = [
+        "=== SCOPE (diff-only mode) ===",
+        f"diff 로 제공된 파일 수: {len(dump.entries)}",
+    ]
+    if patch_missing:
+        lines.append(
+            f"GitHub 가 patch 를 주지 않아 리뷰 불가 파일 ({len(patch_missing)}):"
+        )
+        lines.extend(f"  - {p}" for p in patch_missing[:50])
+    if budget_trimmed:
+        lines.append(
+            f"예산 초과로 diff 조차 포함되지 못한 파일 ({len(budget_trimmed)}):"
+        )
+        lines.extend(f"  - {p}" for p in budget_trimmed[:50])
+    return "\n".join(lines)
 
 
 def _budget_notice(dump: FileDump) -> str:
