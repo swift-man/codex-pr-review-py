@@ -1,3 +1,4 @@
+import contextlib
 import json
 import logging
 import ssl
@@ -91,12 +92,11 @@ class GitHubAppClient:
             # 버린 naive 값을 반환하고 `time.mktime` 은 **로컬 타임존** 기준으로 해석하므로
             # 결과가 타임존 오프셋만큼 어긋난다 (예: KST 환경에서 9시간 일찍 만료로 판정).
             # `datetime.fromisoformat` 에 UTC 오프셋을 명시해 aware 값으로 파싱한 뒤 epoch 변환.
-            try:
+            # 포맷이 어긋나면 5분 여유가 걸린 기본값을 그대로 사용한다 (의도적 무시).
+            with contextlib.suppress(ValueError):
                 expires_at = datetime.fromisoformat(
                     expires.replace("Z", "+00:00")
                 ).timestamp()
-            except ValueError:
-                pass
         self._token_cache[installation_id] = _CachedToken(token, expires_at)
         return token
 
@@ -241,7 +241,10 @@ class GitHubAppClient:
 
 
 def _finding_to_comment(f: Finding) -> dict[str, object]:
-    return {"path": f.path, "line": f.line, "side": "RIGHT", "body": f.body}
+    # 심각도에 따라 본문 앞에 시각적 구분 접두를 붙인다. PR 화면에서 수십 개 라인 코멘트가
+    # 붙을 때 "반드시 수정" 건을 한눈에 찾기 위함. 기본(suggest)은 접두 없이 깔끔히 유지.
+    body = f"🔴 **반드시 수정** — {f.body}" if f.is_must_fix else f.body
+    return {"path": f.path, "line": f.line, "side": "RIGHT", "body": body}
 
 
 __all__ = ["GitHubAppClient", "ReviewEvent"]
