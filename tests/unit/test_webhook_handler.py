@@ -152,6 +152,103 @@ async def test_accept_ignores_draft(tmp_path: Path) -> None:
     assert reason == "skipped-draft"
 
 
+async def test_accept_rejects_non_numeric_pr_number(tmp_path: Path) -> None:
+    """회귀(codex 리뷰 지적): `int(pr["number"])` 가 ValueError 를 던져 FastAPI 가 500 을
+    반환하지 않도록, 비정상 payload 는 전부 400 으로 수렴돼야 한다.
+    """
+    handler = _build_handler(
+        FakeGitHub(),
+        FileDump(entries=(), total_chars=0),
+        ReviewResult(summary="ok", event=ReviewEvent.COMMENT),
+        tmp_path,
+    )
+    payload: dict[str, Any] = {
+        "action": "opened",
+        "pull_request": {"draft": False, "number": "abc"},   # 공격 payload
+        "repository": {"full_name": "o/r"},
+        "installation": {"id": 7},
+    }
+    code, reason = await handler.accept("pull_request", "bad-1", payload)
+    assert (code, reason) == (400, "invalid-payload")
+
+
+async def test_accept_rejects_bool_installation_id(tmp_path: Path) -> None:
+    """`isinstance(True, int) is True` 때문에 `int(True) == 1` 이 조용히 통과된다.
+    bool 은 스키마 위반이므로 400 으로 거절해야 한다.
+    """
+    handler = _build_handler(
+        FakeGitHub(),
+        FileDump(entries=(), total_chars=0),
+        ReviewResult(summary="ok", event=ReviewEvent.COMMENT),
+        tmp_path,
+    )
+    payload: dict[str, Any] = {
+        "action": "opened",
+        "pull_request": {"draft": False, "number": 1},
+        "repository": {"full_name": "o/r"},
+        "installation": {"id": True},
+    }
+    code, reason = await handler.accept("pull_request", "bad-2", payload)
+    assert (code, reason) == (400, "invalid-payload")
+
+
+async def test_accept_rejects_missing_installation_field(tmp_path: Path) -> None:
+    handler = _build_handler(
+        FakeGitHub(),
+        FileDump(entries=(), total_chars=0),
+        ReviewResult(summary="ok", event=ReviewEvent.COMMENT),
+        tmp_path,
+    )
+    payload: dict[str, Any] = {
+        "action": "opened",
+        "pull_request": {"draft": False, "number": 1},
+        "repository": {"full_name": "o/r"},
+        # installation 필드 자체 없음
+    }
+    code, reason = await handler.accept("pull_request", "bad-3", payload)
+    assert (code, reason) == (400, "invalid-payload")
+
+
+async def test_accept_rejects_malformed_installation_field(tmp_path: Path) -> None:
+    """`installation` 이 dict 가 아니라 string/list 인 경우 `.get` 체이닝에서
+    AttributeError 가 날 수 있다 — 검증 헬퍼가 방어해야 한다.
+    """
+    handler = _build_handler(
+        FakeGitHub(),
+        FileDump(entries=(), total_chars=0),
+        ReviewResult(summary="ok", event=ReviewEvent.COMMENT),
+        tmp_path,
+    )
+    payload: dict[str, Any] = {
+        "action": "opened",
+        "pull_request": {"draft": False, "number": 1},
+        "repository": {"full_name": "o/r"},
+        "installation": "oops-not-a-dict",
+    }
+    code, reason = await handler.accept("pull_request", "bad-4", payload)
+    assert (code, reason) == (400, "invalid-payload")
+
+
+async def test_accept_accepts_numeric_string_pr_number(tmp_path: Path) -> None:
+    """관대한 호환성: GitHub 자체는 숫자로 주지만, 프록시·재시도 툴을 거치며 문자열
+    "123" 이 올 수 있다. 값만 양의 정수로 변환 가능하면 수용.
+    """
+    handler = _build_handler(
+        FakeGitHub(),
+        FileDump(entries=(), total_chars=0),
+        ReviewResult(summary="ok", event=ReviewEvent.COMMENT),
+        tmp_path,
+    )
+    payload: dict[str, Any] = {
+        "action": "opened",
+        "pull_request": {"draft": False, "number": "42"},
+        "repository": {"full_name": "o/r"},
+        "installation": {"id": "7"},
+    }
+    code, reason = await handler.accept("pull_request", "ok-str", payload)
+    assert (code, reason) == (202, "queued")
+
+
 async def test_accept_ignores_unsupported_action(tmp_path: Path) -> None:
     handler = _build_handler(
         FakeGitHub(),
