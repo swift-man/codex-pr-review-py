@@ -8,7 +8,7 @@ from codex_review.domain.finding import (
     SEVERITY_CRITICAL,
     SEVERITY_MINOR,
     SEVERITY_SUGGESTION,
-    _VALID_SEVERITIES,
+    VALID_SEVERITIES,
 )
 
 # 레거시 값 → 새 4단계 매핑. 이전 프롬프트가 "must_fix"/"suggest" 만 쓰던 시기의
@@ -40,6 +40,17 @@ def parse_review(raw: str) -> ReviewResult:
 
     event = _parse_event(payload.get("event"))
     findings = tuple(_parse_findings(payload.get("comments")))
+
+    # 모델 프롬프트에 `critical/major → REQUEST_CHANGES` 규칙을 명시했지만 LLM 이 가끔
+    # COMMENT 로 내려보낸다 (자기 확신 부족·프롬프트 경합). 차단 등급 계약을 코드 레벨에서
+    # 보장해 심각한 지적이 APPROVE/COMMENT 로 묻히지 않도록 강제 승격.
+    # APPROVE 는 그대로 둔다 — 모델이 "아무 이슈 없음" 을 단언한 상태에서 반례가 있으면
+    # 리뷰 결과 자체가 비일관이라 운영자가 볼 수 있도록 그대로 게시.
+    if (
+        event == ReviewEvent.COMMENT
+        and any(f.is_blocking for f in findings)
+    ):
+        event = ReviewEvent.REQUEST_CHANGES
 
     return ReviewResult(
         summary=str(payload.get("summary", "")).strip() or "요약 없음",
@@ -108,7 +119,7 @@ def _coerce_severity(value: object) -> str:
     if not isinstance(value, str):
         return SEVERITY_SUGGESTION
     normalized = value.strip().lower().replace("-", "_")
-    if normalized in _VALID_SEVERITIES:
+    if normalized in VALID_SEVERITIES:
         return normalized
     if normalized in _LEGACY_SEVERITY_ALIASES:
         return _LEGACY_SEVERITY_ALIASES[normalized]

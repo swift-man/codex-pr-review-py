@@ -30,9 +30,12 @@ SEVERITY_LABELS: dict[str, str] = {
 }
 
 # 머지를 막아야 한다고 보는 등급 집합. `event` 결정·본문 강조 등에 쓴다.
-_BLOCKING_SEVERITIES = {SEVERITY_CRITICAL, SEVERITY_MAJOR}
+BLOCKING_SEVERITIES = frozenset({SEVERITY_CRITICAL, SEVERITY_MAJOR})
 
-_VALID_SEVERITIES = set(SEVERITY_LABELS)
+# 공개 계약 — 인프라 계층(파서)이 "허용된 등급인지" 를 검사할 때 참조한다.
+# 이전 `_VALID_SEVERITIES` 는 언더스코어 prefix 로 '내부' 처럼 보였지만 실제로는
+# 레이어 간 import 됐다. 이름을 public 으로 바꾸고 frozenset 으로 잠가 오·수정을 막는다.
+VALID_SEVERITIES = frozenset(SEVERITY_LABELS)
 
 
 @dataclass(frozen=True)
@@ -51,7 +54,7 @@ class Finding:
 
     def __post_init__(self) -> None:
         # 파서가 잘못된 값을 흘려도 안전하도록 항상 네 등급 중 하나로 수렴.
-        if self.severity not in _VALID_SEVERITIES:
+        if self.severity not in VALID_SEVERITIES:
             object.__setattr__(self, "severity", SEVERITY_SUGGESTION)
 
     @property
@@ -62,4 +65,4 @@ class Finding:
     @property
     def is_blocking(self) -> bool:
         """Critical 또는 Major — 머지 전에 반드시 해소돼야 하는 등급."""
-        return self.severity in _BLOCKING_SEVERITIES
+        return self.severity in BLOCKING_SEVERITIES

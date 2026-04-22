@@ -10,7 +10,8 @@ GitHub App 웹훅으로 PR 이벤트를 받아, 레포를 체크아웃하고 전
 - diff가 아닌 **전체 코드베이스**를 컨텍스트로 사용
 - Codex CLI를 `subprocess`로 호출 → 로그인된 ChatGPT 계정의 OAuth 토큰 사용 (기본 모델 `gpt-5.4`)
 - 한국어 리뷰 고정 출력 (JSON 스키마 강제)
-- **리뷰 3분류**: `좋은 점` / `개선할 점` / `기술 단위 코멘트(라인 고정)`
+- **리뷰 4섹션**: `좋은 점` / `🔴 반드시 수정할 사항` / `💡 권장 개선 사항` / `기술 단위 코멘트(라인 고정)`
+- 라인 코멘트는 **4단계 등급**(`Critical` / `Major` / `Minor` / `Suggestion`) 으로 분류되고, PR 화면에서 각 코멘트 본문 최상단에 `[Critical] …` 형태의 대괄호 접두로 표기
 - 라인 고정 코멘트만 인라인으로 게시, 라인 번호 없는 지적은 `개선할 점`으로 이동
 - 기초 타입(`str`/`list`/`String`/`Array` 등) 수준의 팁 배제, **Python/TypeScript/React 공식 상위 API**에 초점
 - 리뷰 큐는 **제한된 동시성**으로 처리 — `REVIEW_CONCURRENCY` env(기본 `1`=직렬)로 동시 리뷰 개수 조절. 같은 저장소에 대한 checkout 은 저장소별 lock 으로 직렬화되어 작업 트리 경쟁을 방지
@@ -108,7 +109,7 @@ REPO_FULL_NAME=owner/repo PR_NUMBER=1 INSTALLATION_ID=1234567 \
 - 우선순위: 변경 파일 → `src/app/lib/pkg/...` → 기타
 - 예산 초과 시: 변경 파일이 빠졌다면 리뷰를 **수행하지 않고** PR에 안내 코멘트만 게시
 
-## 리뷰 출력 (3분류)
+## 리뷰 출력 (4섹션 + 4단계 라인 등급)
 
 모델은 아래 JSON 스키마를 엄격히 따라야 합니다.
 
@@ -117,16 +118,33 @@ REPO_FULL_NAME=owner/repo PR_NUMBER=1 INSTALLATION_ID=1234567 \
   "summary": "...",
   "event": "COMMENT | REQUEST_CHANGES | APPROVE",
   "positives":    ["좋은 점 ..."],
-  "improvements": ["개선할 점 (파일/모듈/아키텍처 단위) ..."],
+  "must_fix":     ["반드시 수정할 사항 (파일/모듈 단위) ..."],
+  "improvements": ["권장 개선 사항 (파일/모듈 단위) ..."],
   "comments": [
-    {"path": "src/x.py", "line": 42, "body": "기술 단위 코멘트 (라인 고정)"}
+    {
+      "path": "src/x.py",
+      "line": 42,
+      "severity": "critical | major | minor | suggestion",
+      "body": "기술 단위 코멘트 (라인 고정)"
+    }
   ]
 }
 ```
 
-- `positives` → PR 리뷰 본문 "**좋은 점**" 섹션으로 렌더
-- `improvements` → 본문 "**개선할 점**" 섹션으로 렌더
-- `comments` → GitHub 인라인 리뷰 코멘트로 라인에 붙음 (**line 필수**)
+- `positives` / `must_fix` / `improvements` → PR 리뷰 본문 해당 섹션으로 렌더
+- `comments` → GitHub 인라인 리뷰 코멘트로 라인에 붙음 (**line / severity 필수**)
+- 인라인 코멘트 본문은 등급별 대괄호 접두와 함께 게시됨 — 예: `[Critical] None 체크 누락…`
+
+### 라인 코멘트 등급 기준
+
+| 등급 | 의미 | 대표 예시 |
+|---|---|---|
+| `critical` | 반드시 막아야 하는 문제 | 장애 가능성 · 데이터 손실 · 보안 취약점 · 크래시 |
+| `major` | 머지 전에 고치는 게 좋은 문제 | 버그 가능성 · 예외 처리 누락 · 상태 불일치 · 동시성 · 큰 테스트 누락 |
+| `minor` | 당장 큰 문제는 아니지만 개선 가치 있음 | 가독성 · 중복 · 네이밍 · 구조 개선 |
+| `suggestion` | 선택 제안 | 대안 · 취향 차이 · 리팩터링 아이디어 |
+
+`critical` / `major` 가 하나라도 있으면 리뷰 이벤트는 자동으로 `REQUEST_CHANGES` 로 승격됩니다(모델이 `COMMENT` 로 내려도 서버가 덮어씀).
 
 ### 기술 단위 코멘트의 취향
 

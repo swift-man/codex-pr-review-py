@@ -85,6 +85,57 @@ def test_parse_unknown_severity_falls_back_to_suggestion() -> None:
     assert result.findings[0].severity == SEVERITY_SUGGESTION
 
 
+def test_parse_upgrades_comment_to_request_changes_when_blocking_finding_present() -> None:
+    """회귀(codex PR #15 피드백): 모델이 `event:"COMMENT"` 로 내려보내도 Critical 또는
+    Major 라인 지적이 있으면 자동으로 REQUEST_CHANGES 로 승격. 그러지 않으면 심각한
+    지적이 묻혀 "승인 리뷰처럼" 게시되는 사고가 난다.
+    """
+    raw = """
+    {
+      "summary": "ok",
+      "event": "COMMENT",
+      "comments": [
+        {"path": "a.py", "line": 1, "severity": "critical", "body": "None 체크 누락"}
+      ]
+    }
+    """
+    assert parse_review(raw).event == ReviewEvent.REQUEST_CHANGES
+
+    raw_major = raw.replace("critical", "major")
+    assert parse_review(raw_major).event == ReviewEvent.REQUEST_CHANGES
+
+
+def test_parse_keeps_comment_event_when_only_minor_or_suggestion() -> None:
+    """비차단 등급만 있을 때는 event 를 건드리지 않는다."""
+    raw = """
+    {
+      "summary": "ok",
+      "event": "COMMENT",
+      "comments": [
+        {"path": "a.py", "line": 1, "severity": "minor", "body": "네이밍"},
+        {"path": "a.py", "line": 2, "severity": "suggestion", "body": "대안"}
+      ]
+    }
+    """
+    assert parse_review(raw).event == ReviewEvent.COMMENT
+
+
+def test_parse_preserves_explicit_approve_even_with_blocking_finding() -> None:
+    """모델이 APPROVE 를 단언한 상태에서 Critical 지적이 있으면 내부 모순 —
+    서버가 덮어쓰지 않고 그대로 둬서 운영자/리뷰어가 비일관을 감지할 수 있게 한다.
+    (COMMENT 만 자동 승격 대상)"""
+    raw = """
+    {
+      "summary": "ok",
+      "event": "APPROVE",
+      "comments": [
+        {"path": "a.py", "line": 1, "severity": "critical", "body": "x"}
+      ]
+    }
+    """
+    assert parse_review(raw).event == ReviewEvent.APPROVE
+
+
 def test_parse_legacy_must_fix_alias_normalizes_to_critical() -> None:
     """전환기 호환: 이전 프롬프트의 `must_fix`/`suggest`/`nit` 도 새 등급으로 흡수한다."""
     raw = """
