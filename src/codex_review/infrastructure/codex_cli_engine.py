@@ -3,6 +3,7 @@ import logging
 
 from codex_review.domain import FileDump, PullRequest, ReviewResult
 
+from ._subprocess import kill_and_reap
 from .codex_parser import parse_review
 from .codex_prompt import build_prompt
 
@@ -50,13 +51,12 @@ class CodexCliEngine:
             async with asyncio.timeout(10.0):
                 stdout, stderr = await proc.communicate()
         except TimeoutError as exc:
-            proc.kill()
-            await proc.wait()
+            # kill 후 wait 자체에도 상한을 둔다 — 수거가 지연돼도 서버 기동 경로가 붙잡히지 않도록.
+            await kill_and_reap(proc)
             raise CodexAuthError("codex login status 가 10초 내에 응답하지 않았습니다.") from exc
         except asyncio.CancelledError:
             # 워커 취소/서버 종료 신호 시 하위 프로세스가 좀비로 남지 않도록 반드시 정리.
-            proc.kill()
-            await proc.wait()
+            await kill_and_reap(proc)
             raise
 
         # codex CLI 는 TTY 가 아닐 때 상태 메시지를 stderr 로 보내므로 두 스트림 모두 확인.
@@ -96,16 +96,16 @@ class CodexCliEngine:
             async with asyncio.timeout(self._timeout_sec):
                 stdout, stderr = await proc.communicate(input=prompt.encode("utf-8"))
         except TimeoutError as exc:
-            proc.kill()
-            await proc.wait()
+            # 하위 프로세스 수거 대기에도 상한 — 큐 동시성 상한이 `CODEX_TIMEOUT_SEC` 을
+            # 훨씬 넘겨 점유되는 걸 막는다 (codex 리뷰 지적).
+            await kill_and_reap(proc)
             raise RuntimeError(
                 f"codex exec timed out after {self._timeout_sec}s"
             ) from exc
         except asyncio.CancelledError:
             # 서버 종료/워커 취소 시 `codex exec` 하위 프로세스가 좀비로 남아 토큰·쿼터·CPU 를
             # 계속 소모하지 않도록 확실히 kill + wait 후 취소를 재전파한다.
-            proc.kill()
-            await proc.wait()
+            await kill_and_reap(proc)
             raise
 
         if proc.returncode != 0:

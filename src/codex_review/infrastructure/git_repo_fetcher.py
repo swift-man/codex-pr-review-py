@@ -1,5 +1,4 @@
 import asyncio
-import contextlib
 import logging
 import re
 import weakref
@@ -9,6 +8,8 @@ from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 from codex_review.domain import PullRequest
+
+from ._subprocess import kill_and_reap
 
 logger = logging.getLogger(__name__)
 
@@ -141,10 +142,8 @@ async def _run(cmd: list[str], *, check: bool = True) -> None:
     except asyncio.CancelledError:
         # `communicate()` 가 취소되면 생성된 git 하위 프로세스가 orphan 으로 남아,
         # 토큰이 포함된 remote URL 로 백그라운드 통신을 계속할 수 있다.
-        # `CodexCliEngine` 과 동일한 패턴으로 `kill + wait` 후 취소를 전파.
-        proc.kill()
-        with contextlib.suppress(Exception):
-            await proc.wait()
+        # 공용 `kill_and_reap` 헬퍼로 수거 대기에도 상한을 두고 취소를 전파.
+        await kill_and_reap(proc)
         raise
     if check and proc.returncode != 0:
         # git 이 stderr 에 토큰을 포함한 URL 을 실어 보낼 수 있다 (fatal: unable to access ...).
