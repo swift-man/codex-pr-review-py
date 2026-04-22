@@ -186,7 +186,13 @@ def _make_http_error(code: int) -> urllib.error.HTTPError:
 
 
 @pytest.fixture()
-def client_with_stubbed_urlopen(monkeypatch: pytest.MonkeyPatch):
+def stubbed_github(monkeypatch: pytest.MonkeyPatch):
+    """Factory fixture — urlopen 와 jwt 를 가짜로 묶고, GitHubAppClient 생성자
+    파라미터를 자유롭게 전달할 수 있는 팩토리와 캡처 리스트를 돌려준다.
+
+    private 속성을 직접 건드리지 않고 필요한 인스턴스를 매번 깔끔히 만들도록 설계.
+    반환값: `(make_client, calls, responses)`.
+    """
     calls: list[dict[str, Any]] = []
     responses: list[Any] = []  # filled in per test
 
@@ -207,11 +213,14 @@ def client_with_stubbed_urlopen(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     monkeypatch.setattr(jwt, "encode", lambda *a, **k: "fake.jwt")
 
-    client = GitHubAppClient(app_id=1, private_key_pem="-")
-    # `_token_cache` 내부 구조에 결합된 가짜 객체 주입 대신 public 메서드 자체를
-    # 교체해 테스트 주도권은 유지하되 구현 세부에 묶이지 않게 한다.
-    monkeypatch.setattr(client, "get_installation_token", lambda _iid: "ITOK")
-    return client, calls, responses
+    def make_client(**kwargs: Any) -> GitHubAppClient:
+        client = GitHubAppClient(app_id=1, private_key_pem="-", **kwargs)
+        # `_token_cache` 내부 구조에 손대지 않고 public 메서드 자체를 교체해
+        # 테스트 주도권은 유지하되 구현 세부에 묶이지 않게 한다.
+        monkeypatch.setattr(client, "get_installation_token", lambda _iid: "ITOK")
+        return client
+
+    return make_client, calls, responses
 
 
 def _review_result_with_inline() -> ReviewResult:
@@ -222,8 +231,9 @@ def _review_result_with_inline() -> ReviewResult:
     )
 
 
-def test_post_review_retries_without_comments_on_422(client_with_stubbed_urlopen) -> None:
-    client, calls, responses = client_with_stubbed_urlopen
+def test_post_review_retries_without_comments_on_422(stubbed_github) -> None:
+    make_client, calls, responses = stubbed_github
+    client = make_client()
     # 1st call: 422. 2nd call: 200 (empty response).
     responses.extend([_make_http_error(422), _FakeResponse(b"{}")])
 
@@ -238,13 +248,14 @@ def test_post_review_retries_without_comments_on_422(client_with_stubbed_urlopen
 
 
 def test_post_review_422_retry_also_rerenders_body_without_findings_notice(
-    client_with_stubbed_urlopen,
+    stubbed_github,
 ) -> None:
     """회귀 방지: 재시도 본문이 findings 제거 상태로 다시 렌더링돼야 한다.
     그러지 않으면 '기술 단위 코멘트 N건' 안내가 남아 실제로는 인라인이 없는데도
     있는 것처럼 보이는 거짓 상태가 된다.
     """
-    client, calls, responses = client_with_stubbed_urlopen
+    make_client, calls, responses = stubbed_github
+    client = make_client()
     responses.extend([_make_http_error(422), _FakeResponse(b"{}")])
 
     result = ReviewResult(
@@ -270,8 +281,9 @@ def test_post_review_422_retry_also_rerenders_body_without_findings_notice(
     assert "개선할 점 1" in retry_body
 
 
-def test_post_review_reraises_non_422_http_errors(client_with_stubbed_urlopen) -> None:
-    client, _calls, responses = client_with_stubbed_urlopen
+def test_post_review_reraises_non_422_http_errors(stubbed_github) -> None:
+    make_client, _calls, responses = stubbed_github
+    client = make_client()
     responses.append(_make_http_error(500))
 
     with pytest.raises(urllib.error.HTTPError) as exc:
@@ -279,8 +291,9 @@ def test_post_review_reraises_non_422_http_errors(client_with_stubbed_urlopen) -
     assert exc.value.code == 500
 
 
-def test_post_review_does_not_retry_when_no_comments(client_with_stubbed_urlopen) -> None:
-    client, calls, responses = client_with_stubbed_urlopen
+def test_post_review_does_not_retry_when_no_comments(stubbed_github) -> None:
+    make_client, calls, responses = stubbed_github
+    client = make_client()
     responses.append(_make_http_error(422))
 
     result = ReviewResult(summary="s", event=ReviewEvent.COMMENT)  # no findings
@@ -294,37 +307,12 @@ def test_post_review_does_not_retry_when_no_comments(client_with_stubbed_urlopen
 # ---------------------------------------------------------------------------
 
 
-def _capture_urlopen(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
-    calls: list[dict[str, Any]] = []
-
-    def fake_urlopen(req, *, timeout=None, context=None):
-        body = json.loads(req.data.decode("utf-8")) if req.data else None
-        calls.append({"body": body})
-        return _FakeResponse(b"{}")
-
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
-    monkeypatch.setattr(jwt, "encode", lambda *a, **k: "fake.jwt")
-    return calls
-
-
-def _client_with_token_cache(model_label: str | None = None) -> GitHubAppClient:
-    client = GitHubAppClient(
-        app_id=1, private_key_pem="-", review_model_label=model_label
-    )
-    client._token_cache[7] = type(  # type: ignore[attr-defined]
-        "Tok", (), {"token": "ITOK", "is_valid": lambda self: True}
-    )()
-    return client
-
-
-def test_post_review_appends_model_footer_from_constant_label(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_post_review_appends_model_footer_from_constant_label(stubbed_github) -> None:
     """리뷰 본문 맨 아래에 `review_model_label` 상수가 footer 로 붙는지 확인.
     모델명은 LLM 이 아니라 GitHubAppClient 생성자 상수에서 온다.
     """
-    calls = _capture_urlopen(monkeypatch)
-    client = _client_with_token_cache(model_label="gpt-5.4")
+    make_client, calls, _responses = stubbed_github
+    client = make_client(review_model_label="gpt-5.4")
 
     client.post_review(
         _pr(diff_right_lines={"a.py": frozenset({10})}),
@@ -340,11 +328,9 @@ def test_post_review_appends_model_footer_from_constant_label(
     assert "리뷰 모델" in body
 
 
-def test_post_review_omits_footer_when_label_is_none(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls = _capture_urlopen(monkeypatch)
-    client = _client_with_token_cache(model_label=None)
+def test_post_review_omits_footer_when_label_is_none(stubbed_github) -> None:
+    make_client, calls, _responses = stubbed_github
+    client = make_client(review_model_label=None)
 
     client.post_review(_pr(), ReviewResult(summary="요약", event=ReviewEvent.COMMENT))
 
@@ -353,14 +339,12 @@ def test_post_review_omits_footer_when_label_is_none(
     assert "<sub>" not in body
 
 
-def test_post_review_422_retry_keeps_model_footer(
-    client_with_stubbed_urlopen,
-) -> None:
+def test_post_review_422_retry_keeps_model_footer(stubbed_github) -> None:
     """회귀 방지: 422 재시도 본문도 동일한 모델 footer 를 달고 나가야 한다.
     모델 라벨은 상수라 1차/재시도 모두 같은 문자열이 붙는다.
     """
-    client, calls, responses = client_with_stubbed_urlopen
-    client._review_model_label = "gpt-5.4"  # type: ignore[attr-defined]
+    make_client, calls, responses = stubbed_github
+    client = make_client(review_model_label="gpt-5.4")
     responses.extend([_make_http_error(422), _FakeResponse(b"{}")])
 
     client.post_review(
