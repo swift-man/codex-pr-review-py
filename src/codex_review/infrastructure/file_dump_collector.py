@@ -219,9 +219,18 @@ def _build_dump_sync(
     file_max_bytes: int,
     data_file_max_bytes: int,
 ) -> FileDump:
-    """순수 동기 파일 수집. `collect()` 가 스레드로 오프로드해 호출한다."""
+    """순수 동기 파일 수집. `collect()` 가 스레드로 오프로드해 호출한다.
+
+    두 종류의 제외를 구분한다:
+      - filter_excluded : 바이너리/미디어/크기 한도 등 **정책상 제외**. PR 에 이미지만
+                         변경돼도 무조건 들어간다 — "예산 초과" 신호로 쓰면 안 된다.
+      - budget_trimmed  : 토큰 예산이 부족해 **컨텍스트에서 잘려 나간** 파일.
+                          이것만이 `exceeded_budget` 판정의 근거.
+    이전에는 둘을 합쳐 `excluded` 에 넣어 바이너리 파일 포함 PR 이 "예산 초과" 로 오진됐다.
+    """
     entries: list[FileEntry] = []
-    excluded: list[str] = []
+    filter_excluded: list[str] = []
+    budget_trimmed: list[str] = []
     total_chars = 0
     max_chars = budget.max_chars()
 
@@ -230,19 +239,19 @@ def _build_dump_sync(
         if not abs_path.is_file():
             continue
         if _should_skip(rel_path, abs_path, file_max_bytes, data_file_max_bytes):
-            excluded.append(rel_path)
+            filter_excluded.append(rel_path)
             continue
         try:
             content = abs_path.read_text(encoding="utf-8")
         except (UnicodeDecodeError, OSError):
-            excluded.append(rel_path)
+            filter_excluded.append(rel_path)
             continue
 
         # 32자 여유는 프롬프트에 붙는 "--- FILE: path ---" / 라인 번호 접두사 등 프레이밍
         # 오버헤드 근사치. 정확한 토큰 산정은 아니지만 보수적으로 잡아 예산 초과를 막는다.
         entry_chars = len(content) + len(rel_path) + 32
         if total_chars + entry_chars > max_chars:
-            excluded.append(rel_path)
+            budget_trimmed.append(rel_path)
             continue
 
         entries.append(
@@ -255,15 +264,21 @@ def _build_dump_sync(
         )
         total_chars += entry_chars
 
-    # exceeded:
-    # (1) 변경 파일 중 하나라도 예산 때문에 제외됐다면 리뷰 품질 급락 → exceeded
-    # (2) 전체 예산을 꽉 채웠다면 프롬프트 뒤쪽이 잘렸을 가능성 높음
-    exceeded = any(p for p in excluded if p in changed_set) or total_chars >= max_chars
+    # exceeded_budget: 오직 **예산 때문에 잘린** 경우만 True 로 잡는다.
+    #   (1) 변경 파일 중 하나라도 budget_trimmed 에 있으면 리뷰 품질 급락
+    #   (2) 전체 예산을 꽉 채웠으면 프롬프트 뒤쪽이 잘렸을 가능성
+    exceeded = any(p in changed_set for p in budget_trimmed) or total_chars >= max_chars
+
+    # 운영 관측용 `excluded` 는 두 카테고리 합집합(순서: budget → filter) 으로 유지.
+    # 프롬프트 budget notice 에서 "왜 이 파일이 빠졌는가" 를 운영자가 훑을 수 있게.
+    excluded = budget_trimmed + filter_excluded
 
     logger.info(
-        "file dump: included=%d excluded=%d chars=%d/%d (%.1f%%) exceeded=%s",
+        "file dump: included=%d filter_excluded=%d budget_trimmed=%d "
+        "chars=%d/%d (%.1f%%) exceeded=%s",
         len(entries),
-        len(excluded),
+        len(filter_excluded),
+        len(budget_trimmed),
         total_chars,
         max_chars,
         100.0 * total_chars / max_chars if max_chars else 0.0,
@@ -280,8 +295,11 @@ def _build_dump_sync(
 
 
 async def _git_ls_files(root: Path) -> list[str]:
+    # `-z` : NUL 구분자로 출력 → 한글/공백/따옴표 등 특수문자 파일명도 C-style escape 없이
+    # 원형 그대로 전달된다. 기본 splitlines 경로는 이런 이름을 `"..."` 로 감싸 `Path.is_file()`
+    # 검사가 통째로 실패한다.
     proc = await asyncio.create_subprocess_exec(
-        "git", "-C", str(root), "ls-files",
+        "git", "-C", str(root), "ls-files", "-z",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
@@ -290,7 +308,7 @@ async def _git_ls_files(root: Path) -> list[str]:
         raise RuntimeError(
             f"git ls-files failed: {stderr.decode(errors='replace').strip()}"
         )
-    return [line for line in stdout.decode(errors="replace").splitlines() if line]
+    return [name for name in stdout.decode("utf-8", errors="replace").split("\0") if name]
 
 
 def _sort_by_priority(paths: list[str], changed: set[str]) -> list[str]:

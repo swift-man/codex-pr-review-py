@@ -18,6 +18,10 @@ _SUPPORTED_ACTIONS = {"opened", "synchronize", "reopened", "ready_for_review"}
 # Graceful shutdown 의 기본 타임아웃(초). 진행 중 리뷰가 이보다 오래 걸리면 강제 취소.
 _DEFAULT_SHUTDOWN_TIMEOUT = 60.0
 
+# 큐가 가득 차 거절할 때 운영자가 볼 상한. 기본은 동시성 × 10 으로 잡아 일시적 버스트를
+# 흡수하되 메모리가 무한히 쌓이지 않도록 한다.
+_DEFAULT_QUEUE_MULTIPLIER = 10
+
 
 @dataclass(frozen=True)
 class WebhookJob:
@@ -31,9 +35,9 @@ class WebhookHandler:
     """Verifies webhooks, enqueues review jobs, drains them with bounded concurrency.
 
     구조:
-      asyncio.Queue <- `accept()` 가 넣고
-      N 개의 워커 코루틴 <- 병렬로 꺼내 처리하되, `asyncio.Semaphore(concurrency)` 로
-                         동시 실행 수를 제한. 기본 N=1 (직렬) — 필요 시 env 로 상향.
+      asyncio.Queue(maxsize=Q) <- `accept()` 가 `put_nowait`. 가득 차면 503.
+      N 개의 워커 코루틴         <- 큐에서 꺼내 순차 처리. 워커 수 자체가 동시 실행 상한
+                                     이므로 별도 Semaphore 는 불필요 (Gemini 지적 반영).
     """
 
     def __init__(
@@ -42,17 +46,19 @@ class WebhookHandler:
         github: GitHubClient,
         use_case: ReviewPullRequestUseCase,
         concurrency: int = 1,
+        queue_maxsize: int | None = None,
         shutdown_timeout: float = _DEFAULT_SHUTDOWN_TIMEOUT,
     ) -> None:
         self._secret = secret.encode("utf-8")
         self._github = github
         self._use_case = use_case
         self._concurrency = max(1, concurrency)
-        # `None` 은 종료 신호(tombstone). 큐 pop 시점에 워커가 자연스럽게 빠져나간다 —
-        # 진행 중 `_process` 를 도중에 끊어 리뷰가 유실되는 것을 방지한다.
-        self._queue: asyncio.Queue[WebhookJob | None] = asyncio.Queue()
+        qmax = queue_maxsize if queue_maxsize is not None else (
+            self._concurrency * _DEFAULT_QUEUE_MULTIPLIER
+        )
+        # `None` tombstone 으로 graceful shutdown 신호를 보낸다 — 워커가 pop 시 빠져나옴.
+        self._queue: asyncio.Queue[WebhookJob | None] = asyncio.Queue(maxsize=qmax)
         self._workers: list[asyncio.Task[None]] = []
-        self._sem = asyncio.Semaphore(self._concurrency)
         self._shutdown_timeout = shutdown_timeout
 
     # --- Lifecycle ----------------------------------------------------------
@@ -60,12 +66,15 @@ class WebhookHandler:
     async def start(self) -> None:
         if self._workers:
             return
-        # Semaphore 가 동시 실행 상한을 관리하므로 워커 수를 concurrency 와 맞춰 만들면
-        # "큐에서 꺼내는 일" 과 "실제 실행" 이 모두 병렬 가능.
+        # 워커 개수 = 동시 실행 상한. 각 워커가 큐에서 꺼내 바로 처리하므로 Semaphore 가
+        # 있어도 중복된 락 오버헤드일 뿐이다.
         for i in range(self._concurrency):
             task = asyncio.create_task(self._run(), name=f"review-worker-{i}")
             self._workers.append(task)
-        logger.info("webhook handler started with concurrency=%d", self._concurrency)
+        logger.info(
+            "webhook handler started: concurrency=%d queue_maxsize=%d",
+            self._concurrency, self._queue.maxsize,
+        )
 
     async def stop(self) -> None:
         """Graceful shutdown — 진행 중 리뷰는 완료시키고 큐 잔여는 drain 후 종료.
@@ -87,8 +96,6 @@ class WebhookHandler:
             )
             for task in self._workers:
                 task.cancel()
-            # 취소 후에도 최종 await 로 리소스 정리. CancelledError 는 정상 신호이므로 suppress,
-            # 그 외 예외는 조용히 넘기지 말고 가시성을 위해 exception 로그로 남긴다.
             for task in self._workers:
                 with contextlib.suppress(asyncio.CancelledError):
                     try:
@@ -102,7 +109,7 @@ class WebhookHandler:
     # --- Verification -------------------------------------------------------
 
     def verify_signature(self, signature_header: str | None, body: bytes) -> bool:
-        # 원문 body 로 HMAC 계산. json.loads 후 재직렬화하면 서명이 달라져 정상 요청을 거부.
+        # 원문 body 로 HMAC 계산. json.loads 후 재직렬화하면 서명이 달라져 정상 요청 거부.
         if not signature_header or not signature_header.startswith("sha256="):
             return False
         expected = hmac.new(self._secret, body, hashlib.sha256).hexdigest()
@@ -152,28 +159,37 @@ class WebhookHandler:
             number=number,
             installation_id=installation_id,
         )
-        await self._queue.put(job)
+        # 큐가 가득 차면 즉시 거절 — GitHub 가 재전송하거나 운영자가 원인을 찾도록.
+        # 무제한 큐는 Codex 쿼터 장애·장시간 리뷰 시 메모리와 대기시간을 무한 증가시킬 수 있다.
+        try:
+            self._queue.put_nowait(job)
+        except asyncio.QueueFull:
+            dlog.warning(
+                "webhook queue full (maxsize=%d); rejecting %s#%d",
+                self._queue.maxsize, job.repo.full_name, job.number,
+            )
+            return 503, "queue-full"
+
         dlog.info(
-            "queued review for %s#%d (queue_depth=%d)",
+            "queued review for %s#%d (queue_depth=%d/%d)",
             job.repo.full_name,
             job.number,
             self._queue.qsize(),
+            self._queue.maxsize,
         )
         return 202, "queued"
 
     # --- Worker -------------------------------------------------------------
 
     async def _run(self) -> None:
-        # 동시성 상한은 Semaphore 로 통제. 모든 워커가 같은 세마포어를 공유하므로 워커 수와
-        # 무관하게 순간 병렬 실행 수는 `concurrency` 를 넘지 않는다.
+        # 워커 수가 곧 동시성 상한. 별도 semaphore 없이 바로 처리 — 단순화.
         while True:
             job = await self._queue.get()
             try:
                 if job is None:
                     # Graceful shutdown tombstone. 워커 하나를 종료.
                     return
-                async with self._sem:
-                    await self._process(job)
+                await self._process(job)
             finally:
                 self._queue.task_done()
 

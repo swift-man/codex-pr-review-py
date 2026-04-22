@@ -73,6 +73,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 github=github,
                 use_case=use_case,
                 concurrency=settings.review_concurrency,
+                queue_maxsize=settings.review_queue_maxsize,
             )
             # 요청 핸들러가 handler 를 찾을 수 있게 app state 에 보관.
             app.state.handler = handler

@@ -2,7 +2,7 @@ import asyncio
 import logging
 import ssl
 import time
-from collections import OrderedDict
+import weakref
 from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any
@@ -35,38 +35,27 @@ def _with_model_footer(body: str, model_label: str | None) -> str:
     return body + _MODEL_FOOTER_TEMPLATE.format(label=model_label)
 
 
-# installation_id 별 락을 무한히 쌓지 않도록 상한. 1024 는 현실적 규모(보통 수~수백 개
-# installation)의 10~100배 여유. 넘치면 LRU 로 가장 오래 쓰이지 않은 락을 폐기한다.
-_MAX_TRACKED_INSTALLATIONS = 1024
-
-
 class _LockRegistry:
-    """installation_id → `asyncio.Lock` 매핑을 LRU 상한으로 관리.
+    """installation_id → `asyncio.Lock` — WeakValueDictionary 기반.
 
-    Gemini 의 "장기 실행 시 defaultdict 에 락이 무한히 쌓여 메모리 누수 가능" 지적에 대응.
-    상한을 넘으면 가장 오래 사용되지 않은 항목을 제거한다. 제거 시점에 해당 락을 잡고 있는
-    `async with` 블록이 있다면 그 블록은 자기 지역 변수로 락을 유지하므로 안전하게 완료되고,
-    새로 들어오는 같은 iid 요청은 새 락을 쓰게 되지만 본 애플리케이션의 동시성(최대 N=수 개)
-    규모에서는 경쟁이 사실상 일어나지 않는다.
+    이전 LRU 방식은 잠긴 락까지 `popitem` 으로 evict 할 수 있어 같은 iid 의 다음 요청이
+    새 락을 발급받으면 상호 배제가 깨지는 문제가 있었다. WeakValueDictionary 는 누군가
+    강한 참조(예: `async with lock`)를 쥔 동안은 GC 되지 않고, 사용자가 없어지면 자동
+    수거된다 — 활성 락의 배타성 + 메모리 누수 방지 둘 다 달성.
     """
 
-    def __init__(self, maxsize: int = _MAX_TRACKED_INSTALLATIONS) -> None:
-        self._maxsize = maxsize
-        self._locks: OrderedDict[int, asyncio.Lock] = OrderedDict()
+    def __init__(self) -> None:
+        self._locks: "weakref.WeakValueDictionary[int, asyncio.Lock]" = (
+            weakref.WeakValueDictionary()
+        )
 
     def get(self, installation_id: int) -> asyncio.Lock:
+        # asyncio 는 싱글스레드라 get ↔ assignment 사이 선점이 없어 atomic.
         lock = self._locks.get(installation_id)
-        if lock is not None:
-            self._locks.move_to_end(installation_id)
-            return lock
-        while len(self._locks) >= self._maxsize:
-            self._locks.popitem(last=False)  # evict oldest
-        lock = asyncio.Lock()
-        self._locks[installation_id] = lock
+        if lock is None:
+            lock = asyncio.Lock()
+            self._locks[installation_id] = lock
         return lock
-
-    def __len__(self) -> int:  # for tests / observability
-        return len(self._locks)
 
 
 @dataclass(frozen=True)

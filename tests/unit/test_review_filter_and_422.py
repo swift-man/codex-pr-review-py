@@ -4,7 +4,8 @@
 """
 
 import json
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -70,8 +71,11 @@ class _CapturingGitHub:
 
 
 class _NoopFetcher:
-    async def checkout(self, pr: PullRequest, installation_token: str) -> Path:
-        return Path(".")
+    @asynccontextmanager
+    async def session(
+        self, pr: PullRequest, installation_token: str
+    ) -> AsyncIterator[Path]:
+        yield Path(".")
 
 
 class _ConstCollector:

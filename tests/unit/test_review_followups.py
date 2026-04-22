@@ -7,6 +7,8 @@
 
 import asyncio
 import json
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
@@ -88,26 +90,28 @@ async def test_different_installations_do_not_serialize_token_issue(
         assert peak == 2, "서로 다른 installation 은 병렬로 진행돼야 한다 (peak == 2)"
 
 
-async def test_token_lock_registry_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
-    """회귀 방지(Gemini 재리뷰): 장기 실행 시 락이 무한 누적되지 않는다.
-    maxsize 를 넘어가는 installation_id 가 유입되면 LRU 로 오래된 락부터 폐기.
+async def test_token_lock_registry_does_not_evict_live_locks() -> None:
+    """회귀 방지: 장기 실행 시 락이 무한 누적되지도 않고, 활성 락은 evict 되지도 않아야 한다.
+
+    이전 LRU 방식은 상한 초과 시 `popitem` 으로 잠긴 락까지 버려 상호 배제가 깨질 수 있었다.
+    현재는 `WeakValueDictionary` — 누군가 들고 있으면 살아 있고, 아니면 자동 GC.
     """
     from codex_review.infrastructure.github_app_client import _LockRegistry
 
-    reg = _LockRegistry(maxsize=3)
-    for iid in range(10):
-        reg.get(iid)
-    assert len(reg) == 3, "상한을 넘어가면 오래된 락을 버려야 한다"
+    reg = _LockRegistry()
+    lock_a = reg.get(1)
+    # 같은 key 는 같은 객체 (배타성 유지).
+    assert reg.get(1) is lock_a
 
-    # 최근 사용된 항목이 상한 내에 살아 있는지 — LRU 의미 확인.
-    reg.get(100)
-    reg.get(200)
-    reg.get(100)     # touch 100 → 가장 최근 사용
-    reg.get(300)     # 이때 evict 되는 건 200 (LRU)
-    # 200 에 대한 락 요청을 다시 하면 새 락이 발급됨(같지 않음)
-    lock_100_first = reg.get(100)
-    lock_100_again = reg.get(100)
-    assert lock_100_first is lock_100_again, "살아 있는 항목은 동일 객체"
+    # 살아 있는 락을 들고 있는 동안에도 같은 객체가 계속 반환돼야 한다.
+    async def hold() -> None:
+        async with lock_a:
+            await asyncio.sleep(0.05)
+
+    holder = asyncio.create_task(hold())
+    await asyncio.sleep(0)
+    assert reg.get(1) is lock_a
+    await holder
 
 
 async def test_same_installation_serializes_token_issue(
@@ -275,8 +279,11 @@ class _SlowButFinishingEngine:
 
 
 class _NoopFetcher:
-    async def checkout(self, pr: PullRequest, installation_token: str) -> Path:
-        return Path(".")
+    @asynccontextmanager
+    async def session(
+        self, pr: PullRequest, installation_token: str
+    ) -> AsyncIterator[Path]:
+        yield Path(".")
 
 
 class _NoopCollector:

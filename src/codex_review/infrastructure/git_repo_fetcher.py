@@ -1,6 +1,8 @@
 import asyncio
 import logging
-from collections import OrderedDict
+import weakref
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
@@ -9,46 +11,47 @@ from codex_review.domain import PullRequest
 logger = logging.getLogger(__name__)
 
 
-# 같은 저장소 캐시를 병렬 리뷰가 동시에 건드리면 fetch/checkout/clean 이 섞여
-# 다른 PR 의 head SHA 가 checkout 되거나 작업 트리가 중간 상태로 남는다.
-# 저장소 단위로 직렬화해 이 경쟁을 제거한다. 상한은 현실적 규모의 10배 여유.
-_MAX_TRACKED_REPOS = 256
-
-
 class _RepoLockRegistry:
-    """owner/repo → `asyncio.Lock` 매핑을 LRU 상한으로 관리."""
+    """owner/repo → `asyncio.Lock` — WeakValueDictionary 기반.
 
-    def __init__(self, maxsize: int = _MAX_TRACKED_REPOS) -> None:
-        self._maxsize = maxsize
-        self._locks: OrderedDict[str, asyncio.Lock] = OrderedDict()
+    `popitem` LRU 방식은 잠긴 락까지 evict 될 위험이 있다. WeakValueDictionary 는 누군가
+    강한 참조(예: `async with lock`)를 쥔 동안은 GC 되지 않고, 사용자가 없어지면 자동 수거.
+    → 메모리 누적 방지 + 활성 락의 배타성 보존 두 목표를 모두 달성.
+    """
 
-    def get(self, full_name: str) -> asyncio.Lock:
-        lock = self._locks.get(full_name)
-        if lock is not None:
-            self._locks.move_to_end(full_name)
-            return lock
-        while len(self._locks) >= self._maxsize:
-            self._locks.popitem(last=False)
-        lock = asyncio.Lock()
-        self._locks[full_name] = lock
+    def __init__(self) -> None:
+        # WeakValueDictionary 의 value 참조가 모두 사라지면 자동 삭제.
+        self._locks: "weakref.WeakValueDictionary[str, asyncio.Lock]" = (
+            weakref.WeakValueDictionary()
+        )
+
+    def get(self, key: str) -> asyncio.Lock:
+        # asyncio 는 싱글스레드라 get ↔ setdefault 사이 선점이 없다 — atomic.
+        lock = self._locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._locks[key] = lock
         return lock
 
 
 class GitRepoFetcher:
-    """Async git wrapper. Clones or updates a cached repo and checks out a PR head SHA.
+    """Async git wrapper. session() 컨텍스트 안에서만 작업 트리가 기대 SHA 로 고정된다.
 
-    저장소별 `asyncio.Lock` 으로 동일 저장소의 checkout 이 직렬화된다 —
-    REVIEW_CONCURRENCY≥2 환경에서 같은 레포에 여러 PR 리뷰가 동시에 들어와도
-    작업 트리가 엉키지 않는다.
+    같은 저장소에 대한 다른 session 은 이전 session 의 블록이 끝날 때까지 대기한다 —
+    `git fetch/checkout/clean` 뿐 아니라 블록 내의 파일 읽기까지 완전히 커버.
     """
 
     def __init__(self, cache_dir: Path) -> None:
         self._cache_dir = cache_dir
         self._repo_locks = _RepoLockRegistry()
 
-    async def checkout(self, pr: PullRequest, installation_token: str) -> Path:
+    @asynccontextmanager
+    async def session(
+        self, pr: PullRequest, installation_token: str
+    ) -> AsyncIterator[Path]:
         async with self._repo_locks.get(pr.repo.full_name):
-            return await self._checkout_locked(pr, installation_token)
+            repo_path = await self._checkout_locked(pr, installation_token)
+            yield repo_path
 
     async def _checkout_locked(self, pr: PullRequest, installation_token: str) -> Path:
         repo_path = self._cache_dir / pr.repo.owner / pr.repo.name
@@ -56,15 +59,20 @@ class GitRepoFetcher:
 
         authed_url = _inject_token(pr.clone_url, installation_token)
 
-        if not (repo_path / ".git").exists():
-            logger.info("cloning %s into %s", pr.repo.full_name, repo_path)
-            # --filter=blob:none 은 partial clone — 블롭을 지연 로드해 초기 clone 속도·디스크 절약.
-            await _run(["git", "clone", "--filter=blob:none", authed_url, str(repo_path)])
-        else:
-            # 설치 토큰은 1시간마다 바뀌므로 기존 remote URL 의 토큰을 교체해야 fetch 가 성공.
-            await _run(["git", "-C", str(repo_path), "remote", "set-url", "origin", authed_url])
-
+        # 토큰 주입 시점 → cleanup 까지 전체를 try/finally 로 묶는다. clone 직후나 set-url
+        # 직후 `CancelledError` 가 들어와도 finally 가 실행되어 `.git/config` 에 토큰이 남지
+        # 않는다. clone 이 실패하면 `.git` 자체가 없으니 cleanup 은 그 경우를 체크한다.
         try:
+            if not (repo_path / ".git").exists():
+                logger.info("cloning %s into %s", pr.repo.full_name, repo_path)
+                # --filter=blob:none 은 partial clone — 블롭을 지연 로드해 초기 clone 속도·디스크 절약.
+                await _run(["git", "clone", "--filter=blob:none", authed_url, str(repo_path)])
+            else:
+                # 설치 토큰은 1시간마다 바뀌므로 기존 remote URL 의 토큰을 교체해야 fetch 성공.
+                await _run(
+                    ["git", "-C", str(repo_path), "remote", "set-url", "origin", authed_url]
+                )
+
             # depth=1 로 head SHA 만 얕게 받아 네트워크/디스크 비용 최소화.
             await _run(
                 ["git", "-C", str(repo_path), "fetch", "--depth", "1", "origin", pr.head_sha]
@@ -74,12 +82,12 @@ class GitRepoFetcher:
             # -fdx: 추적 안되는 파일/디렉터리/ignore 대상까지 전부 제거.
             await _run(["git", "-C", str(repo_path), "clean", "-fdx"])
         finally:
-            # 예외가 나든 나지 않든 remote URL 을 원래 값으로 반드시 복구.
-            # 그러지 않으면 `.git/config` 에 installation 토큰이 남아 디스크에 자격 증명이 보존된다.
-            await _run(
-                ["git", "-C", str(repo_path), "remote", "set-url", "origin", pr.clone_url],
-                check=False,
-            )
+            # clone 이 실패하면 .git 자체가 없을 수 있음 — 존재할 때만 복구.
+            if (repo_path / ".git").exists():
+                await _run(
+                    ["git", "-C", str(repo_path), "remote", "set-url", "origin", pr.clone_url],
+                    check=False,
+                )
         return repo_path
 
 

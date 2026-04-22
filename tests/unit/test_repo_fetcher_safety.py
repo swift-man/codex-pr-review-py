@@ -1,10 +1,12 @@
 """Regression coverage for GitRepoFetcher concurrency + secret-handling:
-  - 같은 저장소에 대한 checkout 이 저장소별 lock 으로 직렬화되는지
+  - 같은 저장소에 대한 session 이 lock 으로 직렬화되는지
   - fetch/checkout 실패 시에도 원격 URL 이 원상 복구되는지 (토큰 누수 방지)
   - 디버그 로그에 토큰이 포함된 URL 이 마스킹되어 기록되는지
+  - lock registry 가 WeakValueDictionary 기반이라 활성 락을 evict 하지 않는지
 """
 
 import asyncio
+import gc
 import logging
 from pathlib import Path
 from typing import Any
@@ -32,91 +34,141 @@ def _pr(owner: str = "o", name: str = "r", head: str = "abc") -> PullRequest:
     )
 
 
-async def test_same_repo_checkouts_are_serialized(
+async def test_same_repo_sessions_serialize_across_entire_block(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """같은 저장소 full_name 에 대한 checkout 은 lock 으로 직렬화돼야 한다.
-    다른 저장소는 병렬로 진행될 수 있어야 한다.
+    """중요: session 블록 안에서 대기하는 동안 같은 저장소의 다른 session 은 checkout 시작
+    조차 못 해야 한다 (이전 구현은 checkout 반환과 동시에 락이 풀려 race 발생).
     """
-    in_flight_by_repo: dict[str, int] = {}
-    peak_by_repo: dict[str, int] = {}
+    checkouts_started: list[str] = []
     release = asyncio.Event()
 
     async def fake_run(cmd: list[str], *, check: bool = True) -> None:
-        # 커맨드 인자 중에 저장소 경로를 포함하는 `-C <path>` 가 있으면 그 경로를 키로,
-        # 없으면 clone 케이스이니 두번째 이후 인자에서 path 추출.
-        repo_key = _extract_repo_key(cmd, tmp_path)
-        in_flight_by_repo[repo_key] = in_flight_by_repo.get(repo_key, 0) + 1
-        peak_by_repo[repo_key] = max(
-            peak_by_repo.get(repo_key, 0), in_flight_by_repo[repo_key]
-        )
-        try:
-            await release.wait()
-        finally:
-            in_flight_by_repo[repo_key] -= 1
+        if "fetch" in cmd:
+            checkouts_started.append(_extract_repo_key(cmd, tmp_path))
 
     monkeypatch.setattr(git_repo_fetcher, "_run", fake_run)
-
     fetcher = git_repo_fetcher.GitRepoFetcher(cache_dir=tmp_path)
 
-    # 서로 다른 저장소 두 개를 동시에 checkout — 병렬 진행 허용.
-    pr_a1 = _pr("acme", "a")
-    pr_a2 = _pr("acme", "a", head="def")   # 같은 저장소, 다른 PR
-    pr_b = _pr("acme", "b")
+    second_call_started = asyncio.Event()
+
+    async def first_session() -> None:
+        async with fetcher.session(_pr("acme", "a"), "tok") as _:
+            # 이 블록 안에서 두 번째 호출이 시도되는지 관찰.
+            await asyncio.sleep(0.1)
+        release.set()
+
+    async def second_session() -> None:
+        second_call_started.set()
+        async with fetcher.session(_pr("acme", "a", head="def"), "tok") as _:
+            pass
+
+    t1 = asyncio.create_task(first_session())
+    # first_session 이 세션 블록 안으로 들어가도록 양보.
+    await asyncio.sleep(0.02)
+    t2 = asyncio.create_task(second_session())
+
+    # first_session 이 끝나기 전에 두 번째가 실제 checkout(fetch) 를 시작하지 못해야 한다.
+    # checkouts_started 에는 첫 번째(acme/a) 하나만 있어야 한다.
+    await asyncio.sleep(0.05)
+    assert len(checkouts_started) == 1
+
+    await asyncio.gather(t1, t2)
+    assert len(checkouts_started) == 2  # 최종적으로는 둘 다 실행
+
+
+async def test_different_repos_sessions_run_in_parallel(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """다른 저장소 session 은 서로 막지 않고 병렬로 진행돼야 한다."""
+    in_flight = 0
+    peak = 0
+    release = asyncio.Event()
+
+    async def fake_run(cmd: list[str], *, check: bool = True) -> None:
+        nonlocal in_flight, peak
+        if "fetch" in cmd:
+            in_flight += 1
+            peak = max(peak, in_flight)
+            try:
+                await release.wait()
+            finally:
+                in_flight -= 1
+
+    monkeypatch.setattr(git_repo_fetcher, "_run", fake_run)
+    fetcher = git_repo_fetcher.GitRepoFetcher(cache_dir=tmp_path)
 
     async def gate() -> None:
         for _ in range(200):
-            total_in_flight = sum(in_flight_by_repo.values())
-            if total_in_flight >= 2:
+            if in_flight >= 2:
                 break
             await asyncio.sleep(0.005)
         release.set()
 
     asyncio.create_task(gate())
 
-    # 같은 저장소 두 번 + 다른 저장소 한 번 동시 실행
-    await asyncio.gather(
-        fetcher.checkout(pr_a1, "tok"),
-        fetcher.checkout(pr_a2, "tok"),
-        fetcher.checkout(pr_b, "tok"),
-    )
+    async def run(pr: PullRequest) -> None:
+        async with fetcher.session(pr, "tok"):
+            pass
 
-    # acme/a 는 직렬 (peak 1), acme/b 는 a 와 병렬이라 전체 가동 중 1 이상만 보장.
-    a_peak = max(v for k, v in peak_by_repo.items() if "/acme/a/" in k or k.endswith("/acme/a"))
-    assert a_peak == 1, "같은 저장소의 checkout 은 직렬화돼야 한다"
+    await asyncio.gather(
+        run(_pr("acme", "alpha")),
+        run(_pr("acme", "beta")),
+    )
+    assert peak == 2
 
 
 async def test_remote_url_is_restored_even_when_fetch_fails(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """fetch/checkout 단계에서 예외가 나도 `remote set-url ... <original>` 이 호출돼
-    토큰이 `.git/config` 에 남지 않아야 한다.
+    """fetch 에서 예외가 나도 `remote set-url ... <original>` 이 호출돼 토큰이 `.git/config`
+    에 남지 않아야 한다.
     """
     restore_calls: list[list[str]] = []
 
     async def fake_run(cmd: list[str], *, check: bool = True) -> None:
-        # "fetch" 에서 강제 실패
         if "fetch" in cmd:
             raise RuntimeError("boom")
-        if cmd[-2:-1] == ["origin"] and "set-url" in cmd and not check:
-            # 복구 호출: check=False 로 넘어오는 마지막 set-url
+        if "set-url" in cmd and not check:
             restore_calls.append(cmd)
 
     monkeypatch.setattr(git_repo_fetcher, "_run", fake_run)
-    # .git 디렉터리가 있는 것처럼 위장 → clone 은 skip, set-url 분기로
     repo_dir = tmp_path / "acme" / "a" / ".git"
     repo_dir.mkdir(parents=True)
 
     fetcher = git_repo_fetcher.GitRepoFetcher(cache_dir=tmp_path)
 
     with pytest.raises(RuntimeError, match="boom"):
-        await fetcher.checkout(_pr("acme", "a"), "secret-token")
+        async with fetcher.session(_pr("acme", "a"), "secret-token"):
+            pass
 
-    # 실패 후에도 반드시 원래 URL 로 복구된 호출이 있어야 한다.
     assert restore_calls, "fetch 실패 후에도 remote URL 복구가 호출돼야 한다"
     restored_url = restore_calls[-1][-1]
-    assert "secret-token" not in restored_url, "복구된 URL 엔 토큰이 없어야 한다"
+    assert "secret-token" not in restored_url
     assert restored_url == "https://github.com/o/r.git"
+
+
+async def test_remote_url_restored_on_cancellation_too(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """CancelledError 경로에서도 URL 복구가 실행돼야 한다 (Gemini 지적)."""
+    restore_calls: list[list[str]] = []
+
+    async def fake_run(cmd: list[str], *, check: bool = True) -> None:
+        if "fetch" in cmd:
+            raise asyncio.CancelledError()
+        if "set-url" in cmd and not check:
+            restore_calls.append(cmd)
+
+    monkeypatch.setattr(git_repo_fetcher, "_run", fake_run)
+    (tmp_path / "acme" / "a" / ".git").mkdir(parents=True)
+    fetcher = git_repo_fetcher.GitRepoFetcher(cache_dir=tmp_path)
+
+    with pytest.raises(asyncio.CancelledError):
+        async with fetcher.session(_pr("acme", "a"), "secret-token"):
+            pass
+
+    assert restore_calls, "취소 경로에서도 URL 복구가 실행돼야 한다"
 
 
 def test_mask_token_in_url_strips_userinfo() -> None:
@@ -125,7 +177,6 @@ def test_mask_token_in_url_strips_userinfo() -> None:
     )
     assert "SECRET123" not in masked
     assert masked.startswith("https://***@github.com")
-    # 비 URL 문자열은 건드리지 않는다.
     assert git_repo_fetcher._mask_token_in_url("--force") == "--force"
     assert git_repo_fetcher._mask_token_in_url("/tmp/repo") == "/tmp/repo"
 
@@ -134,9 +185,6 @@ async def test_debug_log_does_not_leak_token(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """디버그 로그에 토큰이 포함된 clone_url 이 원문으로 기록되지 않아야 한다."""
-    # 프로세스는 실제로 실행하지 않고 subprocess 를 가로챈다.
-
     class _DummyProc:
         returncode = 0
 
@@ -163,6 +211,38 @@ async def test_debug_log_does_not_leak_token(
 
 
 # ---------------------------------------------------------------------------
+# _RepoLockRegistry: WeakValueDictionary — 활성 락 evict 금지 회귀 방지
+# ---------------------------------------------------------------------------
+
+
+async def test_repo_lock_registry_does_not_evict_live_locks() -> None:
+    """잠긴 락이 보유된 동안에는 레지스트리가 절대 같은 키로 새 락을 발급하지 않아야 한다."""
+    reg = git_repo_fetcher._RepoLockRegistry()
+    lock_a1 = reg.get("o/a")
+
+    async def hold() -> None:
+        async with lock_a1:
+            await asyncio.sleep(0.05)
+
+    holder = asyncio.create_task(hold())
+    # 즉시 양보해서 holder 가 락을 취득하도록
+    await asyncio.sleep(0)
+
+    # 다른 요청자도 같은 객체를 받아야 한다 (배타성 유지).
+    lock_a2 = reg.get("o/a")
+    assert lock_a2 is lock_a1
+
+    # GC 를 명시적으로 돌려도 살아있는 참조 때문에 유지돼야 한다.
+    gc.collect()
+    lock_a3 = reg.get("o/a")
+    assert lock_a3 is lock_a1
+
+    await holder
+    # 이제 lock_a1 의 강한 참조가 모두 풀렸으면 weakref 가 정리될 수 있다 —
+    # 다만 파이썬 구현에 따라 즉시 GC 는 아니므로 단순 동치 비교는 생략.
+
+
+# ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
 
@@ -171,5 +251,4 @@ def _extract_repo_key(cmd: list[str], cache_root: Path) -> str:
     for i, a in enumerate(cmd):
         if a == "-C" and i + 1 < len(cmd):
             return cmd[i + 1]
-    # clone 케이스: 마지막 인자가 target path
     return cmd[-1]

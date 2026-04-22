@@ -234,6 +234,25 @@ async def test_whitelist_covers_swift_and_python_manifests(repo: Path) -> None:
     assert "pyproject.toml" in paths
 
 
+async def test_changed_binary_file_does_not_trigger_exceeded(repo: Path) -> None:
+    """회귀 방지(Gemini 재리뷰): 변경 파일이 필터(바이너리 등) 로 제외돼도
+    `exceeded_budget` 이 True 가 되면 안 된다. 이전 구현은 filter_excluded 까지 "예산
+    초과" 로 오진해 이미지만 변경된 PR 이 리뷰 없이 "예산 초과" 메시지만 달리는 버그.
+
+    `logo.png` 는 repo 픽스처에 이미 커밋돼 있으므로 별도 commit 없이 그대로 사용한다.
+    """
+    collector = FileDumpCollector(file_max_bytes=1_000_000, data_file_max_bytes=1_000_000)
+    dump = await collector.collect(
+        repo, changed_files=("logo.png",), budget=TokenBudget(1_000_000)
+    )
+
+    # logo.png 는 filter_excluded 에 들어가지만, 그것 때문에 exceeded 가 뒤집혀선 안 됨.
+    assert "logo.png" in dump.excluded
+    assert dump.exceeded_budget is False, (
+        "필터로 제외된 바이너리 파일은 예산 초과 플래그를 일으키면 안 된다"
+    )
+
+
 async def test_generic_json_between_data_and_file_limits_is_excluded(repo: Path) -> None:
     """회귀 방지(PR #7 review):
     두 제한의 책임을 분리 검증. 비화이트리스트 JSON 이

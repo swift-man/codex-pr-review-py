@@ -27,9 +27,14 @@ class ReviewPullRequestUseCase:
 
     async def execute(self, pr: PullRequest) -> None:
         token = await self._github.get_installation_token(pr.installation_id)
-        repo_path = await self._repo_fetcher.checkout(pr, token)
 
-        dump = await self._file_collector.collect(repo_path, pr.changed_files, self._budget)
+        # 저장소 락 범위를 checkout ~ 파일 수집 전체로 확대한다. 이전 구현은 `checkout()`
+        # 리턴과 동시에 락이 풀려, 같은 저장소의 다른 PR 이 head SHA 를 바꾸는 동안
+        # 이 쪽 collect 가 파일을 읽어 "다른 PR 의 트리" 를 수집하는 경쟁이 있었다.
+        async with self._repo_fetcher.session(pr, token) as repo_path:
+            dump = await self._file_collector.collect(repo_path, pr.changed_files, self._budget)
+
+        # 이 지점 이후 파일 I/O 없음 — dump 는 메모리에 담긴 스냅샷. 락을 풀어도 안전.
 
         # 변경 파일이 예산 때문에 잘려 나갔다면 "전체 리뷰"가 성립하지 않는다. 저품질 리뷰를
         # 게시하느니 리뷰를 건너뛰고 운영자에게 조치 방법을 안내 코멘트로 남긴다.
