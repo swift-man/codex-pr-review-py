@@ -10,11 +10,16 @@
   - 예산 초과가 되는 순간 이후 파일을 건너뛰되 완전히 drop 한다. 부분 patch 를 잘라
     보내면 hunk 경계가 깨져 라인 번호 해석이 어긋날 수 있다 — 정확성을 희생하느니
     전체 단위로 빠지는 편이 안전.
+  - **프롬프트 고정 오버헤드(system rules · PR metadata · SCOPE 섹션) 를 예약한 뒤**
+    남은 공간에만 patch 를 담는다. 예산 판정을 patch 본문만으로 하면 최종
+    `build_prompt()` 결과가 실제로는 `CODEX_MAX_INPUT_TOKENS` 를 넘어 `codex exec`
+    단계에서 실패한다 — codex 리뷰 Major 지적 반영.
   - `patch_missing` 는 변경 파일 중 GitHub 가 patch 를 주지 않은 항목 (rename / delete /
     binary / 거대 diff). 리뷰 본문 배지로 운영자에게 노출한다.
 """
 
 import logging
+from collections.abc import Callable
 
 from codex_review.domain import (
     DUMP_MODE_DIFF,
@@ -24,51 +29,82 @@ from codex_review.domain import (
     TokenBudget,
 )
 
+from .codex_prompt import build_prompt
+
 logger = logging.getLogger(__name__)
+
+OverheadEstimator = Callable[[PullRequest, FileDump], int]
+
+
+def _default_overhead_estimator(pr: PullRequest, empty_dump: FileDump) -> int:
+    """실 운영 기본값 — `build_prompt()` 를 1회 호출해 오버헤드를 측정."""
+    return len(build_prompt(pr, empty_dump))
 
 
 class DiffContextCollector:
-    """`DiffContextCollector` Protocol 의 기본 구현 — 원문 patch 를 예산 안에서 축적."""
+    """`DiffContextCollector` Protocol 의 기본 구현 — 원문 patch 를 예산 안에서 축적.
+
+    `overhead_estimator` 는 "빈 덤프 + 확정된 patch_missing" 상태의 프롬프트 크기를
+    돌려주는 콜백. 기본은 실제 `build_prompt()` 를 쓰지만, 단위 테스트는 고정값/0 을
+    돌려주는 stub 을 주입해 overhead 비의존 truncation 동작만 분리 검증할 수 있다.
+    """
+
+    def __init__(self, overhead_estimator: OverheadEstimator | None = None) -> None:
+        self._estimate_overhead = overhead_estimator or _default_overhead_estimator
 
     async def collect_diff(self, pr: PullRequest, budget: TokenBudget) -> FileDump:
         max_chars = budget.max_chars()
+        # 1st pass: patch 없는 파일을 먼저 분류한다. SCOPE 섹션에 들어가므로 오버헤드
+        # 계산에도 정확히 반영돼야 한다.
+        patch_missing = tuple(p for p in pr.changed_files if p not in pr.diff_patches)
+
+        # 오버헤드 산정: "빈 덤프 + 이미 아는 patch_missing" 으로 프롬프트를 한 번 만들어
+        # 그 길이를 측정한다. budget_trimmed 목록은 이 시점에 알 수 없지만, SCOPE 섹션에서
+        # 각 항목이 차지하는 바이트는 수십 바이트 수준이라 실무적으로 무시 가능한 오차.
+        overhead_estimate_dump = FileDump(
+            entries=(),
+            total_chars=0,
+            excluded=patch_missing,
+            patch_missing=patch_missing,
+            mode=DUMP_MODE_DIFF,
+            budget=budget,
+        )
+        overhead_chars = self._estimate_overhead(pr, overhead_estimate_dump)
+        # 오버헤드가 예산 전체를 삼킨 경우 정직하게 0 반환. use case 가 "빈 덤프" 로
+        # 판정해 fallback 불가 안내로 떨어지게 한다. 인위적 floor 로 "사실상 초과" 상태
+        # 를 숨기면 codex 단계에서 더 혼란스러운 실패로 이어진다.
+        patch_budget = max(0, max_chars - overhead_chars)
+
         entries: list[FileEntry] = []
         budget_trimmed: list[str] = []
-        patch_missing: list[str] = []
         total_chars = 0
-        budget_full = False  # 한 번 초과되면 이후 모든 변경 파일을 기록만 하고 담지 않는다.
+        budget_full = patch_budget <= 0
 
         for path in pr.changed_files:
             patch = pr.diff_patches.get(path)
             if patch is None:
-                # GitHub 가 patch 를 생략한 파일 — diff 모드에서는 통째로 리뷰 불가.
-                # 예산 full 상태와 무관하게 항상 patch_missing 쪽에 계속 누적한다 (운영자
-                # 에게 "그 파일은 patch 자체가 없다" 는 구조적 한계를 정확히 노출해야 함).
-                patch_missing.append(path)
+                # 이미 1st pass 에서 patch_missing 리스트에 담긴 파일 — skip.
                 continue
 
             if budget_full:
                 # 이미 예산이 찼으므로 더 담지 않지만, 이 파일이 "리뷰되지 않았다" 는 사실은
-                # budget_trimmed 에 남겨 배지·프롬프트 SCOPE 섹션에 정확히 표시되도록 한다
-                # (codex 리뷰 지적: 이전 구현은 break 해버려 뒤 파일들이 전부 누락됐음).
+                # budget_trimmed 에 남겨 배지·프롬프트 SCOPE 섹션에 정확히 표시되도록 한다.
                 budget_trimmed.append(path)
                 continue
 
             # `@@ -... +... @@` hunk 가 이미 파일 경로를 포함하지 않는다. LLM 이 어떤
             # 파일의 변경인지 알 수 있도록 얇은 파일 헤더를 붙여 내보낸다.
             body = f"=== PATCH: {path} ===\n{patch.rstrip()}\n"
-            # 예산 계산은 문자 수 기준 (TokenBudget.chars_per_token), size_bytes 는 이와
-            # 별개로 멀티바이트를 고려한 실제 바이트 크기를 담는다 (gemini 리뷰 지적).
             size_chars = len(body)
             size_bytes = len(body.encode("utf-8"))
 
-            if total_chars + size_chars > max_chars:
+            if total_chars + size_chars > patch_budget:
                 budget_trimmed.append(path)
                 budget_full = True
                 logger.warning(
-                    "diff collector: budget exceeded after %d entries (%d chars) "
-                    "— dropping %s and subsequent changed files",
-                    len(entries), total_chars, path,
+                    "diff collector: patch budget exceeded after %d entries (%d/%d chars, "
+                    "overhead=%d) — dropping %s and subsequent changed files",
+                    len(entries), total_chars, patch_budget, overhead_chars, path,
                 )
                 continue
 
@@ -77,13 +113,13 @@ class DiffContextCollector:
             )
             total_chars += size_chars
 
-        # 예산 초과 플래그: 변경 파일 중 하나라도 예산 때문에 잘렸으면 True.
-        # patch_missing 은 "애초에 patch 가 없어서 제외" 라 예산 이슈와 구분해 별도 보고.
         exceeded = bool(budget_trimmed)
 
         logger.info(
-            "diff collector: files=%d total_chars=%d budget_trimmed=%d patch_missing=%d",
-            len(entries), total_chars, len(budget_trimmed), len(patch_missing),
+            "diff collector: files=%d total_chars=%d (patch_budget=%d, overhead=%d) "
+            "budget_trimmed=%d patch_missing=%d",
+            len(entries), total_chars, patch_budget, overhead_chars,
+            len(budget_trimmed), len(patch_missing),
         )
 
         return FileDump(
@@ -91,9 +127,9 @@ class DiffContextCollector:
             total_chars=total_chars,
             # `excluded` 는 기존 FileDump 계약상 "그 외 이유로 빠진 파일" 로 쓰이므로,
             # budget_trimmed 와 patch_missing 둘 다 합쳐 운영자 노출용으로 넣는다.
-            excluded=tuple(budget_trimmed + patch_missing),
+            excluded=tuple(budget_trimmed) + patch_missing,
             exceeded_budget=exceeded,
             budget=budget,
             mode=DUMP_MODE_DIFF,
-            patch_missing=tuple(patch_missing),
+            patch_missing=patch_missing,
         )

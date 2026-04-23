@@ -116,8 +116,18 @@ class _CapturingEngine:
 # ---------------------------------------------------------------------------
 
 
+def _zero_overhead(pr: PullRequest, empty_dump: FileDump) -> int:
+    """테스트용 stub — 오버헤드 0. 순수 truncation 동작만 검증하고 싶을 때 주입.
+
+    실 운영 기본값은 `build_prompt()` 결과 길이(수 KB) 를 쓰므로 작은 예산의 단위
+    테스트에서는 패치가 전부 오버헤드에 잡아 먹혀 결정성이 떨어진다. 오버헤드 자체
+    계약은 전용 테스트(`test_diff_collector_reserves_prompt_overhead_from_budget`) 로 따로.
+    """
+    return 0
+
+
 async def test_diff_collector_builds_dump_from_patches() -> None:
-    collector = DiffContextCollector()
+    collector = DiffContextCollector(overhead_estimator=_zero_overhead)
     patches = {
         "a.py": "@@ -1,1 +1,2 @@\n x = 1\n+y = 2\n",
         "b.py": "@@ -0,0 +1,1 @@\n+print('hi')\n",
@@ -142,7 +152,7 @@ async def test_diff_collector_builds_dump_from_patches() -> None:
 
 async def test_diff_collector_marks_patch_missing_files() -> None:
     """GitHub 가 patch 를 안 준 파일(rename/delete/binary/거대 diff) 은 patch_missing 에 적재."""
-    collector = DiffContextCollector()
+    collector = DiffContextCollector(overhead_estimator=_zero_overhead)
     pr = _pr(
         changed=("a.py", "removed.bin", "renamed.jpg"),
         patches={"a.py": "@@ -1,1 +1,1 @@\n-x\n+y\n"},
@@ -159,7 +169,7 @@ async def test_diff_collector_marks_patch_missing_files() -> None:
 
 async def test_diff_collector_truncates_when_budget_exceeded() -> None:
     """predicted size 가 예산을 넘는 순간 이후 파일은 drop — 부분 patch 로 자르지 않는다."""
-    collector = DiffContextCollector()
+    collector = DiffContextCollector(overhead_estimator=_zero_overhead)
     # patch 하나당 body ≈ 186 chars (header 20 + patch 내용 166).
     big_patch = "@@ -1,1 +1,1 @@\n" + "+x\n" * 50
     patches = {"a.py": big_patch, "b.py": big_patch, "c.py": big_patch}
@@ -178,7 +188,7 @@ async def test_diff_collector_truncates_when_budget_exceeded() -> None:
 
 async def test_diff_collector_truncates_first_oversize_file() -> None:
     """첫 파일이 예산을 단독으로 넘기면 entries 가 비고 exceeded_budget=True."""
-    collector = DiffContextCollector()
+    collector = DiffContextCollector(overhead_estimator=_zero_overhead)
     huge = "@@ -1,1 +1,1 @@\n" + "+x\n" * 500  # ~1500 chars
     pr = _pr(changed=("big.py",), patches={"big.py": huge})
 
@@ -189,8 +199,36 @@ async def test_diff_collector_truncates_first_oversize_file() -> None:
     assert "big.py" in dump.excluded
 
 
+def test_file_dump_budget_trimmed_property_excludes_patch_missing() -> None:
+    """회귀 (gemini PR #17): `budget_trimmed` 계산 로직이 여러 호출지점에 중복되던
+    문제를 도메인 모델의 `@property` 로 캡슐화. `excluded` 에서 `patch_missing` 만
+    빼면 순수 예산 컷 항목이 된다.
+    """
+    from codex_review.domain import FileDump, TokenBudget
+
+    dump = FileDump(
+        entries=(),
+        total_chars=0,
+        excluded=("trimmed1.py", "missing1.bin", "trimmed2.py", "missing2.jpg"),
+        patch_missing=("missing1.bin", "missing2.jpg"),
+        exceeded_budget=True,
+        budget=TokenBudget(max_tokens=100),
+    )
+
+    # 순서는 `excluded` 의 원본 순서를 유지해야 한다 (디버깅 시 운영자가 어떤 순서로
+    # 잘렸는지 추적).
+    assert dump.budget_trimmed == ("trimmed1.py", "trimmed2.py")
+
+
+def test_file_dump_budget_trimmed_property_returns_empty_when_no_excluded() -> None:
+    from codex_review.domain import FileDump
+
+    dump = FileDump(entries=(), total_chars=0)
+    assert dump.budget_trimmed == ()
+
+
 async def test_diff_collector_empty_when_no_patches() -> None:
-    collector = DiffContextCollector()
+    collector = DiffContextCollector(overhead_estimator=_zero_overhead)
     pr = _pr(changed=("a.py",), patches={})
 
     dump = await collector.collect_diff(pr, TokenBudget(max_tokens=10_000))
@@ -204,7 +242,7 @@ async def test_diff_collector_records_all_remaining_files_after_budget_hit() -> 
     에도 SCOPE 안내에도 남지 않던 버그. 이제는 초과 이후 모든 변경 파일이 정확히
     budget_trimmed 로 기록되고, 중간에 섞인 patch_missing 파일도 계속 정확히 분류된다.
     """
-    collector = DiffContextCollector()
+    collector = DiffContextCollector(overhead_estimator=_zero_overhead)
     # patch 크기 ≈ 186 chars — a.py (186) + b.py (186) = 372 < 400.
     # c.py 부터 예산 초과. d.py 는 patch 가 아예 없는 파일 (rename 등). e.py 는 또 정상.
     big_patch = "@@ -1,1 +1,1 @@\n" + "+x\n" * 50
@@ -229,12 +267,76 @@ async def test_diff_collector_records_all_remaining_files_after_budget_hit() -> 
     assert set(dump.excluded) == {"c.py", "e.py", "d.py"}
 
 
+async def test_diff_collector_reserves_prompt_overhead_from_budget() -> None:
+    """회귀 (codex PR #17 Major): collector 의 예산 판정이 patch 본문만 보던 동작을
+    고쳐, 최종 `build_prompt()` 가 포함하는 system rules + metadata + SCOPE 섹션까지
+    포함해 판정해야 한다. overhead_estimator 가 max_chars 의 절반을 잡아먹는다고
+    보고 하면, patch 는 남은 절반 안에서만 담겨야 한다.
+    """
+    # max_tokens=1000 → 4000 chars 예산. overhead 가 3000 chars 라고 하면 patch 에
+    # 쓸 수 있는 공간은 1000 chars.
+    def half_overhead(pr: PullRequest, empty_dump: FileDump) -> int:
+        return 3000
+
+    collector = DiffContextCollector(overhead_estimator=half_overhead)
+    # patch 하나당 ≈ 370 chars. 1000 chars 안에 2개만 들어가야 한다.
+    big_patch = "@@ -1,1 +1,1 @@\n" + "+x\n" * 100  # ~316 chars + 헤더 = ~336
+    patches = {f"f{i}.py": big_patch for i in range(5)}
+    pr = _pr(changed=tuple(f"f{i}.py" for i in range(5)), patches=patches)
+
+    dump = await collector.collect_diff(pr, TokenBudget(max_tokens=1000))
+
+    # 오버헤드를 감안한 실질 예산 내에서만 담겨야 한다 (2~3개 파일).
+    assert len(dump.entries) <= 3
+    assert dump.exceeded_budget is True
+    assert dump.total_chars <= 1000  # patch_budget = 4000 - 3000 = 1000
+    # 담긴 것 + 잘린 것의 합이 원래 변경 파일 수와 일치 (patch_missing 은 0건).
+    assert len(dump.entries) + len(dump.budget_trimmed) == 5
+
+
+async def test_diff_collector_returns_empty_when_overhead_exceeds_budget() -> None:
+    """오버헤드만으로 예산을 넘으면 정직하게 `exceeded_budget=True` + 빈 entries 반환.
+
+    인위적 최소 보장(floor) 없이 진실을 전달해야 use case 의 "빈 덤프 → fallback 불가"
+    경로가 타진다. 이전엔 `_MIN_PATCH_BUDGET_CHARS` 같은 floor 가 실패 상태를 숨겼음.
+    """
+    def oversize_overhead(pr: PullRequest, empty_dump: FileDump) -> int:
+        return 1_000_000  # max_chars 보다 훨씬 큼
+
+    collector = DiffContextCollector(overhead_estimator=oversize_overhead)
+    pr = _pr(changed=("a.py",), patches={"a.py": "@@ -1 +1 @@\n-x\n+y\n"})
+
+    dump = await collector.collect_diff(pr, TokenBudget(max_tokens=1000))
+
+    assert dump.entries == ()
+    assert dump.exceeded_budget is True
+    assert dump.budget_trimmed == ("a.py",)
+
+
+async def test_default_overhead_estimator_measures_real_build_prompt() -> None:
+    """실 운영 기본값(= build_prompt 를 직접 호출) 도 동작한다 — 이 테스트는 오버헤드
+    계약이 실제 프롬프트 크기와 일치함을 확인해 production 경로를 pin.
+    """
+    # 기본 overhead_estimator 사용 (주입 안 함).
+    collector = DiffContextCollector()
+    # 넉넉한 예산 — overhead + patch 모두 들어가도 남는다.
+    pr = _pr(
+        changed=("a.py",),
+        patches={"a.py": "@@ -1 +1 @@\n-x\n+y\n"},
+    )
+    dump = await collector.collect_diff(pr, TokenBudget(max_tokens=100_000))
+
+    # entries 1건 + 예산 초과 없음 확인 (정상 케이스가 overhead 때문에 깨지지 않음).
+    assert len(dump.entries) == 1
+    assert dump.exceeded_budget is False
+
+
 async def test_diff_collector_size_bytes_uses_utf8_byte_length() -> None:
     """회귀 (gemini PR #17 Major): 한글 등 멀티바이트가 섞이면 `len(body)` (char 개수)
     와 `len(body.encode('utf-8'))` (bytes) 가 크게 달라진다. FileEntry.size_bytes 는
     이름대로 실제 바이트를 담아야 모니터링·모델 로그가 정확하다.
     """
-    collector = DiffContextCollector()
+    collector = DiffContextCollector(overhead_estimator=_zero_overhead)
     # 한글 "한" 은 UTF-8 에서 3 bytes. patch 본문에 multibyte 포함.
     patches = {"a.py": "@@ -1,1 +1,1 @@\n-영어만\n+한글과 English\n"}
     pr = _pr(changed=("a.py",), patches=patches)

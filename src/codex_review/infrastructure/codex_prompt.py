@@ -225,11 +225,6 @@ def _build_diff_prompt(pr: PullRequest, dump: FileDump) -> str:
     """diff-only 모드 프롬프트. `FileEntry.content` 는 이미 `=== PATCH: … ===` 헤더를
     포함한 unified patch 원문이므로 그대로 이어 붙인다.
     """
-    patch_missing = dump.patch_missing
-    # set 을 한 번만 생성해 O(N*M) 을 O(N+M) 으로 줄인다 (gemini 리뷰 지적).
-    missing_set = set(patch_missing)
-    budget_trimmed = tuple(p for p in dump.excluded if p not in missing_set)
-
     sections: list[str] = [
         DIFF_MODE_SYSTEM_RULES.strip(),
         "",
@@ -245,7 +240,7 @@ def _build_diff_prompt(pr: PullRequest, dump: FileDump) -> str:
         "=== PR BODY ===",
         pr.body or "(empty)",
         "",
-        _diff_mode_scope_notice(dump, patch_missing, budget_trimmed),
+        _diff_mode_scope_notice(dump),
         "",
         "=== PATCHES ===",
         "아래는 PR 의 unified patch 원문이다. 각 파일은 `=== PATCH: <path> ===` 헤더 다음에 온다.",
@@ -264,10 +259,15 @@ def _build_diff_prompt(pr: PullRequest, dump: FileDump) -> str:
     return "\n".join(sections)
 
 
-def _diff_mode_scope_notice(
-    dump: FileDump, patch_missing: tuple[str, ...], budget_trimmed: tuple[str, ...]
-) -> str:
-    """diff 모드에서 모델이 인지해야 할 리뷰 범위 정보."""
+def _diff_mode_scope_notice(dump: FileDump) -> str:
+    """diff 모드에서 모델이 인지해야 할 리뷰 범위 정보.
+
+    `patch_missing` / `budget_trimmed` 분류는 `FileDump` 도메인 프로퍼티로 캡슐화돼
+    있어 (gemini 리뷰 피드백 반영), 여기서는 그대로 꺼내 쓰기만 한다.
+    """
+    patch_missing = dump.patch_missing
+    budget_trimmed = dump.budget_trimmed
+
     lines = [
         "=== SCOPE (diff-only mode) ===",
         f"diff 로 제공된 파일 수: {len(dump.entries)}",

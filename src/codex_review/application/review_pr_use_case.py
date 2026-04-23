@@ -112,12 +112,9 @@ class ReviewPullRequestUseCase:
             )
             return None
         if diff_dump.exceeded_budget:
-            # excluded = budget_trimmed + patch_missing (collector 에서 보장)
-            # → budget_trimmed 개수는 O(1) 뺄셈으로 구할 수 있다 (gemini 리뷰 지적).
-            budget_trimmed_count = len(diff_dump.excluded) - len(diff_dump.patch_missing)
             logger.info(
                 "diff fallback partial for %s#%d — %d files truncated by budget",
-                pr.repo.full_name, pr.number, budget_trimmed_count,
+                pr.repo.full_name, pr.number, len(diff_dump.budget_trimmed),
             )
         logger.info(
             "falling back to diff-only review for %s#%d — files=%d chars=%d",
@@ -182,17 +179,13 @@ def _prepend_diff_scope_badge(result: ReviewResult, dump: FileDump) -> ReviewRes
     최상단에 렌더링하므로, 리뷰어가 제목 바로 밑에서 배지를 보게 된다. 별도 필드를
     추가해 도메인 모델을 오염시키는 것보다 간단하고 가시성이 동일.
     """
-    patch_missing = dump.patch_missing
-    # set 을 한 번만 생성해 O(N*M) 을 O(N+M) 으로 줄인다 (gemini 리뷰 지적).
-    missing_set = set(patch_missing)
-    budget_trimmed = tuple(p for p in dump.excluded if p not in missing_set)
-
     lines = [
         "> ⚠️ **리뷰 범위: diff-only (자동 전환)**",
         "> 전체 코드베이스가 입력 예산(`CODEX_MAX_INPUT_TOKENS`) 을 초과하여 "
         "PR 의 unified patch 만 근거로 리뷰했습니다.",
         f"> 포함된 diff 파일 {len(dump.entries)}건, "
-        f"예산 초과로 제외 {len(budget_trimmed)}건, patch 누락 {len(patch_missing)}건.",
+        f"예산 초과로 제외 {len(dump.budget_trimmed)}건, "
+        f"patch 누락 {len(dump.patch_missing)}건.",
         "",
     ]
     return replace(result, summary="\n".join(lines) + result.summary)

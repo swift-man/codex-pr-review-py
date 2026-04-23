@@ -50,3 +50,14 @@ class FileDump:
     # diff 모드에서 patch 가 누락돼 리뷰 대상에서 제외된 파일 (rename/delete/binary/거대 diff).
     # 본문 배지에 "이 파일들은 diff 를 제공받지 못해 리뷰 불가" 로 노출한다.
     patch_missing: tuple[str, ...] = field(default_factory=tuple)
+
+    @property
+    def budget_trimmed(self) -> tuple[str, ...]:
+        """`excluded` 중 `patch_missing` 이 아닌 항목 — 즉 예산 초과로 잘린 파일.
+
+        예산으로 잘린 파일과 GitHub 가 patch 를 안 준 파일은 운영자 안내·프롬프트
+        SCOPE 섹션에서 의미가 다르다 (전자는 예산 조정으로 해결, 후자는 구조적 한계).
+        계산 로직이 여러 곳에서 중복되던 문제를 도메인 모델로 캡슐화 (gemini 리뷰).
+        """
+        missing_set = set(self.patch_missing)
+        return tuple(p for p in self.excluded if p not in missing_set)
