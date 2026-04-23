@@ -291,6 +291,10 @@ def _build_dump_sync(
         excluded=tuple(excluded),
         exceeded_budget=exceeded,
         budget=budget,
+        # 정책 배제 / 예산 컷 을 구분해 도메인에 올린다. `FileDump.budget_trimmed`
+        # property 가 이 필드와 patch_missing 을 기반으로 예산 컷만 정확히 계산한다
+        # (gemini PR #17 Major 지적 반영).
+        filter_excluded=tuple(filter_excluded),
     )
 
 

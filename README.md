@@ -15,7 +15,7 @@ GitHub App 웹훅으로 PR 이벤트를 받아, 레포를 체크아웃하고 전
 - 라인 고정 코멘트만 인라인으로 게시, 라인 번호 없는 지적은 `개선할 점`으로 이동
 - 기초 타입(`str`/`list`/`String`/`Array` 등) 수준의 팁 배제, **Python/TypeScript/React 공식 상위 API**에 초점
 - 리뷰 큐는 **제한된 동시성**으로 처리 — `REVIEW_CONCURRENCY` env(기본 `1`=직렬)로 동시 리뷰 개수 조절. 같은 저장소에 대한 checkout 은 저장소별 lock 으로 직렬화되어 작업 트리 경쟁을 방지
-- 컨텍스트 예산 초과 시 리뷰 대신 안내 코멘트 게시
+- 컨텍스트 예산 초과 시 **자동 diff-only 모드 fallback** — 전체 코드베이스가 `CODEX_MAX_INPUT_TOKENS` 를 넘어 변경 파일이 빠지면, PR unified patch 만 가지고 리뷰를 계속한다. diff 조차 담기지 않으면 그때서야 안내 코멘트만 게시
 - SOLID — 계층 분리, `Protocol`로 의존성 역전
 
 ## 아키텍처
@@ -98,6 +98,8 @@ REPO_FULL_NAME=owner/repo PR_NUMBER=1 INSTALLATION_ID=1234567 \
 | `DATA_FILE_MAX_BYTES` | `20000` | JSON/YAML/XML 등 모호한 확장자의 별도 상한. `package.json`·`tsconfig.json`·`pyproject.toml` 같은 화이트리스트 매니페스트는 두 파일 크기 제한 모두 면제. 단 전체 컨텍스트 예산(`CODEX_MAX_INPUT_TOKENS`) 초과 시에는 우선순위에 따라 제외될 수 있음. |
 | `HOST` / `PORT` | `127.0.0.1` / `8000` | 바인딩 주소 |
 | `REVIEW_CONCURRENCY` | `1` | 동시 실행 리뷰 개수. `1`=직렬, `2~`=병렬. Codex 쿼터와 맞춰 조절 |
+| `REVIEW_QUEUE_MAXSIZE` | `(concurrency × 10)` | 웹훅 큐 상한. 가득 차면 503 반환. 비우면 자동 계산 |
+| `CODEX_ENABLE_DIFF_FALLBACK` | `true` | 예산 초과 시 diff-only 모드 자동 전환. `false` 로 내리면 "리뷰 스킵 + 안내 코멘트" 경로만 사용 |
 | `DRY_RUN` | `0` | `1`이면 로그만 남기고 게시 안 함 |
 
 ## 동작 규칙
@@ -107,7 +109,9 @@ REPO_FULL_NAME=owner/repo PR_NUMBER=1 INSTALLATION_ID=1234567 \
 - 파일 필터: `.git`, `node_modules`, `dist`, `build`, `vendor`, `__pycache__` 등 디렉터리와
   `*.lock`, 바이너리, 미디어, 폰트, `package-lock.json` 등은 자동 제외
 - 우선순위: 변경 파일 → `src/app/lib/pkg/...` → 기타
-- 예산 초과 시: 변경 파일이 빠졌다면 리뷰를 **수행하지 않고** PR에 안내 코멘트만 게시
+- 예산 초과 시:
+  1. **1차 fallback** — 변경 파일이 빠졌다면 diff-only 모드로 자동 전환하여 PR 의 unified patch 만 가지고 리뷰를 수행. 리뷰 본문 최상단에 `> ⚠️ 리뷰 범위: diff-only (자동 전환)` 배지가 표시됨.
+  2. **2차 fallback** — diff 조차 예산을 넘거나 GitHub 가 patch 를 전혀 돌려주지 않으면 리뷰를 **수행하지 않고** PR에 안내 코멘트만 게시.
 
 ## 리뷰 출력 (4섹션 + 4단계 라인 등급)
 

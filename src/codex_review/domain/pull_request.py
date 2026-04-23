@@ -15,6 +15,7 @@ class RepoRef:
 
 # 빈 매핑 프록시 싱글톤: 기본값에 쓰일 읽기전용 매핑.
 _EMPTY_DIFF_RIGHT_LINES: Mapping[str, frozenset[int]] = MappingProxyType({})
+_EMPTY_DIFF_PATCHES: Mapping[str, str] = MappingProxyType({})
 
 
 @dataclass(frozen=True)
@@ -37,6 +38,13 @@ class PullRequest:
     diff_right_lines: Mapping[str, frozenset[int]] = field(
         default_factory=lambda: _EMPTY_DIFF_RIGHT_LINES
     )
+    # path → GitHub 가 반환한 unified patch 원문 (`@@ -a,b +c,d @@` 헤더 포함).
+    # 예산 초과로 전체-코드베이스 리뷰를 할 수 없을 때 diff-only 모드 fallback 을 위해
+    # 함께 들고 다닌다. `patch` 가 누락된 파일(rename/delete/binary/대용량 diff) 은
+    # 아예 키 자체가 없어, diff-only 모드에서 제외 대상 식별에 그대로 쓸 수 있다.
+    diff_patches: Mapping[str, str] = field(
+        default_factory=lambda: _EMPTY_DIFF_PATCHES
+    )
 
     def __post_init__(self) -> None:
         # frozen=True 이므로 object.__setattr__ 우회가 필요. 이미 MappingProxyType 이면
@@ -46,4 +54,10 @@ class PullRequest:
                 self,
                 "diff_right_lines",
                 MappingProxyType(dict(self.diff_right_lines)),
+            )
+        if not isinstance(self.diff_patches, MappingProxyType):
+            object.__setattr__(
+                self,
+                "diff_patches",
+                MappingProxyType(dict(self.diff_patches)),
             )

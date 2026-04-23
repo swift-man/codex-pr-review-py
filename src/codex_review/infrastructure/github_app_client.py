@@ -160,6 +160,7 @@ class GitHubAppClient:
         # per_page=100 은 GitHub 허용 최대치라 PR 이 큰 경우의 라운드트립 수를 최소화.
         changed: list[str] = []
         diff_right_lines: dict[str, frozenset[int]] = {}
+        diff_patches: dict[str, str] = {}
         files: Any = first_page
         while True:
             if not isinstance(files, list) or not files:
@@ -169,7 +170,8 @@ class GitHubAppClient:
                 changed.append(path)
                 # GitHub 는 큰 diff / rename / delete / binary 상태에서 `patch` 키를 생략한다.
                 # 그 파일에 대한 인라인 코멘트는 use-case 필터에서 전부 사라지므로 운영자가
-                # 알아볼 수 있도록 경고 로그로 남긴다.
+                # 알아볼 수 있도록 경고 로그로 남긴다. diff-only fallback 모드에서는
+                # 이 파일을 통째로 리뷰에서 제외하고 본문 배지에 명시한다.
                 patch = f.get("patch")
                 if patch is None:
                     logger.warning(
@@ -180,6 +182,8 @@ class GitHubAppClient:
                         path,
                         f.get("status"),
                     )
+                else:
+                    diff_patches[path] = str(patch)
                 diff_right_lines[path] = parse_right_lines(patch)
             if not next_url:
                 break
@@ -203,6 +207,7 @@ class GitHubAppClient:
             installation_id=installation_id,
             is_draft=bool(pr_data.get("draft", False)),
             diff_right_lines=diff_right_lines,
+            diff_patches=diff_patches,
         )
 
     async def post_review(self, pr: PullRequest, result: ReviewResult) -> None:
@@ -226,15 +231,20 @@ class GitHubAppClient:
         except httpx.HTTPStatusError as exc:
             # 방어선: use-case 단계의 diff 필터가 있음에도 422 가 나면 인라인 코멘트를 포기하고
             # 본문만 재게시한다. 리뷰 전체를 포기하는 것보다 낫다.
-            # 본문도 findings 제거된 상태로 재렌더해야 "기술 단위 코멘트 N건" 안내가 남는
-            # 거짓 상태를 피할 수 있다.
+            # 제거한 findings 는 **조용히 삭제하지 않고** `dropped_findings` 로 옮겨
+            # 본문 접이식 섹션으로 보존. 그래야 리뷰어가 "모델이 뭘 지적했었는지" 를
+            # 나중에라도 확인할 수 있다 (codex/gemini PR #17 지적 반영).
             if exc.response.status_code == 422 and payload["comments"]:
                 logger.warning(
-                    "422 on review POST for %s#%d; retrying without inline comments",
-                    pr.repo.full_name,
-                    pr.number,
+                    "422 on review POST for %s#%d; retrying without inline comments "
+                    "(%d finding(s) preserved in body)",
+                    pr.repo.full_name, pr.number, len(result.findings),
                 )
-                retry_result = replace(result, findings=())
+                retry_result = replace(
+                    result,
+                    findings=(),
+                    dropped_findings=result.dropped_findings + result.findings,
+                )
                 payload["body"] = _with_model_footer(
                     retry_result.render_body(), self._review_model_label
                 )
