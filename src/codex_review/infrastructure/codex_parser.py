@@ -42,15 +42,25 @@ def parse_review(raw: str) -> ReviewResult:
     findings = tuple(_parse_findings(payload.get("comments")))
     must_fix = tuple(_as_str_list(payload.get("must_fix")))
 
-    # 모델 프롬프트에 `critical/major → REQUEST_CHANGES` 규칙을 명시했지만 LLM 이 가끔
-    # COMMENT 로 내려보낸다 (자기 확신 부족·프롬프트 경합). 차단 신호가 **어떤 형태로든**
-    # 있으면 이벤트를 승격해 병합 차단 효과를 살려야 한다.
+    # 차단 신호가 **어떤 형태로든** 있으면 이벤트를 `REQUEST_CHANGES` 로 강제 승격해
+    # 병합 차단 효과를 살려야 한다.
     #   1) 인라인 findings 에 critical/major 가 하나라도 있음 (is_blocking).
     #   2) 파일/모듈 단위 `must_fix` 섹션에 항목이 있음 — 라인 고정이 애매해 인라인으로
     #      못 달았을 뿐 "반드시 수정" 의도임. 프롬프트 규칙상 이 자체로 REQUEST_CHANGES.
-    # APPROVE 는 모순 상태를 그대로 노출하도록 두 경우 모두 덮어쓰지 않는다.
+    #
+    # 이전 구현은 `COMMENT` 만 승격 대상으로 보고 `APPROVE` 는 "모순 상태 가시화" 목적
+    # 으로 그대로 두었으나, 실무적으로 GitHub 가 APPROVE 를 승인 카운트로 집계해 병합
+    # 이 뚫리는 위험이 더 크다 (codex PR #17 Major 지적). safety first — event 는 항상
+    # 안전한 쪽으로 덮어쓰고, APPROVE 가 덮이는 드문 경우엔 로그로 모순을 노출한다.
     has_blocking_signal = any(f.is_blocking for f in findings) or bool(must_fix)
-    if event == ReviewEvent.COMMENT and has_blocking_signal:
+    if has_blocking_signal and event != ReviewEvent.REQUEST_CHANGES:
+        if event == ReviewEvent.APPROVE:
+            # 운영자가 "모델이 모순된 응답을 냈다" 는 사실을 로그로라도 인지하도록.
+            logger.warning(
+                "model returned APPROVE with blocking signal "
+                "(findings_blocking=%d, must_fix=%d) — forcing REQUEST_CHANGES",
+                sum(1 for f in findings if f.is_blocking), len(must_fix),
+            )
         event = ReviewEvent.REQUEST_CHANGES
 
     return ReviewResult(

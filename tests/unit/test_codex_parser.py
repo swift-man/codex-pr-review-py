@@ -1,3 +1,5 @@
+import pytest
+
 from codex_review.domain import ReviewEvent
 from codex_review.domain.finding import (
     SEVERITY_CRITICAL,
@@ -139,16 +141,51 @@ def test_parse_keeps_comment_event_when_only_minor_or_suggestion() -> None:
     assert parse_review(raw).event == ReviewEvent.COMMENT
 
 
-def test_parse_preserves_explicit_approve_even_with_blocking_finding() -> None:
-    """모델이 APPROVE 를 단언한 상태에서 Critical 지적이 있으면 내부 모순 —
-    서버가 덮어쓰지 않고 그대로 둬서 운영자/리뷰어가 비일관을 감지할 수 있게 한다.
-    (COMMENT 만 자동 승격 대상)"""
+def test_parse_overrides_approve_when_blocking_finding_present(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """회귀 (codex PR #17 Major): 모델이 APPROVE + critical finding 을 함께 반환하면
+    내부 모순이지만, safety first — event 를 REQUEST_CHANGES 로 덮어써 병합 차단 신호
+    를 살린다. GitHub 가 봇 APPROVE 를 승인 카운트로 집계해 심각한 지적이 있음에도
+    병합이 뚫리는 위험을 방지. 모순은 로그로만 노출.
+    """
     raw = """
     {
       "summary": "ok",
       "event": "APPROVE",
       "comments": [
         {"path": "a.py", "line": 1, "severity": "critical", "body": "x"}
+      ]
+    }
+    """
+    import logging as _logging
+    with caplog.at_level(_logging.WARNING, logger="codex_review.infrastructure.codex_parser"):
+        result = parse_review(raw)
+    assert result.event == ReviewEvent.REQUEST_CHANGES
+    # 모순 로그가 남아야 운영자가 "모델이 이상한 응답을 냈다" 는 걸 추후 추적 가능.
+    assert any("APPROVE" in rec.getMessage() for rec in caplog.records)
+
+
+def test_parse_overrides_approve_when_must_fix_section_present() -> None:
+    """APPROVE + must_fix 섹션 조합도 동일하게 승격."""
+    raw = """
+    {
+      "summary": "ok",
+      "event": "APPROVE",
+      "must_fix": ["심각한 보안 이슈"]
+    }
+    """
+    assert parse_review(raw).event == ReviewEvent.REQUEST_CHANGES
+
+
+def test_parse_keeps_approve_when_no_blocking_signal() -> None:
+    """차단 신호가 없으면 APPROVE 는 그대로 유지 (회귀 방지)."""
+    raw = """
+    {
+      "summary": "clean",
+      "event": "APPROVE",
+      "comments": [
+        {"path": "a.py", "line": 1, "severity": "suggestion", "body": "nit"}
       ]
     }
     """
