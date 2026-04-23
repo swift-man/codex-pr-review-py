@@ -199,25 +199,46 @@ async def test_diff_collector_truncates_first_oversize_file() -> None:
     assert "big.py" in dump.excluded
 
 
-def test_file_dump_budget_trimmed_property_excludes_patch_missing() -> None:
-    """회귀 (gemini PR #17): `budget_trimmed` 계산 로직이 여러 호출지점에 중복되던
-    문제를 도메인 모델의 `@property` 로 캡슐화. `excluded` 에서 `patch_missing` 만
-    빼면 순수 예산 컷 항목이 된다.
+def test_file_dump_budget_trimmed_excludes_both_filter_and_patch_missing() -> None:
+    """회귀 (gemini PR #17 Major): `budget_trimmed` 는 **예산 때문에만** 잘린 파일이어야 한다.
+    `filter_excluded` (바이너리/정책 배제) 와 `patch_missing` (GitHub 가 patch 안 줌) 은
+    모두 빼야 리뷰 use case 가 fallback 결정을 정확히 내린다.
     """
     from codex_review.domain import FileDump, TokenBudget
 
     dump = FileDump(
         entries=(),
         total_chars=0,
-        excluded=("trimmed1.py", "missing1.bin", "trimmed2.py", "missing2.jpg"),
-        patch_missing=("missing1.bin", "missing2.jpg"),
+        excluded=(
+            "big.py",           # 예산 컷
+            "image.png",        # 정책 배제 (filter)
+            "huge.py",          # 예산 컷
+            "binary.bin",       # patch 누락 (diff 모드에서 발생하는 카테고리)
+        ),
+        filter_excluded=("image.png",),
+        patch_missing=("binary.bin",),
         exceeded_budget=True,
         budget=TokenBudget(max_tokens=100),
     )
 
-    # 순서는 `excluded` 의 원본 순서를 유지해야 한다 (디버깅 시 운영자가 어떤 순서로
-    # 잘렸는지 추적).
-    assert dump.budget_trimmed == ("trimmed1.py", "trimmed2.py")
+    # 순수 예산 컷만 남아야 한다.
+    assert dump.budget_trimmed == ("big.py", "huge.py")
+
+
+def test_file_dump_budget_trimmed_returns_empty_when_all_in_policy_categories() -> None:
+    """full 모드에서 변경 파일이 전부 정책 배제(바이너리) 라면 budget_trimmed 는 비어야 한다.
+    이 불변식이 `_changed_trimmed_by_budget` 의 올바른 판단을 보장한다.
+    """
+    from codex_review.domain import FileDump
+
+    dump = FileDump(
+        entries=(),
+        total_chars=0,
+        excluded=("a.png", "b.jpg"),
+        filter_excluded=("a.png", "b.jpg"),
+        exceeded_budget=False,  # 예산 이슈 아님
+    )
+    assert dump.budget_trimmed == ()
 
 
 def test_file_dump_budget_trimmed_property_returns_empty_when_no_excluded() -> None:
@@ -311,6 +332,79 @@ async def test_diff_collector_returns_empty_when_overhead_exceeds_budget() -> No
     assert dump.entries == ()
     assert dump.exceeded_budget is True
     assert dump.budget_trimmed == ("a.py",)
+
+
+async def test_diff_collector_final_verify_trims_when_scope_inflates_prompt() -> None:
+    """회귀 (codex PR #17 Major): 초기 오버헤드 산정 시엔 budget_trimmed 목록이 없어서
+    그 섹션이 차지할 추가 크기(파일당 ~40자)를 포함하지 못한다. 최종 verify 패스가
+    실제 프롬프트 길이를 재측정해 초과 시 뒤 entries 를 떨어뜨려야 한다.
+
+    estimator 는 "entries 당 110자 + budget_trimmed 당 20자" 로 설정해,
+    초기엔 550 > 400 이지만 entry 를 trimmed 로 옮기면 점진적으로 줄어 수렴함을 확인.
+    """
+    def fake_length(pr: PullRequest, dump: FileDump) -> int:
+        # entry 는 trimmed 보다 훨씬 크므로 (patch 원문) entry → trimmed 전환이 단조 감소.
+        return 110 * len(dump.entries) + 20 * len(dump.budget_trimmed)
+
+    collector = DiffContextCollector(overhead_estimator=fake_length)
+    # max_tokens=100 → 400 chars 예산.
+    # 5 entries: 550 > 400
+    # 4 entries + 1 trimmed: 460 > 400
+    # 3 entries + 2 trimmed: 370 <= 400 ← 수렴
+    patches = {f"f{i}.py": "@@ -1 +1 @@\n+x\n" for i in range(5)}
+    pr = _pr(changed=tuple(f"f{i}.py" for i in range(5)), patches=patches)
+
+    dump = await collector.collect_diff(pr, TokenBudget(max_tokens=100))
+
+    assert fake_length(pr, dump) <= 400
+    assert len(dump.entries) < 5
+    assert len(dump.budget_trimmed) >= 1
+    # 엔트리 + 트림 합은 항상 원본 변경 파일 수와 같아야 한다 (유실 없음).
+    assert len(dump.entries) + len(dump.budget_trimmed) == 5
+
+
+async def test_diff_collector_final_verify_is_noop_when_prompt_fits() -> None:
+    """프롬프트가 이미 예산 안에 들어가면 verify 패스는 아무것도 하지 않는다 — 회귀 방지."""
+    # estimator 는 항상 10 반환 — 언제나 예산 안에 들어감.
+    collector = DiffContextCollector(overhead_estimator=lambda pr, d: 10)
+    patches = {"a.py": "@@ -1 +1 @@\n+x\n", "b.py": "@@ -1 +1 @@\n+y\n"}
+    pr = _pr(changed=("a.py", "b.py"), patches=patches)
+
+    dump = await collector.collect_diff(pr, TokenBudget(max_tokens=100))
+
+    # 두 파일 모두 담겼어야 한다 (verify 가 건드리지 않음).
+    assert [e.path for e in dump.entries] == ["a.py", "b.py"]
+    assert dump.budget_trimmed == ()
+    assert dump.exceeded_budget is False
+
+
+async def test_diff_collector_final_verify_budget_trimmed_ordering_preserved() -> None:
+    """verify 루프가 떨어뜨린 entries 는 `budget_trimmed` 앞쪽으로 삽입돼 원본 순서를 유지.
+
+    뒤에서부터 f5 먼저, 그 다음 f4, … 순으로 떨어지므로 `budget_trimmed` 는
+    [f4, f5] (원본 순서) 로 관찰된다.
+    """
+    def fake_length(pr: PullRequest, dump: FileDump) -> int:
+        return 110 * len(dump.entries) + 20 * len(dump.budget_trimmed)
+
+    collector = DiffContextCollector(overhead_estimator=fake_length)
+    patches = {f"f{i}.py": "@@\n+x\n" for i in range(6)}
+    changed = tuple(f"f{i}.py" for i in range(6))
+    pr = _pr(changed=changed, patches=patches)
+
+    # 400 chars 예산: 6 entries 는 초과, 수렴 지점까지 trim.
+    dump = await collector.collect_diff(pr, TokenBudget(max_tokens=100))
+
+    # 남은 entries + budget_trimmed 의 합집합이 원본 changed_files 와 같아야 한다.
+    covered = {e.path for e in dump.entries} | set(dump.budget_trimmed)
+    assert covered == set(changed)
+    # 마지막 파일(f5.py) 이 반드시 budget_trimmed 에 있어야 한다 (뒤에서부터 트림).
+    assert "f5.py" in dump.budget_trimmed
+    # budget_trimmed 는 원본 순서를 유지 — 마지막 요소가 f5.py (가장 나중에 밀려난 건
+    # 가장 먼저 수집된 `f0.py` 는 아니고, 구조상 끝 인덱스 파일이 먼저 밀려남).
+    # 중요 계약: 모든 항목이 changed_files 순서 내 원래 상대 위치 유지.
+    positions_in_original = [changed.index(p) for p in dump.budget_trimmed]
+    assert positions_in_original == sorted(positions_in_original)
 
 
 async def test_default_overhead_estimator_measures_real_build_prompt() -> None:
@@ -441,15 +535,16 @@ def _use_case(
 
 
 async def test_use_case_falls_back_to_diff_when_full_exceeds_and_changed_missing() -> None:
-    """핵심 계약: 변경 파일이 예산 때문에 빠졌을 때 diff fallback 으로 리뷰가 게시돼야 한다."""
+    """핵심 계약: 변경 파일이 **예산 때문에** 빠졌을 때 diff fallback 으로 리뷰가 게시돼야 한다."""
     github = _CapturingGitHub()
-    # full 수집이 예산 초과 + 변경 파일 중 b.py 가 빠짐.
+    # full 수집이 예산 초과 + 변경 파일 b.py 가 예산 컷 당함 (filter 가 아님).
     exceeded_full = FileDump(
         entries=(FileEntry(path="a.py", content="x=1", size_bytes=3, is_changed=True),),
         total_chars=3,
         excluded=("b.py",),
         exceeded_budget=True,
         mode=DUMP_MODE_FULL,
+        # b.py 는 filter 가 아닌 예산 컷이므로 filter_excluded 는 비어 있다.
     )
     engine_result = ReviewResult(summary="OK", event=ReviewEvent.COMMENT)
     uc, engine = _use_case(github, exceeded_full, engine_result)
@@ -548,6 +643,67 @@ async def test_use_case_fallback_disabled_returns_to_legacy_behavior(
     assert github.posted_reviews == []
     assert len(github.posted_comments) == 1
     assert "예산 초과" in github.posted_comments[0][1]
+
+
+async def test_use_case_does_not_fall_back_when_only_filter_excluded_changed_files_missing() -> None:
+    """회귀 (gemini PR #17 Major): 변경 파일이 정책(바이너리/크기) 필터로만 제외된
+    경우엔 diff fallback 을 트리거하면 안 된다. 이전 `_changed_missing` 은 filter 와
+    budget 을 구분하지 못해 불필요한 강등이 발생했다.
+
+    시나리오:
+      - PR 이 a.py (source) + b.png (binary) 변경
+      - full collector: a.py 정상 포함, b.png 는 filter_excluded 로 빠짐
+      - 다른 거대 파일 때문에 exceeded_budget=True
+      → a.py 는 full 모드로 리뷰돼야 함 (diff fallback 강등 금지)
+    """
+    github = _CapturingGitHub()
+    # exceeded_budget=True, 하지만 b.png 는 "filter" 로 빠진 것 (budget 이 아님).
+    full_with_filter_only = FileDump(
+        entries=(FileEntry(path="a.py", content="x=1", size_bytes=3, is_changed=True),),
+        total_chars=3,
+        excluded=("b.png",),
+        exceeded_budget=True,
+        mode=DUMP_MODE_FULL,
+        filter_excluded=("b.png",),  # 핵심: 필터로 빠진 거라 fallback 대상 아님
+    )
+    engine_result = ReviewResult(summary="OK", event=ReviewEvent.COMMENT)
+    uc, engine = _use_case(github, full_with_filter_only, engine_result)
+
+    patches = {"a.py": "@@ -1,1 +1,2 @@\n x\n+y\n"}  # b.png 는 patch 도 없음
+    pr = _pr(changed=("a.py", "b.png"), patches=patches)
+
+    await uc.execute(pr)
+
+    # full 모드 그대로 리뷰돼야 하고, diff collector 는 호출되지 않아야 한다.
+    assert len(engine.seen_dumps) == 1
+    assert engine.seen_dumps[0].mode == DUMP_MODE_FULL
+    _, posted = github.posted_reviews[0]
+    assert "diff-only" not in posted.summary
+
+
+async def test_use_case_still_falls_back_when_source_change_was_budget_trimmed() -> None:
+    """대조군: 같은 시나리오라도 변경 파일이 **예산 컷** 으로 빠진 경우는 fallback 성공."""
+    github = _CapturingGitHub()
+    # a.py 가 실제로 예산 때문에 잘림 (filter_excluded 는 비어 있음)
+    full_budget_cut = FileDump(
+        entries=(),
+        total_chars=0,
+        excluded=("a.py",),
+        exceeded_budget=True,
+        mode=DUMP_MODE_FULL,
+        filter_excluded=(),  # 정책 배제 없음 — 순수 예산 컷
+    )
+    engine_result = ReviewResult(summary="OK", event=ReviewEvent.COMMENT)
+    uc, engine = _use_case(github, full_budget_cut, engine_result)
+
+    patches = {"a.py": "@@ -1 +1 @@\n-x\n+y\n"}
+    pr = _pr(changed=("a.py",), patches=patches)
+
+    await uc.execute(pr)
+
+    # 이번에는 diff 모드로 강등돼야 정상.
+    assert len(engine.seen_dumps) == 1
+    assert engine.seen_dumps[0].mode == DUMP_MODE_DIFF
 
 
 async def test_use_case_fallback_empty_result_goes_to_budget_notice() -> None:

@@ -58,9 +58,11 @@ class ReviewPullRequestUseCase:
 
         # 이 지점 이후 파일 I/O 없음 — dump 는 메모리에 담긴 스냅샷. 락을 풀어도 안전.
 
-        # 변경 파일이 예산 때문에 잘려 나갔다면 전체-코드베이스 리뷰가 성립하지 않는다.
-        # diff-only 모드 fallback 이 설정돼 있으면 시도, 아니면 안내만 게시.
-        if dump.exceeded_budget and _changed_missing(pr, dump):
+        # 변경 파일이 **예산 때문에** 잘려 나갔다면 전체-코드베이스 리뷰가 성립하지 않는다.
+        # 단 바이너리/정책 필터로 제외된 변경 파일(예: .png) 은 fallback 을 트리거하면 안 된다
+        # (gemini PR #17 Major 지적). 의미상 "diff 에서 봐도 못 보는 파일" 이라 fallback 해봐야
+        # 품질만 떨어진다.
+        if dump.exceeded_budget and _changed_trimmed_by_budget(pr, dump):
             fallback_dump = await self._try_diff_fallback(pr)
             if fallback_dump is None:
                 logger.warning(
@@ -123,9 +125,15 @@ class ReviewPullRequestUseCase:
         return diff_dump
 
 
-def _changed_missing(pr: PullRequest, dump: FileDump) -> bool:
-    included = {e.path for e in dump.entries}
-    return any(cf not in included for cf in pr.changed_files)
+def _changed_trimmed_by_budget(pr: PullRequest, dump: FileDump) -> bool:
+    """변경 파일 중 **예산 초과로** 덤프에서 빠진 파일이 있는지.
+
+    이전 `_changed_missing` 은 정책(바이너리/크기) 으로 제외된 파일까지 "누락" 으로
+    판정해 불필요한 diff fallback 을 유발했다. `dump.budget_trimmed` 는 이제 정확히
+    예산 컷 집합만 담으므로 여기서 교차 검사만 하면 된다 (gemini 리뷰 Major 반영).
+    """
+    budget_cut = set(dump.budget_trimmed)
+    return any(cf in budget_cut for cf in pr.changed_files)
 
 
 def _filter_findings_to_diff(

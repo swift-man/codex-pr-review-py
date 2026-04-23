@@ -33,12 +33,38 @@ from .codex_prompt import build_prompt
 
 logger = logging.getLogger(__name__)
 
-OverheadEstimator = Callable[[PullRequest, FileDump], int]
+PromptLengthEstimator = Callable[[PullRequest, FileDump], int]
+# 이전 이름 호환용 alias — 콜러가 overhead 만 재는 이름으로 주입하던 자리도 그대로.
+OverheadEstimator = PromptLengthEstimator
 
 
-def _default_overhead_estimator(pr: PullRequest, empty_dump: FileDump) -> int:
-    """실 운영 기본값 — `build_prompt()` 를 1회 호출해 오버헤드를 측정."""
-    return len(build_prompt(pr, empty_dump))
+def _default_prompt_length(pr: PullRequest, dump: FileDump) -> int:
+    """실 운영 기본값 — `build_prompt()` 를 호출해 그 길이를 측정.
+
+    collector 는 이 함수를 두 번 쓴다:
+      (1) 초기 오버헤드 산정 — 빈 덤프 기준
+      (2) 최종 검증 — 실제 담은 entries + SCOPE 섹션 포함한 전체 프롬프트
+    테스트는 `lambda pr, dump: 0` 같은 stub 을 주입해 두 경로 모두 중립화할 수 있다.
+    """
+    return len(build_prompt(pr, dump))
+
+
+def _build_dump(
+    entries: list[FileEntry],
+    budget_trimmed: list[str],
+    patch_missing: tuple[str, ...],
+    budget: TokenBudget | None,
+) -> FileDump:
+    """중간 상태에서 최종 FileDump 를 재구성하는 헬퍼 (최종 검증 루프용)."""
+    return FileDump(
+        entries=tuple(entries),
+        total_chars=sum(len(e.content) for e in entries),
+        excluded=tuple(budget_trimmed) + patch_missing,
+        exceeded_budget=bool(budget_trimmed),
+        budget=budget,
+        mode=DUMP_MODE_DIFF,
+        patch_missing=patch_missing,
+    )
 
 
 class DiffContextCollector:
@@ -50,7 +76,9 @@ class DiffContextCollector:
     """
 
     def __init__(self, overhead_estimator: OverheadEstimator | None = None) -> None:
-        self._estimate_overhead = overhead_estimator or _default_overhead_estimator
+        # 하나의 함수가 "dump 가 주어졌을 때 최종 프롬프트 길이" 를 모두 답한다.
+        # 이름은 BC 유지 (이전 인자 이름 overhead_estimator) 지만 의미가 확장됐음.
+        self._prompt_length = overhead_estimator or _default_prompt_length
 
     async def collect_diff(self, pr: PullRequest, budget: TokenBudget) -> FileDump:
         max_chars = budget.max_chars()
@@ -69,7 +97,7 @@ class DiffContextCollector:
             mode=DUMP_MODE_DIFF,
             budget=budget,
         )
-        overhead_chars = self._estimate_overhead(pr, overhead_estimate_dump)
+        overhead_chars = self._prompt_length(pr, overhead_estimate_dump)
         # 오버헤드가 예산 전체를 삼킨 경우 정직하게 0 반환. use case 가 "빈 덤프" 로
         # 판정해 fallback 불가 안내로 떨어지게 한다. 인위적 floor 로 "사실상 초과" 상태
         # 를 숨기면 codex 단계에서 더 혼란스러운 실패로 이어진다.
@@ -113,23 +141,52 @@ class DiffContextCollector:
             )
             total_chars += size_chars
 
-        exceeded = bool(budget_trimmed)
+        dump = _build_dump(entries, budget_trimmed, patch_missing, budget)
+
+        # 4th pass — **최종 검증**: 오버헤드 산정은 budget_trimmed SCOPE 섹션이 아직
+        # 비어 있는 상태로 했다. 이제 그 목록이 생겼으므로 실제 `build_prompt()` 길이를
+        # 한 번 더 측정해서 `max_chars` 를 넘으면 뒤에서부터 entries 를 떨어뜨린다.
+        # 떨어진 entry 는 budget_trimmed 쪽으로 옮겨져 SCOPE 섹션에 추가되지만,
+        # 그 추가 overhead 까지 포함해 re-check 하므로 단조 감소 → 반드시 수렴한다
+        # (codex PR #17 Major 지적 반영).
+        dump = self._enforce_final_prompt_budget(pr, dump, max_chars)
 
         logger.info(
             "diff collector: files=%d total_chars=%d (patch_budget=%d, overhead=%d) "
             "budget_trimmed=%d patch_missing=%d",
-            len(entries), total_chars, patch_budget, overhead_chars,
-            len(budget_trimmed), len(patch_missing),
+            len(dump.entries), dump.total_chars, patch_budget, overhead_chars,
+            len(dump.budget_trimmed), len(dump.patch_missing),
         )
+        return dump
 
-        return FileDump(
-            entries=tuple(entries),
-            total_chars=total_chars,
-            # `excluded` 는 기존 FileDump 계약상 "그 외 이유로 빠진 파일" 로 쓰이므로,
-            # budget_trimmed 와 patch_missing 둘 다 합쳐 운영자 노출용으로 넣는다.
-            excluded=tuple(budget_trimmed) + patch_missing,
-            exceeded_budget=exceeded,
-            budget=budget,
-            mode=DUMP_MODE_DIFF,
-            patch_missing=patch_missing,
-        )
+    def _enforce_final_prompt_budget(
+        self, pr: PullRequest, dump: FileDump, max_chars: int
+    ) -> FileDump:
+        """`build_prompt(pr, dump)` 결과가 `max_chars` 이하가 될 때까지 뒤에서부터 entry
+        를 떨어뜨린다. 떨어진 entry 는 `budget_trimmed` 로 승격.
+
+        각 반복은 entry 1개 제거 + prompt 1회 재생성. entries 가 더는 없어도 오버헤드
+        자체가 초과인 케이스(운영자가 비정상적으로 작은 예산 설정) 는 그대로 반환 —
+        상위 use case 가 "빈 덤프 → 안내 코멘트" 경로로 처리한다.
+        """
+        entries = list(dump.entries)
+        budget_trimmed = list(dump.budget_trimmed)
+        patch_missing = dump.patch_missing
+        budget = dump.budget
+
+        current_len = self._prompt_length(pr, dump)
+        while current_len > max_chars and entries:
+            victim = entries.pop()
+            # 축출되는 entry 의 path 를 budget_trimmed 의 **앞쪽** 에 넣어 원래 changed_files
+            # 순서 의미를 유지. (SCOPE 렌더링이 원본 순서를 추적 가능하도록.)
+            budget_trimmed.insert(0, victim.path)
+            dump = _build_dump(entries, budget_trimmed, patch_missing, budget)
+            new_len = self._prompt_length(pr, dump)
+            logger.warning(
+                "diff collector: final prompt %d > max %d — trimmed %s "
+                "(new prompt %d)",
+                current_len, max_chars, victim.path, new_len,
+            )
+            current_len = new_len
+
+        return dump
