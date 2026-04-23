@@ -112,10 +112,12 @@ class ReviewPullRequestUseCase:
             )
             return None
         if diff_dump.exceeded_budget:
+            # excluded = budget_trimmed + patch_missing (collector 에서 보장)
+            # → budget_trimmed 개수는 O(1) 뺄셈으로 구할 수 있다 (gemini 리뷰 지적).
+            budget_trimmed_count = len(diff_dump.excluded) - len(diff_dump.patch_missing)
             logger.info(
                 "diff fallback partial for %s#%d — %d files truncated by budget",
-                pr.repo.full_name, pr.number,
-                sum(1 for p in diff_dump.excluded if p not in set(diff_dump.patch_missing)),
+                pr.repo.full_name, pr.number, budget_trimmed_count,
             )
         logger.info(
             "falling back to diff-only review for %s#%d — files=%d chars=%d",
@@ -172,7 +174,9 @@ def _prepend_diff_scope_badge(result: ReviewResult, dump: FileDump) -> ReviewRes
     추가해 도메인 모델을 오염시키는 것보다 간단하고 가시성이 동일.
     """
     patch_missing = dump.patch_missing
-    budget_trimmed = tuple(p for p in dump.excluded if p not in set(patch_missing))
+    # set 을 한 번만 생성해 O(N*M) 을 O(N+M) 으로 줄인다 (gemini 리뷰 지적).
+    missing_set = set(patch_missing)
+    budget_trimmed = tuple(p for p in dump.excluded if p not in missing_set)
 
     lines = [
         "> ⚠️ **리뷰 범위: diff-only (자동 전환)**",

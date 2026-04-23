@@ -226,7 +226,9 @@ def _build_diff_prompt(pr: PullRequest, dump: FileDump) -> str:
     포함한 unified patch 원문이므로 그대로 이어 붙인다.
     """
     patch_missing = dump.patch_missing
-    budget_trimmed = tuple(p for p in dump.excluded if p not in set(patch_missing))
+    # set 을 한 번만 생성해 O(N*M) 을 O(N+M) 으로 줄인다 (gemini 리뷰 지적).
+    missing_set = set(patch_missing)
+    budget_trimmed = tuple(p for p in dump.excluded if p not in missing_set)
 
     sections: list[str] = [
         DIFF_MODE_SYSTEM_RULES.strip(),

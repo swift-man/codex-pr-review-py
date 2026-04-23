@@ -36,33 +36,46 @@ class DiffContextCollector:
         budget_trimmed: list[str] = []
         patch_missing: list[str] = []
         total_chars = 0
+        budget_full = False  # 한 번 초과되면 이후 모든 변경 파일을 기록만 하고 담지 않는다.
 
         for path in pr.changed_files:
             patch = pr.diff_patches.get(path)
             if patch is None:
                 # GitHub 가 patch 를 생략한 파일 — diff 모드에서는 통째로 리뷰 불가.
+                # 예산 full 상태와 무관하게 항상 patch_missing 쪽에 계속 누적한다 (운영자
+                # 에게 "그 파일은 patch 자체가 없다" 는 구조적 한계를 정확히 노출해야 함).
                 patch_missing.append(path)
+                continue
+
+            if budget_full:
+                # 이미 예산이 찼으므로 더 담지 않지만, 이 파일이 "리뷰되지 않았다" 는 사실은
+                # budget_trimmed 에 남겨 배지·프롬프트 SCOPE 섹션에 정확히 표시되도록 한다
+                # (codex 리뷰 지적: 이전 구현은 break 해버려 뒤 파일들이 전부 누락됐음).
+                budget_trimmed.append(path)
                 continue
 
             # `@@ -... +... @@` hunk 가 이미 파일 경로를 포함하지 않는다. LLM 이 어떤
             # 파일의 변경인지 알 수 있도록 얇은 파일 헤더를 붙여 내보낸다.
             body = f"=== PATCH: {path} ===\n{patch.rstrip()}\n"
-            size = len(body)
+            # 예산 계산은 문자 수 기준 (TokenBudget.chars_per_token), size_bytes 는 이와
+            # 별개로 멀티바이트를 고려한 실제 바이트 크기를 담는다 (gemini 리뷰 지적).
+            size_chars = len(body)
+            size_bytes = len(body.encode("utf-8"))
 
-            if total_chars + size > max_chars:
-                # 이 파일 포함 시 예산 초과 — 이 파일부터 뒤는 전부 drop.
+            if total_chars + size_chars > max_chars:
                 budget_trimmed.append(path)
+                budget_full = True
                 logger.warning(
                     "diff collector: budget exceeded after %d entries (%d chars) "
-                    "— dropping %s and beyond",
+                    "— dropping %s and subsequent changed files",
                     len(entries), total_chars, path,
                 )
-                break
+                continue
 
             entries.append(
-                FileEntry(path=path, content=body, size_bytes=size, is_changed=True)
+                FileEntry(path=path, content=body, size_bytes=size_bytes, is_changed=True)
             )
-            total_chars += size
+            total_chars += size_chars
 
         # 예산 초과 플래그: 변경 파일 중 하나라도 예산 때문에 잘렸으면 True.
         # patch_missing 은 "애초에 patch 가 없어서 제외" 라 예산 이슈와 구분해 별도 보고.

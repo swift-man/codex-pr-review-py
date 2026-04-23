@@ -199,6 +199,54 @@ async def test_diff_collector_empty_when_no_patches() -> None:
     assert dump.patch_missing == ("a.py",)
 
 
+async def test_diff_collector_records_all_remaining_files_after_budget_hit() -> None:
+    """회귀 (codex PR #17 Major): 예산 초과 지점에서 break 해버려 뒤 파일들이 `excluded`
+    에도 SCOPE 안내에도 남지 않던 버그. 이제는 초과 이후 모든 변경 파일이 정확히
+    budget_trimmed 로 기록되고, 중간에 섞인 patch_missing 파일도 계속 정확히 분류된다.
+    """
+    collector = DiffContextCollector()
+    # patch 크기 ≈ 186 chars — a.py (186) + b.py (186) = 372 < 400.
+    # c.py 부터 예산 초과. d.py 는 patch 가 아예 없는 파일 (rename 등). e.py 는 또 정상.
+    big_patch = "@@ -1,1 +1,1 @@\n" + "+x\n" * 50
+    patches = {
+        "a.py": big_patch,
+        "b.py": big_patch,
+        "c.py": big_patch,
+        "e.py": big_patch,
+    }
+    pr = _pr(changed=("a.py", "b.py", "c.py", "d.py", "e.py"), patches=patches)
+
+    dump = await collector.collect_diff(pr, TokenBudget(max_tokens=100))
+
+    assert [e.path for e in dump.entries] == ["a.py", "b.py"]
+    assert dump.exceeded_budget is True
+    # c.py 와 e.py 모두 예산으로 잘린 것으로 기록돼야 한다 (이전 구현은 c.py 만 남김).
+    budget_trimmed = tuple(p for p in dump.excluded if p not in dump.patch_missing)
+    assert budget_trimmed == ("c.py", "e.py")
+    # d.py 는 patch 가 없었으니 patch_missing 쪽에 정확히 분류.
+    assert dump.patch_missing == ("d.py",)
+    # excluded 에는 둘 다 포함돼 운영자에게 전부 노출된다.
+    assert set(dump.excluded) == {"c.py", "e.py", "d.py"}
+
+
+async def test_diff_collector_size_bytes_uses_utf8_byte_length() -> None:
+    """회귀 (gemini PR #17 Major): 한글 등 멀티바이트가 섞이면 `len(body)` (char 개수)
+    와 `len(body.encode('utf-8'))` (bytes) 가 크게 달라진다. FileEntry.size_bytes 는
+    이름대로 실제 바이트를 담아야 모니터링·모델 로그가 정확하다.
+    """
+    collector = DiffContextCollector()
+    # 한글 "한" 은 UTF-8 에서 3 bytes. patch 본문에 multibyte 포함.
+    patches = {"a.py": "@@ -1,1 +1,1 @@\n-영어만\n+한글과 English\n"}
+    pr = _pr(changed=("a.py",), patches=patches)
+
+    dump = await collector.collect_diff(pr, TokenBudget(max_tokens=10_000))
+
+    entry = dump.entries[0]
+    assert entry.size_bytes == len(entry.content.encode("utf-8"))
+    # 멀티바이트가 있으므로 byte 수 > char 수 여야 함.
+    assert entry.size_bytes > len(entry.content)
+
+
 # ---------------------------------------------------------------------------
 # Prompt builder — mode branching
 # ---------------------------------------------------------------------------
