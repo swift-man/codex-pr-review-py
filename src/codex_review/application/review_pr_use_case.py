@@ -123,9 +123,11 @@ class ReviewPullRequestUseCase:
                 return None
 
             # full 모드 실패 — 모델이 입력 거부했을 가능성 높다. diff 모드로 재시도.
+            # 예외 타입은 항상 ReviewEngineError 라 type(exc).__name__ 은 정보가 없어
+            # 마스킹된 메시지(str(exc)) 를 직접 노출 (gemini PR #18 Minor 반영).
             logger.warning(
-                "engine failed on full mode for %s#%d (%s) — retrying in diff-only mode",
-                pr.repo.full_name, pr.number, type(exc).__name__,
+                "engine failed on full mode for %s#%d — retrying in diff-only mode (cause: %s)",
+                pr.repo.full_name, pr.number, str(exc),
             )
             fallback_dump = await self._try_diff_fallback(pr)
             if fallback_dump is None:
@@ -203,9 +205,14 @@ def _changed_trimmed_by_budget(pr: PullRequest, dump: FileDump) -> bool:
     이전 `_changed_missing` 은 정책(바이너리/크기) 으로 제외된 파일까지 "누락" 으로
     판정해 불필요한 diff fallback 을 유발했다. `dump.budget_trimmed` 는 이제 정확히
     예산 컷 집합만 담으므로 여기서 교차 검사만 하면 된다 (gemini 리뷰 Major 반영).
+
+    `set.isdisjoint` 가 `any(... in set ...)` 보다 C 레벨 최적화로 더 빠르다 — 큰
+    PR 에서 micro perf 이긴 하지만 표현이 깔끔 (gemini PR #18 Suggestion).
     """
     budget_cut = set(dump.budget_trimmed)
-    return any(cf in budget_cut for cf in pr.changed_files)
+    if not budget_cut:
+        return False
+    return not budget_cut.isdisjoint(pr.changed_files)
 
 
 def _filter_findings_to_diff(

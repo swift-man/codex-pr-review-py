@@ -39,14 +39,29 @@ _redact_text = redact_text
 
 
 def _redact_arg(value: Any) -> Any:
-    """logger 인자 하나를 안전한 형태로 변환. 문자열이 아니면 그대로 반환 — 비파괴.
+    """logger 인자 하나를 안전한 형태로 변환 — **컨테이너 재귀** 지원.
 
-    포맷 시 `%s` 가 호출하는 `__str__` 결과까지 마스킹하려면 string 으로 강제 변환해야
-    하지만 그건 원본 객체를 잃는다. 보수적으로 str 만 처리하고, 객체 repr 에 시크릿이
-    들어 있는 케이스(드뭄) 는 호출지에서 명시적으로 문자열화하도록 한다.
+    `_RedactFilter` 가 record.args 를 walk 할 때 단일 항목 단위로 호출하는 헬퍼.
+    문자열은 마스킹, dict / list / tuple 같은 컨테이너는 안쪽 문자열까지 재귀.
+
+    재귀가 필요한 이유 (codex PR #18 Major 반영):
+      `logger.info("x %(k)s", {"k": "secret=xxx"})` 처럼 dict args 를 쓸 때, 표준
+      logging 컨벤션상 LogRecord.__init__ 가 1-tuple({dict}) 를 dict 로 unwrap 하지만,
+      LogRecord 를 직접 만드는 테스트나 커스텀 어댑터·필터 체인이 있는 환경에서는
+      `(dict,)` 형태 그대로 도착할 수도 있다. 재귀로 양 형태 모두 안전하게 마스킹.
+
+    객체 repr 에 시크릿이 들어 있는 케이스 (예: `logger.info("err=%s", exc)` 에서
+    exc 가 자체 __str__ 으로 토큰을 노출) 는 호출지에서 명시적으로 `redact_text(str(x))`
+    를 적용하도록 한다 — 여기서 객체 repr 까지 강제 문자열화하면 비파괴 계약이 깨짐.
     """
     if isinstance(value, str):
         return _redact_text(value)
+    if isinstance(value, dict):
+        return {k: _redact_arg(v) for k, v in value.items()}
+    if isinstance(value, tuple):
+        return tuple(_redact_arg(v) for v in value)
+    if isinstance(value, list):
+        return [_redact_arg(v) for v in value]
     return value
 
 

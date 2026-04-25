@@ -89,6 +89,43 @@ def test_non_string_arg_passes_through_unmodified() -> None:
     assert "count=7" in formatted
 
 
+def test_redacts_dict_inside_tuple_args() -> None:
+    """회귀 (codex PR #18 Major): 일반 호출 경로는 LogRecord.__init__ 가 1-tuple({dict})
+    을 dict 로 unwrap 하지만, LogRecord 를 직접 만드는 테스트나 커스텀 필터 체인 등
+    에서 args 가 `(dict,)` tuple 형태로 도착할 수 있다. 이 형태에서도 내부 dict 의
+    문자열 값을 재귀적으로 마스킹해야 한다.
+    """
+    record = _make_record(
+        "msg %(detail)s",
+        ({"detail": "authorization=Bearer ghs_LEAK invalid"},),  # 의도적 1-tuple 형태
+    )
+    _RedactFilter().filter(record)
+    # args 가 dict 로 unwrap 됐든, (dict,) tuple 로 유지됐든 어느 경로든 leak 없어야 함.
+    # 두 경우 모두 검증 — 안쪽 dict 의 값에 토큰 흔적이 없어야 함.
+    if isinstance(record.args, tuple):
+        inner = record.args[0]
+    else:
+        inner = record.args
+    assert isinstance(inner, dict)
+    assert "ghs_LEAK" not in inner["detail"]
+    assert "authorization=***" in inner["detail"]
+
+
+def test_redacts_nested_list_args() -> None:
+    """list 안에 또 dict/list 가 있는 중첩 구조도 재귀 처리."""
+    record = _make_record(
+        "items %s",
+        ([{"k": "secret=top"}, "password=p4ssw0rd"],),
+    )
+    _RedactFilter().filter(record)
+    # 첫 번째 위치 인자(list) 의 첫 원소(dict) 값과 두 번째 원소(str) 모두 마스킹돼야 함.
+    items = record.args[0] if isinstance(record.args, tuple) else record.args
+    assert "top" not in items[0]["k"]
+    assert "secret=***" in items[0]["k"]
+    assert "p4ssw0rd" not in items[1]
+    assert "password=***" in items[1]
+
+
 def test_multiline_stderr_preserves_structure_after_masking() -> None:
     """다중라인 stderr 가 args 로 들어가도 마스킹 후 줄바꿈이 유지돼 가독성 보존."""
     stderr = (
