@@ -92,14 +92,37 @@ class _RedactFilter(logging.Filter):
 
 
 def configure_logging(level: str = "INFO") -> None:
+    """Install logging handler with secret-redaction filter.
+
+    Idempotency / coexistence with external loggers (uvicorn, dictConfig, pytest 등):
+      - 우리 핸들러가 아직 없으면 새로 설치 (기본 경로).
+      - 이미 root.handlers 가 있으면(예: uvicorn 이 먼저 dictConfig 로 구성) 그 핸들러
+        들 **각각에** `_RedactFilter` 를 추가 부착 — 토큰이 포함된 stderr 가 마스킹
+        없이 외부 핸들러로 흘러가는 보안 갭을 막는다 (codex PR #18 Critical 반영).
+      - 같은 필터가 이미 붙어 있으면 중복 부착 안 함 (재호출 안전).
+
+    필터는 logger 가 아니라 **handler 단위**에 부착해야 한다 — Python logging 의 propagation
+    경로는 부모 logger 의 handlers 를 직접 호출하지 부모 logger 의 handle() 을 거치지
+    않으므로, logger 자체에 attach 한 필터는 propagated record 에 적용되지 않는다.
+    """
     root = logging.getLogger()
+    redact_filter = _RedactFilter()
+
+    def _attach_if_missing(handler: logging.Handler) -> None:
+        # 같은 종류의 필터가 이미 있으면 또 붙이지 않는다 — 재호출 시 중복 누적 방지.
+        if not any(isinstance(f, _RedactFilter) for f in handler.filters):
+            handler.addFilter(redact_filter)
+
     if root.handlers:
+        for handler in root.handlers:
+            _attach_if_missing(handler)
         return
+
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(
         logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
     )
-    handler.addFilter(_RedactFilter())
+    handler.addFilter(redact_filter)
     root.addHandler(handler)
     root.setLevel(level)
 

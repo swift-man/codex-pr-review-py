@@ -89,6 +89,62 @@ def test_non_string_arg_passes_through_unmodified() -> None:
     assert "count=7" in formatted
 
 
+def test_configure_logging_attaches_filter_to_existing_handlers() -> None:
+    """회귀 (codex PR #18 Critical): 운영 환경에서 uvicorn 이 root handler 를 먼저
+    구성한 뒤 우리 `configure_logging()` 이 호출되는 순서가 흔하다. 이전 구현은
+    `if root.handlers: return` 으로 early-return 해서 이런 경우 `_RedactFilter` 가
+    아예 설치되지 않았고, 이번 PR 에서 추가한 stderr 전체 ERROR 로그가 마스킹 없이
+    그대로 노출됐다.
+
+    수정된 동작: 기존 handler 가 있어도 각 handler 에 idempotent 하게 필터 부착.
+    """
+    import io
+
+    from codex_review.logging_utils import configure_logging
+
+    root = logging.getLogger()
+    saved_handlers = list(root.handlers)
+    saved_level = root.level
+    try:
+        # uvicorn 시뮬레이션: 미리 핸들러 1개 부착 (필터 없음).
+        root.handlers = []
+        external_buf = io.StringIO()
+        external_handler = logging.StreamHandler(external_buf)
+        external_handler.setFormatter(logging.Formatter("%(message)s"))
+        root.addHandler(external_handler)
+
+        # 우리 함수 호출.
+        configure_logging("DEBUG")
+
+        # 외부 핸들러에 _RedactFilter 가 추가됐어야 한다.
+        assert any(
+            isinstance(f, _RedactFilter) for f in external_handler.filters
+        ), "외부 핸들러에 _RedactFilter 가 부착되지 않았음 — 마스킹 우회 가능"
+
+        # 실제로 토큰을 로깅했을 때 외부 핸들러 출력에서 마스킹되는지 검증 (end-to-end).
+        test_logger = logging.getLogger("codex_review.test_propagation")
+        test_logger.setLevel(logging.ERROR)
+        test_logger.error(
+            "rc=%d stderr=%s", 1,
+            "fatal: https://x-access-token:ghs_LEAK@github.com/o/r.git",
+        )
+        external_handler.flush()
+        output = external_buf.getvalue()
+        assert "ghs_LEAK" not in output
+        assert "https://***@github.com" in output
+
+        # 멱등성: 두 번째 호출 시 같은 핸들러에 필터가 또 붙지 않는다.
+        configure_logging("DEBUG")
+        filter_count = sum(
+            1 for f in external_handler.filters if isinstance(f, _RedactFilter)
+        )
+        assert filter_count == 1, f"필터가 중복 부착됨: {filter_count}"
+    finally:
+        # 테스트 격리: 다른 테스트의 root logger 상태에 영향 없도록 복원.
+        root.handlers = saved_handlers
+        root.setLevel(saved_level)
+
+
 def test_redacts_dict_inside_tuple_args() -> None:
     """회귀 (codex PR #18 Major): 일반 호출 경로는 LogRecord.__init__ 가 1-tuple({dict})
     을 dict 로 unwrap 하지만, LogRecord 를 직접 만드는 테스트나 커스텀 필터 체인 등
