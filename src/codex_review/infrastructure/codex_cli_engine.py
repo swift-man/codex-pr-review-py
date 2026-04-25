@@ -2,6 +2,7 @@ import asyncio
 import logging
 
 from codex_review.domain import FileDump, PullRequest, ReviewResult
+from codex_review.interfaces import ReviewEngineError
 
 from ._subprocess import kill_and_reap
 from .codex_parser import parse_review
@@ -99,7 +100,10 @@ class CodexCliEngine:
             # 하위 프로세스 수거 대기에도 상한 — 큐 동시성 상한이 `CODEX_TIMEOUT_SEC` 을
             # 훨씬 넘겨 점유되는 걸 막는다 (codex 리뷰 지적).
             await kill_and_reap(proc)
-            raise RuntimeError(
+            # 타임아웃은 "엔진이 입력 처리에 실패" 의 한 형태이므로 ReviewEngineError 로
+            # 분류 — use case 가 diff fallback 으로 재시도할 수 있다 (작은 입력으로 줄이면
+            # 시간 안에 끝날 수 있음).
+            raise ReviewEngineError(
                 f"codex exec timed out after {self._timeout_sec}s"
             ) from exc
         except asyncio.CancelledError:
@@ -113,16 +117,20 @@ class CodexCliEngine:
             # 전체 stderr 는 별도 ERROR 로그로 — multi-line 그대로 보존되어 운영 진단이
             # 즉시 가능하다. 이전엔 stderr 가 RuntimeError 메시지에 들어가 traceback
             # summary 가 첫 줄(=Codex 시작 배너) 만 보여 진단에 시간이 걸렸다.
+            # `_RedactFilter` 가 record.args 까지 마스킹하므로 토큰/URL 자격증명이 stderr
+            # 에 섞여 있어도 안전 (logging_utils 갱신 — codex PR #18 Major 반영).
             logger.error(
                 "codex exec failed (rc=%d, model=%s):\n%s",
                 proc.returncode, self._model, err or "(no stderr)",
             )
-            # RuntimeError 메시지엔 stderr 의 **마지막 줄** 만 포함 — 보통 Codex CLI 가
-            # 마지막 줄에 실제 원인 (예: model not available, context length exceeded) 을
-            # 찍는다. traceback 첫 줄에 즉시 노출돼 가시성 ↑.
+            # ReviewEngineError 로 분리 — use case 가 일반 버그(KeyError 등) 와 구분해
+            # diff fallback 결정을 정확히 내릴 수 있게 (gemini PR #18 Major+Suggestion 반영).
+            # 메시지엔 stderr 의 **마지막 줄** 만 포함 — 보통 Codex CLI 가 마지막 줄에
+            # 실제 원인(model not available, context length exceeded 등) 을 찍는다.
             summary = err.splitlines()[-1] if err else "(no stderr)"
-            raise RuntimeError(
-                f"codex exec failed (rc={proc.returncode}, model={self._model}): {summary}"
+            raise ReviewEngineError(
+                f"codex exec failed (rc={proc.returncode}, model={self._model}): {summary}",
+                returncode=proc.returncode,
             )
 
         return parse_review(stdout.decode(errors="replace"))

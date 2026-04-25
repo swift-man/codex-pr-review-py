@@ -812,17 +812,23 @@ async def test_use_case_still_falls_back_when_source_change_was_budget_trimmed()
 
 @dataclass
 class _FailingEngine:
-    """첫 호출에서 RuntimeError → 두 번째(diff dump 일 때) 호출에서 성공.
+    """첫 호출에서 ReviewEngineError → 두 번째(diff dump 일 때) 호출에서 성공.
     엔진이 입력을 거부하는 시나리오 (예: 모델 컨텍스트 윈도우 초과) 모사.
+
+    `ReviewEngineError` 를 사용하는 이유 (gemini PR #18 Major): use case 가 일반
+    `Exception` 이 아니라 도메인 엔진 예외만 잡도록 좁혔으므로 fake 도 동일 계약을
+    따라야 한다. 일반 RuntimeError 는 더 이상 fallback 트리거가 아니다.
     """
     second_result: ReviewResult
     full_error_msg: str = "codex exec failed (rc=1, model=gpt-5.5): context length exceeded"
     seen_dumps: list[FileDump] = field(default_factory=list)
 
     async def review(self, pr: PullRequest, dump: FileDump) -> ReviewResult:
+        from codex_review.interfaces import ReviewEngineError
+
         self.seen_dumps.append(dump)
         if dump.mode == DUMP_MODE_FULL:
-            raise RuntimeError(self.full_error_msg)
+            raise ReviewEngineError(self.full_error_msg, returncode=1)
         return self.second_result
 
 
@@ -833,8 +839,10 @@ class _AlwaysFailingEngine:
     seen_dumps: list[FileDump] = field(default_factory=list)
 
     async def review(self, pr: PullRequest, dump: FileDump) -> ReviewResult:
+        from codex_review.interfaces import ReviewEngineError
+
         self.seen_dumps.append(dump)
-        raise RuntimeError(self.error_msg)
+        raise ReviewEngineError(self.error_msg, returncode=1)
 
 
 async def test_use_case_falls_back_to_diff_when_engine_rejects_full_input() -> None:
@@ -955,6 +963,51 @@ async def test_use_case_posts_diagnostic_when_diff_fallback_unavailable() -> Non
     assert "리뷰 엔진 실패" in body
     assert "full 모드만 시도" in body  # diff 시도 안 됐음을 명시
     assert "CODEX_ENABLE_DIFF_FALLBACK" in body  # 운영자에게 옵트아웃 확인 안내
+
+
+async def test_use_case_propagates_non_engine_errors_without_fallback() -> None:
+    """회귀 (gemini PR #18 Major): 엔진의 ReviewEngineError 가 아닌 예외(KeyError,
+    TypeError, MemoryError 등 진짜 코드 버그) 는 catch 하지 않고 그대로 전파한다.
+
+    이전 `except Exception` 은 너무 광범위해 무관한 런타임 버그까지 삼키고 잘못된
+    diff fallback 을 유발했다 — 진짜 원인이 가려지고 운영자가 한참 후에야 발견.
+    """
+    github = _CapturingGitHub()
+    full_ok_dump = FileDump(
+        entries=(FileEntry(path="a.py", content="x", size_bytes=1, is_changed=True),),
+        total_chars=1,
+        mode=DUMP_MODE_FULL,
+    )
+
+    @dataclass
+    class _BuggyEngine:
+        seen_dumps: list[FileDump] = field(default_factory=list)
+
+        async def review(self, pr: PullRequest, dump: FileDump) -> ReviewResult:
+            self.seen_dumps.append(dump)
+            # 의도적으로 무관한 버그 (엔진 입력 거부가 아님)
+            raise KeyError("config_section")
+
+    engine = _BuggyEngine()
+    uc = ReviewPullRequestUseCase(
+        github=github,
+        repo_fetcher=_NoopFetcher(),
+        file_collector=_StaticFullCollector(dump=full_ok_dump),
+        engine=engine,  # type: ignore[arg-type]
+        max_input_tokens=10_000,
+        diff_context_collector=DiffContextCollector(overhead_estimator=_zero_overhead),
+    )
+    pr = _pr(changed=("a.py",), patches={"a.py": "@@\n+x\n"})
+
+    # 진짜 버그는 그대로 propagate — diff fallback 으로 가려지지 않아야 한다.
+    with pytest.raises(KeyError):
+        await uc.execute(pr)
+
+    # 엔진은 1회만 호출됨 — 재시도 시도조차 안 됨.
+    assert len(engine.seen_dumps) == 1
+    # 진단 코멘트도 없음 — 엔진 입력 문제가 아니므로 운영자에게 다른 종류의 신호.
+    assert github.posted_comments == []
+    assert github.posted_reviews == []
 
 
 async def test_use_case_does_not_recurse_when_failing_in_diff_mode() -> None:

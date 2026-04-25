@@ -16,6 +16,7 @@ from codex_review.interfaces import (
     GitHubClient,
     RepoFetcher,
     ReviewEngine,
+    ReviewEngineError,
 )
 
 logger = logging.getLogger(__name__)
@@ -108,7 +109,7 @@ class ReviewPullRequestUseCase:
         """
         try:
             result = await self._engine.review(pr, dump)
-        except Exception as exc:
+        except ReviewEngineError as exc:
             # 이미 diff 모드인데 또 실패 → 더 줄일 수 없다. 진단 코멘트 + 종료.
             if dump.mode == DUMP_MODE_DIFF:
                 logger.exception(
@@ -138,7 +139,7 @@ class ReviewPullRequestUseCase:
                 return None
             try:
                 result = await self._engine.review(pr, fallback_dump)
-            except Exception as retry_exc:
+            except ReviewEngineError as retry_exc:
                 logger.exception(
                     "engine retry in diff mode also failed for %s#%d",
                     pr.repo.full_name, pr.number,
@@ -174,9 +175,13 @@ class ReviewPullRequestUseCase:
         diff_dump = await self._diff_collector.collect_diff(pr, self._budget)
         if not diff_dump.entries:
             # 전부 patch_missing 이거나 예산 초과로 하나도 못 담았음 — 의미 없는 리뷰 방지.
+            # 두 카테고리(patch 누락 vs 예산 컷) 를 함께 노출해 운영자가 원인을 정확히
+            # 추적할 수 있게 한다 (gemini PR #18 Minor 반영).
             logger.warning(
-                "diff fallback produced empty dump for %s#%d (patch_missing=%d)",
-                pr.repo.full_name, pr.number, len(diff_dump.patch_missing),
+                "diff fallback produced empty dump for %s#%d "
+                "(patch_missing=%d, budget_trimmed=%d)",
+                pr.repo.full_name, pr.number,
+                len(diff_dump.patch_missing), len(diff_dump.budget_trimmed),
             )
             return None
         if diff_dump.exceeded_budget:
