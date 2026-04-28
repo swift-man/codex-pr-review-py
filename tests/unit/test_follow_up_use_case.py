@@ -261,7 +261,12 @@ async def test_processes_each_candidate_independently(tmp_path: Path) -> None:
 
 
 async def test_continues_processing_when_one_thread_reply_fails(tmp_path: Path) -> None:
-    """한 스레드 답글 실패가 다른 스레드 처리를 막지 않는다."""
+    """한 스레드 reply 실패가 다른 스레드 처리를 막지 않는다.
+
+    회귀 (gemini + coderabbitai PR #19 Major): 액션 순서가 **resolve 먼저 → reply** 라
+    reply 실패 시 마커가 안 박히고 thread 만 닫힌다. 다음 push 에서 thread 가 이미
+    `is_resolved=True` 라 자연스럽게 후보 제외 — stuck state 안 남음.
+    """
     (tmp_path / "f1.py").write_text("x\n", encoding="utf-8")
     (tmp_path / "f2.py").write_text("y\n", encoding="utf-8")
 
@@ -281,6 +286,83 @@ async def test_continues_processing_when_one_thread_reply_fails(tmp_path: Path) 
 
     await uc.execute(_pr())
 
-    # T_1 은 실패했지만 T_2 는 정상 처리.
+    # 두 thread 모두 resolve 가 먼저 호출돼 성공 — 가시적 효과(unresolved 카운트 감소)
+    # 는 두 thread 다 달성. T_1 reply 만 실패해 마커 미부착 → 다음 push 에서 재시도
+    # 가능 (thread 는 이미 resolved 라 실제로는 후보 제외).
+    assert sorted(github.resolved_ids) == ["T_1", "T_2"]
+    # T_1 의 reply 는 실패했으므로 게시된 reply 는 T_2 것 한 건만.
     assert [cid for cid, _ in github.replies] == [2]
-    assert github.resolved_ids == ["T_2"]
+
+
+async def test_line_count_handles_file_without_trailing_newline(tmp_path: Path) -> None:
+    """회귀 — 파일 마지막 줄이 newline 으로 끝나지 않아도 라인 수가 정확히 1줄 더 카운트
+    된다. `\\n` 카운트만 하면 마지막 라인이 누락돼 EOF-초과 판정이 잘못된다.
+    """
+    p = tmp_path / "no_trailing_newline.py"
+    p.write_bytes(b"line1\nline2\nlast-without-newline")  # 3줄, 마지막 newline 없음
+
+    from codex_review.application.follow_up_use_case import _count_lines
+    assert _count_lines(p) == 3
+
+    p_with = tmp_path / "with_trailing.py"
+    p_with.write_bytes(b"line1\nline2\nline3\n")  # 3줄, 마지막에 newline
+    assert _count_lines(p_with) == 3
+
+    empty = tmp_path / "empty.py"
+    empty.write_bytes(b"")
+    assert _count_lines(empty) == 0
+
+
+async def test_line_count_handles_huge_single_line_file_without_oom(
+    tmp_path: Path,
+) -> None:
+    """회귀 (gemini PR #19 Critical): 줄바꿈 없는 거대 파일 (난독화 JS, 바이너리 덤프)
+    에서 `for _ in f:` 가 전체를 한 줄로 읽어 OOM 유발. 청크 기반으로 카운트하면
+    메모리 사용량이 chunk_size 로 상한된다.
+
+    1MB 파일은 OS 별 차이로 실제 OOM 까진 안 가지만, 메모리 폭발 위험이 있던 코드
+    경로가 chunk 단위로 안전하게 처리됨을 동작 가능성 차원에서 검증.
+    """
+    huge = tmp_path / "huge_single_line.dat"
+    # 1MB, newline 0개 — 한 줄짜리 파일
+    huge.write_bytes(b"x" * (1024 * 1024))
+
+    from codex_review.application.follow_up_use_case import _count_lines
+    assert _count_lines(huge) == 1  # newline 0개 + 비어있지 않으므로 1줄
+
+
+async def test_classify_returns_none_when_line_in_file(tmp_path: Path) -> None:
+    """라인이 파일 안쪽이면 분류 결과 None (Phase 1 결정 불가, Phase 2 후보)."""
+    f = tmp_path / "src" / "a.py"
+    f.parent.mkdir()
+    f.write_text("\n".join(f"l{i}" for i in range(50)), encoding="utf-8")
+
+    from codex_review.application.follow_up_use_case import _classify_thread
+    thread = _thread(path="src/a.py", line=10)
+    assert _classify_thread(thread, tmp_path) is None
+
+
+async def test_resolve_failure_does_not_post_reply_marker(tmp_path: Path) -> None:
+    """회귀 (gemini + coderabbitai PR #19 Major): resolve 가 먼저, 실패 시 reply 안 함.
+
+    이전 순서(reply→resolve) 는 reply 가 마커를 박은 뒤 resolve 가 실패하면 thread
+    는 미해결 상태인데 다음 실행에서 `has_followup_marker=True` 로 skip → 영원히
+    stuck. 새 순서(resolve→reply) 는 resolve 실패 시 reply 도 안 해 마커가 안 박히고
+    다음 push 에서 자연스럽게 재시도 가능.
+    """
+    @dataclass
+    class _ResolveFailingGitHub(_FakeGitHub):
+        async def resolve_review_thread(self, thread_id, installation_id):
+            # resolve 실패 — reply 가 호출되면 안 된다.
+            raise RuntimeError("GraphQL errors: thread already resolved")
+
+    github = _ResolveFailingGitHub(
+        threads=(_thread(id="T_X", root_comment_id=99, path="missing.py", line=1),),
+    )
+    uc = _make_use_case(github, tmp_path)
+
+    await uc.execute(_pr())
+
+    # 핵심 계약: resolve 실패 시 reply 절대 호출 X (마커 박지 않음 → 다음 push 재시도 가능).
+    assert github.replies == []
+    assert github.resolved_ids == []  # resolve 가 raise 했으므로 등록도 안 됨

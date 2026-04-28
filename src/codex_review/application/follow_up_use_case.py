@@ -13,15 +13,32 @@
   - 사람·다른 봇의 답글이 이미 있음 (대화 진행 중 — 자동 끼어들기 금지)
   - 우리가 이전에 follow-up 답글을 이미 단 스레드 (멱등성, FOLLOWUP_MARKER 검사)
   - GitHub 가 line=None 으로 outdated 처리한 스레드 (자체 처리됨)
+
+실행 순서 (PR #19 review 반영):
+  1) GitHub 에서 thread 목록 조회 (락 밖, 단일 GraphQL).
+  2) 후보 분류 — repo lock **안에서만** 수행 (로컬 file 읽기). 락 보유 시간 최소화.
+  3) 락 해제 후 답글 + resolve API 를 `asyncio.gather` 로 병렬 발사.
+  4) 각 thread 별 액션 순서: **resolve 먼저 → 성공 시 reply**.
+     이유: reply 가 마커를 박은 뒤 resolve 가 실패하면 다음 push 에서 `has_followup_marker=True`
+     로 인식돼 **영원히 후보에서 제외** 되는 stuck 상태 발생. resolve 가 실패하면 답글도
+     남기지 않아 다음 push 에서 다시 시도 가능 (gemini + coderabbitai PR #19 Major).
 """
 
+import asyncio
 import logging
+from dataclasses import dataclass
+from pathlib import Path
 
-from codex_review.domain import PullRequest
+from codex_review.domain import FOLLOWUP_MARKER, PullRequest, ReviewThread
 from codex_review.interfaces import GitHubClient, RepoFetcher
-from codex_review.infrastructure.github_app_client import FOLLOWUP_MARKER
 
 logger = logging.getLogger(__name__)
+
+
+# 라인 수 카운트할 때 한 번에 읽을 청크 크기. `for _ in f:` 는 줄바꿈이 없는 거대 파일
+# (난독화 JS, 바이너리 덤프 등) 에서 전체를 한 줄로 읽어 OOM 유발 위험 (gemini PR #19
+# Critical). 청크 단위로 `\n` 만 세면 메모리 사용량이 chunk_size 로 상한.
+_LINE_COUNT_CHUNK_BYTES = 64 * 1024
 
 
 class FollowUpReviewUseCase:
@@ -58,25 +75,58 @@ class FollowUpReviewUseCase:
             len(candidates), pr.repo.full_name, pr.number,
         )
 
+        # 1) repo lock 안에서는 로컬 file 읽기만 수행 (네트워크 I/O 금지) — 같은 저장소의
+        #    다른 PR 처리가 락 때문에 차단되는 시간을 최소화 (gemini PR #19 Major).
         token = await self._github.get_installation_token(pr.installation_id)
+        actions: list[tuple[ReviewThread, _Action]] = []
         async with self._repo_fetcher.session(pr, token) as repo_path:
             for thread in candidates:
                 action = _classify_thread(thread, repo_path)
-                if action is None:
-                    continue  # 라인 그대로 / 수정만 됨 — 결정 불가, 스킵
-                reply_body = _wrap_with_marker(action.reply_body)
-                try:
-                    await self._github.reply_to_review_comment(
-                        pr, thread.root_comment_id, reply_body
-                    )
-                    await self._github.resolve_review_thread(thread.id, pr.installation_id)
-                except Exception:
-                    logger.exception(
-                        "follow-up: failed to post reply/resolve for thread %s on %s#%d",
-                        thread.id, pr.repo.full_name, pr.number,
-                    )
+                if action is not None:
+                    actions.append((thread, action))
 
-    def _is_candidate(self, thread) -> bool:
+        if not actions:
+            logger.info(
+                "follow-up: no actionable threads for %s#%d (all candidates require Phase 2)",
+                pr.repo.full_name, pr.number,
+            )
+            return
+
+        # 2) 락 밖에서 API 호출 — `asyncio.gather` 로 병렬화. 한 thread 실패가 다른
+        #    thread 처리를 막지 않도록 `return_exceptions=True`.
+        results = await asyncio.gather(
+            *(self._apply_action(pr, thread, action) for thread, action in actions),
+            return_exceptions=True,
+        )
+        failures = sum(1 for r in results if isinstance(r, Exception))
+        if failures:
+            logger.warning(
+                "follow-up: %d/%d thread(s) failed during reply/resolve on %s#%d",
+                failures, len(results), pr.repo.full_name, pr.number,
+            )
+
+    async def _apply_action(
+        self, pr: PullRequest, thread: ReviewThread, action: "_Action"
+    ) -> None:
+        """`resolve 먼저 → 성공 시 reply` 순서로 처리.
+
+        이유: reply 가 마커를 박은 뒤 resolve 가 실패하면 thread 는 미해결 상태인데
+        다음 실행에서 `has_followup_marker=True` 로 분류돼 영원히 skip 되는 **stuck
+        state** 가 발생한다 (gemini + coderabbitai PR #19 Major).
+
+        반대 순서면 resolve 실패 시 마커가 안 박히므로 다음 push 에서 자연스럽게 재시도
+        된다. resolve 가 성공하고 reply 가 실패해도 GitHub UI 상으론 thread 가 닫혀
+        있어 follow-up 의 관측 가능한 효과(unresolved 카운트 감소) 는 달성된다.
+        """
+        # resolve 가 실패하면 ReviewEngineError-style raise 가 아니라 평범한 예외라
+        # 직접 try 로 감싸 reply 도 안 하고 빠져나오게 한다.
+        await self._github.resolve_review_thread(thread.id, pr.installation_id)
+        reply_body = _wrap_with_marker(action.reply_body)
+        await self._github.reply_to_review_comment(
+            pr, thread.root_comment_id, reply_body
+        )
+
+    def _is_candidate(self, thread: ReviewThread) -> bool:
         if thread.root_author_login != self._bot_user_login:
             return False
         if thread.is_resolved:
@@ -94,12 +144,6 @@ class FollowUpReviewUseCase:
 # ---------------------------------------------------------------------------
 # 분류 로직 (테스트 분리 가능하도록 모듈 함수)
 # ---------------------------------------------------------------------------
-
-
-from dataclasses import dataclass
-from pathlib import Path
-
-from codex_review.domain import ReviewThread
 
 
 @dataclass(frozen=True)
@@ -149,11 +193,27 @@ def _classify_thread(thread: ReviewThread, repo_path: Path) -> _Action | None:
 
 
 def _count_lines(path: Path) -> int:
-    """텍스트 라인 카운트 — 바이너리/이상 인코딩에도 견디게 errors='replace'."""
+    """파일의 `\\n` 개수 + 마지막 라인이 newline 으로 끝나지 않으면 +1.
+
+    **chunk 기반** 으로 카운트 — `for _ in f:` 는 줄바꿈이 없는 거대 파일에서 전체를
+    한 줄로 읽어 메모리 폭주 위험이 있어, 64KB 청크씩 바이트로 읽으면서 `\\n` 만
+    세는 방식으로 변경 (gemini PR #19 Critical 반영).
+    바이너리 mode 로 열어 인코딩 비용도 절약. 텍스트 디코딩 결과는 라인 카운트에
+    영향 없으므로 안전.
+    """
     count = 0
-    with path.open("r", encoding="utf-8", errors="replace") as f:
-        for _ in f:
-            count += 1
+    last_byte: int | None = None
+    with path.open("rb") as f:
+        while True:
+            chunk = f.read(_LINE_COUNT_CHUNK_BYTES)
+            if not chunk:
+                break
+            count += chunk.count(b"\n")
+            last_byte = chunk[-1]
+    # 파일이 newline 으로 끝나지 않는다면 마지막 줄도 1줄로 계산해야 한다 (`\n` 카운트
+    # 만 쓰면 누락). 빈 파일은 last_byte 가 None 이므로 자연스럽게 0줄.
+    if last_byte is not None and last_byte != 0x0A:
+        count += 1
     return count
 
 

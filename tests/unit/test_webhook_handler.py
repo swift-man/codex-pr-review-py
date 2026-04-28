@@ -348,7 +348,7 @@ async def test_followup_runs_on_synchronize_action(tmp_path: Path) -> None:
         "repository": {"full_name": "o/r"},
         "installation": {"id": 7},
     }
-    code, reason = await handler.accept("pull_request", "d-syn", payload)
+    code, _reason = await handler.accept("pull_request", "d-syn", payload)
     assert code == 202
 
     await handler.start()

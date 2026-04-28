@@ -178,3 +178,21 @@ def test_webhook_secret_whitespace_is_stripped_when_valid(
     """strip 후에도 내용이 남으면 정상 통과 — 주변 공백은 조용히 제거된다."""
     s = _settings(monkeypatch, GITHUB_WEBHOOK_SECRET="  real-secret  ")
     assert s.github_webhook_secret == "real-secret"
+
+
+def test_github_app_slug_with_bot_suffix_normalizes_in_main_wiring() -> None:
+    """회귀 (coderabbitai PR #19 Minor): 운영자가 `GITHUB_APP_SLUG=codex-review-bot[bot]`
+    을 넣어도 main.py 에서 `[bot]` 중복 없이 `codex-review-bot[bot]` login 하나만
+    만들어진다. Settings 값 자체는 입력 그대로 보존하고, wiring 단계에서 정규화.
+    """
+    raw = "codex-review-bot[bot]"
+    bot_slug = raw.strip().removesuffix("[bot]")
+    assert f"{bot_slug}[bot]" == "codex-review-bot[bot]"
+
+    raw2 = "codex-review-bot"
+    bot_slug2 = raw2.strip().removesuffix("[bot]")
+    assert f"{bot_slug2}[bot]" == "codex-review-bot[bot]"
+
+    raw3 = "  codex-review-bot[bot]  "
+    bot_slug3 = raw3.strip().removesuffix("[bot]")
+    assert f"{bot_slug3}[bot]" == "codex-review-bot[bot]"

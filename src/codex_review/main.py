@@ -83,14 +83,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # 알아야 우리 봇이 단 코멘트를 정확히 식별할 수 있어 옵트인 설계.
             follow_up_use_case: FollowUpReviewUseCase | None = None
             if settings.github_app_slug:
+                # 운영자가 `GITHUB_APP_SLUG=codex-review-bot[bot]` 처럼 이미 `[bot]` 이
+                # 포함된 값을 넣어도 `codex-review-bot[bot][bot]` 같은 잘못된 login 이
+                # 만들어지지 않도록 정규화 (coderabbitai PR #19 Minor).
+                bot_slug = settings.github_app_slug.strip().removesuffix("[bot]")
+                bot_login = f"{bot_slug}[bot]"
                 follow_up_use_case = FollowUpReviewUseCase(
                     github=github,
                     repo_fetcher=repo_fetcher,
-                    bot_user_login=f"{settings.github_app_slug}[bot]",
+                    bot_user_login=bot_login,
                 )
-                logger.info(
-                    "follow-up enabled for bot login: %s[bot]", settings.github_app_slug,
-                )
+                logger.info("follow-up enabled for bot login: %s", bot_login)
             else:
                 logger.info(
                     "follow-up disabled (set GITHUB_APP_SLUG to enable Phase 1 auto-resolution)"

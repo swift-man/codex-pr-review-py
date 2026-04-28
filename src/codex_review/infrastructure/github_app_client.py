@@ -13,6 +13,7 @@ import httpx
 import jwt
 
 from codex_review.domain import (
+    FOLLOWUP_MARKER,
     Finding,
     PullRequest,
     RepoRef,
@@ -274,26 +275,26 @@ class GitHubAppClient:
     async def list_review_threads(
         self, pr: PullRequest, installation_id: int
     ) -> tuple[ReviewThread, ...]:
-        """GraphQL 로 PR review thread 와 각 root comment 를 한 번에 조회.
+        """GraphQL 로 PR review thread 와 각 root comment 를 조회 — **페이지네이션 지원**.
 
-        Phase 1 의 follow-up 판정에 필요한 모든 메타(스레드 ID, isResolved, root 댓글
-        databaseId/저자/path/line/commit/body, 사람·다른 봇 답글 존재 여부, 우리가 이미
-        단 follow-up 답글 마커 존재 여부) 를 한 query 로 가져온다.
-
-        페이지네이션은 1차 페이지 (100 thread × 50 comment) 만 보고, 그 이상은 운영
-        경고 로그 남기고 무시 — 한 PR 에 100개 이상 review thread 가 쌓이는 건 비정상.
+        thread 외부 페이지네이션은 `cursor` 로 끝까지 순회 (gemini PR #19 Major). thread
+        내부 comments 도 50건 초과 시 `hasNextPage=True` 면 follow-up 후보에서 안전하게
+        **제외** — 50건만 보고 has_followup_marker / has_non_root_author_reply 를
+        판정하면 그 너머의 사람 답글이나 우리 마커를 놓쳐 잘못 자동 응답할 수 있다
+        (coderabbitai PR #19 Major).
         """
         token = await self.get_installation_token(installation_id)
         query = """
-        query($owner:String!, $name:String!, $number:Int!) {
+        query($owner:String!, $name:String!, $number:Int!, $after:String) {
           repository(owner:$owner, name:$name) {
             pullRequest(number:$number) {
-              reviewThreads(first:100) {
-                pageInfo { hasNextPage }
+              reviewThreads(first:100, after:$after) {
+                pageInfo { hasNextPage endCursor }
                 nodes {
                   id
                   isResolved
                   comments(first:50) {
+                    pageInfo { hasNextPage }
                     nodes {
                       databaseId
                       author { login }
@@ -309,26 +310,41 @@ class GitHubAppClient:
           }
         }
         """
-        variables = {
-            "owner": pr.repo.owner,
-            "name": pr.repo.name,
-            "number": pr.number,
-        }
-        data = await self._graphql(query, variables, auth=f"token {token}")
-        repo = (data.get("data") or {}).get("repository") or {}
-        prn = repo.get("pullRequest") or {}
-        threads_node = prn.get("reviewThreads") or {}
-        if (threads_node.get("pageInfo") or {}).get("hasNextPage"):
+        out: list[ReviewThread] = []
+        cursor: str | None = None
+        # 안전 상한 — 100 page × 100 thread = 10K thread 까지. 정상 PR 은 절대 도달 X.
+        # 무한 루프 방어 (잘못된 endCursor 반환 등 GitHub 측 이상 동작 대비).
+        for _ in range(100):
+            variables: dict[str, Any] = {
+                "owner": pr.repo.owner,
+                "name": pr.repo.name,
+                "number": pr.number,
+                "after": cursor,
+            }
+            data = await self._graphql(query, variables, auth=f"token {token}")
+            repo = (data.get("data") or {}).get("repository") or {}
+            prn = repo.get("pullRequest") or {}
+            threads_node = prn.get("reviewThreads") or {}
+            for raw in threads_node.get("nodes") or []:
+                thread = _parse_review_thread(raw)
+                if thread is not None:
+                    out.append(thread)
+            page_info = threads_node.get("pageInfo") or {}
+            if not page_info.get("hasNextPage"):
+                break
+            cursor = page_info.get("endCursor")
+            if not cursor:
+                # GitHub 가 hasNextPage=True 인데 endCursor 누락하면 더 이상 진행 불가.
+                logger.warning(
+                    "%s#%d threads pagination missing endCursor — stopping",
+                    pr.repo.full_name, pr.number,
+                )
+                break
+        else:
             logger.warning(
-                "%s#%d has >100 review threads — follow-up will only consider the first page",
+                "%s#%d review threads pagination exceeded safety cap (100 pages)",
                 pr.repo.full_name, pr.number,
             )
-
-        out: list[ReviewThread] = []
-        for raw in threads_node.get("nodes") or []:
-            thread = _parse_review_thread(raw)
-            if thread is not None:
-                out.append(thread)
         return tuple(out)
 
     async def reply_to_review_comment(
@@ -368,18 +384,25 @@ class GitHubAppClient:
     async def _graphql(
         self, query: str, variables: dict[str, Any], *, auth: str
     ) -> dict[str, Any]:
-        """GitHub GraphQL v4 endpoint 호출. REST 와 다른 path (`/graphql`) 사용."""
+        """GitHub GraphQL v4 endpoint 호출. REST 와 다른 path (`/graphql`) 사용.
+
+        GraphQL 은 HTTP 200 + `errors` 배열로 부분/전체 실패를 알린다. 이전 구현은
+        warning 만 남기고 그대로 반환해, mutation (resolveReviewThread 등) 의 실패
+        가 호출자에서 success 처럼 처리됐다 (gemini + coderabbitai PR #19 Major).
+
+        해소: errors 가 있으면 `GraphQLError` 로 raise. 호출자 (e.g. follow-up use
+        case) 가 try/except 로 부분 실패를 분리 처리할 수 있도록 한다. 단 query 만
+        실패한 케이스에선 `data` 가 부분적으로 채워질 수 있어 호출자가 정상 처리
+        가능하지만, 안전을 위해 default 동작은 raise.
+        """
         body = {"query": query, "variables": variables}
         resp = await self._send("POST", "/graphql", auth=auth, body=body)
         data: Any = resp.json() if resp.content else {}
         if not isinstance(data, dict):
             return {}
-        # GraphQL 은 `errors` 배열로 부분 실패를 알린다 — HTTP 200 이어도 errors 가 있으면
-        # 경고로 기록 (mutation 의 thread already resolved 같은 케이스에서 발생 가능).
-        if data.get("errors"):
-            logger.warning(
-                "GitHub GraphQL returned errors: %s", data.get("errors"),
-            )
+        errors = data.get("errors")
+        if errors:
+            raise _GraphQLError(errors)
         return data
 
     # --- HTTP ---------------------------------------------------------------
@@ -449,16 +472,40 @@ def _finding_to_comment(f: Finding) -> dict[str, object]:
     return {"path": f.path, "line": f.line, "side": "RIGHT", "body": body}
 
 
-# Follow-up 답글 본문에 박는 숨은 마커. 우리가 같은 스레드에 두 번 답글을 다는
-# 사고를 막기 위한 멱등성 표지. HTML 주석이라 GitHub UI 에선 보이지 않는다.
-FOLLOWUP_MARKER = "<!-- codex-review-followup:v1 -->"
+# `FOLLOWUP_MARKER` 는 도메인 모듈로 이동했고 위쪽 import 로 재사용한다 (coderabbitai
+# Nitpick — 이전엔 application 계층이 infrastructure 의 상수를 직접 import 해 의존
+# 방향이 역전돼 있었음). 외부 호환을 위해 모듈에서 계속 노출.
+
+
+class _GraphQLError(RuntimeError):
+    """GraphQL endpoint 가 HTTP 200 + `errors` 배열로 실패를 알릴 때 raise.
+
+    호출자 (use case) 가 mutation 실패를 success 로 오인해 후속 동작 (예: 답글 게시)
+    을 진행하지 않도록 명시적 예외로 승격 (gemini + coderabbitai PR #19 Major).
+    """
+
+    def __init__(self, errors: Any) -> None:
+        super().__init__(f"GraphQL errors: {errors}")
+        self.errors = errors
 
 
 def _parse_review_thread(raw: dict[str, Any]) -> ReviewThread | None:
-    """GraphQL reviewThread 노드 → 도메인 `ReviewThread`. 필수 필드 누락 시 None."""
-    comments = ((raw.get("comments") or {}).get("nodes") or [])
+    """GraphQL reviewThread 노드 → 도메인 `ReviewThread`. 필수 필드 누락 시 None.
+
+    **Truncated comments 안전장치** (coderabbitai PR #19 Major): comments 가 50건을
+    넘어 `hasNextPage=True` 면, root 이후 어떤 comment 가 있는지 모두 보지 못한 상태
+    이므로 `has_followup_marker` / `has_non_root_author_reply` 판정이 부정확해진다.
+    이때는 thread 자체를 follow-up 후보에서 안전하게 제외하기 위해 `has_non_root_author_reply
+    = True` 로 강제 — use case 의 candidate filter 가 이 thread 를 자동 skip 한다.
+    """
+    comments_node = raw.get("comments") or {}
+    comments = comments_node.get("nodes") or []
     if not comments:
         return None
+    comments_truncated = bool(
+        (comments_node.get("pageInfo") or {}).get("hasNextPage")
+    )
+
     root = comments[0]
     db_id = root.get("databaseId")
     if not isinstance(db_id, int):
@@ -481,6 +528,12 @@ def _parse_review_thread(raw: dict[str, Any]) -> ReviewThread | None:
             has_followup_marker = True
         if author and author != root_author:
             has_other_author = True
+
+    if comments_truncated:
+        # 50건 초과 thread — 보이지 않는 comment 에 사람 답글·우리 마커가 있을 수
+        # 있으므로 보수적으로 follow-up 에서 제외. has_non_root_author_reply=True 면
+        # use case 의 candidate filter 가 자동 skip.
+        has_other_author = True
 
     return ReviewThread(
         id=str(raw.get("id") or ""),

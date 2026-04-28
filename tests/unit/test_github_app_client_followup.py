@@ -317,3 +317,135 @@ async def test_resolve_skips_in_dry_run(make_client) -> None:
     await client.resolve_review_thread("T_1", 7)
     # access_tokens 도 호출되지 않음 (dry-run 이라 token 도 필요 없음)
     assert posts == []
+
+
+# ---------------------------------------------------------------------------
+# Pagination + GraphQL error semantics (PR #19 review)
+# ---------------------------------------------------------------------------
+
+
+async def test_list_review_threads_paginates_until_no_more_pages(make_client) -> None:
+    """회귀 (gemini PR #19 Major): 100 thread 초과 PR 도 누락 없이 모두 조회.
+
+    이전 구현은 1 페이지만 보고 has_next_page=True 면 경고 로그만 남기고 끝냈다.
+    이제 cursor 로 끝까지 순회.
+    """
+    page_calls = 0
+
+    def make_thread(idx: int, page_id: int) -> dict[str, Any]:
+        return {
+            "id": f"T_{page_id}_{idx}",
+            "isResolved": False,
+            "comments": {
+                "pageInfo": {"hasNextPage": False},
+                "nodes": [
+                    {
+                        "databaseId": page_id * 1000 + idx,
+                        "author": {"login": "codex-review-bot[bot]"},
+                        "path": f"src/p{page_id}_{idx}.py",
+                        "line": 1,
+                        "body": "x",
+                        "commit": {"oid": "x"},
+                    },
+                ],
+            },
+        }
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        nonlocal page_calls
+        if req.url.path.endswith("/access_tokens"):
+            return httpx.Response(
+                200, json={"token": "ITOK", "expires_at": "2030-01-01T00:00:00Z"}
+            )
+        # GraphQL 호출 — variables 의 `after` 로 페이지 식별.
+        body = json.loads(req.content.decode("utf-8"))
+        after = body["variables"].get("after")
+        page_calls += 1
+        if after is None:
+            return httpx.Response(200, json={
+                "data": {"repository": {"pullRequest": {"reviewThreads": {
+                    "pageInfo": {"hasNextPage": True, "endCursor": "CURSOR_2"},
+                    "nodes": [make_thread(i, page_id=1) for i in range(2)],
+                }}}},
+            })
+        if after == "CURSOR_2":
+            return httpx.Response(200, json={
+                "data": {"repository": {"pullRequest": {"reviewThreads": {
+                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    "nodes": [make_thread(i, page_id=2) for i in range(3)],
+                }}}},
+            })
+        raise AssertionError(f"unexpected cursor: {after}")
+
+    client = make_client(handler)
+    threads = await client.list_review_threads(_pr(), 7)
+
+    assert page_calls == 2  # 두 페이지 모두 조회
+    assert len(threads) == 5  # page1: 2개 + page2: 3개
+    ids = [t.id for t in threads]
+    assert ids == ["T_1_0", "T_1_1", "T_2_0", "T_2_1", "T_2_2"]
+
+
+async def test_list_review_threads_marks_threads_with_truncated_comments_as_skip(
+    make_client,
+) -> None:
+    """회귀 (coderabbitai PR #19 Major): comments 가 50건 초과 (`hasNextPage=True`)
+    이면 root 이후 어떤 comment 가 있는지 모두 보지 못해 has_followup_marker /
+    has_non_root_author_reply 판정이 부정확. 이런 thread 는 follow-up 후보에서
+    안전하게 제외하기 위해 `has_non_root_author_reply=True` 로 강제.
+    """
+    payload = {
+        "data": {"repository": {"pullRequest": {"reviewThreads": {
+            "pageInfo": {"hasNextPage": False},
+            "nodes": [
+                {
+                    "id": "T_truncated",
+                    "isResolved": False,
+                    "comments": {
+                        "pageInfo": {"hasNextPage": True},  # 50 초과 — truncated
+                        "nodes": [
+                            {
+                                "databaseId": 1,
+                                "author": {"login": "codex-review-bot[bot]"},
+                                "path": "src/x.py",
+                                "line": 1,
+                                "body": "root comment",
+                                "commit": {"oid": "x"},
+                            },
+                        ],
+                    },
+                },
+            ],
+        }}}},
+    }
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path.endswith("/access_tokens"):
+            return httpx.Response(200, json={"token": "ITOK", "expires_at": "2030-01-01T00:00:00Z"})
+        return httpx.Response(200, json=payload)
+
+    client = make_client(handler)
+    threads = await client.list_review_threads(_pr(), 7)
+    assert len(threads) == 1
+    # 핵심 계약: 안전을 위해 has_non_root_author_reply 가 강제로 True → use case 가 skip.
+    assert threads[0].has_non_root_author_reply is True
+
+
+async def test_graphql_raises_on_errors_for_mutations(make_client) -> None:
+    """회귀 (gemini + coderabbitai PR #19 Major): mutation 의 GraphQL errors 가 raise
+    되지 않으면 호출자가 success 로 오인해 후속 동작(reply 게시) 을 진행한다.
+    이제 errors 배열이 있으면 예외를 던져 호출자가 분리 처리할 수 있게 한다.
+    """
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path.endswith("/access_tokens"):
+            return httpx.Response(200, json={"token": "ITOK", "expires_at": "2030-01-01T00:00:00Z"})
+        return httpx.Response(200, json={
+            "data": {"resolveReviewThread": None},
+            "errors": [{"message": "Could not resolve to a node with the global id."}],
+        })
+
+    client = make_client(handler)
+    with pytest.raises(RuntimeError) as exc:
+        await client.resolve_review_thread("T_unknown", 7)
+    assert "GraphQL errors" in str(exc.value)
+    assert "Could not resolve" in str(exc.value)
