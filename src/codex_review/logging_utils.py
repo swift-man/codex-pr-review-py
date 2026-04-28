@@ -114,16 +114,19 @@ def configure_logging(level: str = "INFO") -> None:
             handler.addFilter(redact_filter)
 
     if root.handlers:
+        # uvicorn / dictConfig 등이 이미 핸들러를 만들어 둔 경우 — 필터만 추가 부착.
         for handler in root.handlers:
             _attach_if_missing(handler)
-        return
+    else:
+        handler = logging.StreamHandler(sys.stdout)
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
+        )
+        handler.addFilter(redact_filter)
+        root.addHandler(handler)
 
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(
-        logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
-    )
-    handler.addFilter(redact_filter)
-    root.addHandler(handler)
+    # 운영자가 명시한 `level` 은 두 경로 모두에서 적용 — 외부 핸들러 환경이라도
+    # 우리 함수가 호출됐다면 의도한 로그 레벨을 보장한다 (gemini PR #18 Minor).
     root.setLevel(level)
 
 

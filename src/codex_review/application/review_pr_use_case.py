@@ -111,14 +111,19 @@ class ReviewPullRequestUseCase:
         try:
             result = await self._engine.review(pr, dump)
         except ReviewEngineError as exc:
-            # 이미 diff 모드인데 또 실패 → 더 줄일 수 없다. 진단 코멘트 + 종료.
+            # 이미 diff 모드 dump 로 들어와 실패한 경우 → 사전(preemptive) 예산 fallback
+            # 으로 진입했다는 의미. full 시도는 일어나지 않았다 (codex PR #18 Minor 반영:
+            # 이전 boolean `attempted_diff=True` 표현은 "full→diff 재시도" 로 오해 소지).
             if dump.mode == DUMP_MODE_DIFF:
                 logger.exception(
-                    "engine failed in diff-only mode for %s#%d — no further fallback",
+                    "engine failed in preemptive diff-only mode for %s#%d — no further fallback",
                     pr.repo.full_name, pr.number,
                 )
                 await self._github.post_comment(
-                    pr, _engine_failure_message(pr, dump, exc, attempted_diff=True)
+                    pr,
+                    _engine_failure_message(
+                        pr, dump, exc, failure_mode=_FAILURE_DIFF_PREEMPTIVE,
+                    ),
                 )
                 return None
 
@@ -137,7 +142,10 @@ class ReviewPullRequestUseCase:
                     pr.repo.full_name, pr.number,
                 )
                 await self._github.post_comment(
-                    pr, _engine_failure_message(pr, dump, exc, attempted_diff=False)
+                    pr,
+                    _engine_failure_message(
+                        pr, dump, exc, failure_mode=_FAILURE_FULL_ONLY,
+                    ),
                 )
                 return None
             try:
@@ -150,7 +158,8 @@ class ReviewPullRequestUseCase:
                 await self._github.post_comment(
                     pr,
                     _engine_failure_message(
-                        pr, fallback_dump, retry_exc, attempted_diff=True
+                        pr, fallback_dump, retry_exc,
+                        failure_mode=_FAILURE_FULL_THEN_DIFF,
                     ),
                 )
                 return None
@@ -289,20 +298,35 @@ def _make_code_fence_safe(text: str) -> str:
     return text.replace("```", "`\u200b`\u200b`")
 
 
+# 엔진 실패 시도 경로 분류 — 진단 코멘트가 운영자에게 어떤 시도가 있었는지 정확히
+# 보여주기 위함. boolean (`attempted_diff`) 으로는 "사전 fallback 으로 diff 진입 후
+# 실패" 와 "full 후 diff 재시도까지 실패" 를 구분 못 했음 (codex PR #18 Minor).
+_FAILURE_FULL_ONLY = "full_only"           # full 시도, diff fallback 불가
+_FAILURE_FULL_THEN_DIFF = "full_then_diff" # full 실패 → diff 재시도까지 실패
+_FAILURE_DIFF_PREEMPTIVE = "diff_preemptive"  # 사전 예산 fallback 으로 diff, 거기서 실패
+
+_FAILURE_MODE_DESCRIPTIONS = {
+    _FAILURE_FULL_ONLY:
+        "full 모드 시도 (diff-only fallback 사용 불가 — patch 부재 또는 옵트아웃)",
+    _FAILURE_FULL_THEN_DIFF:
+        "full 모드 실패 → diff-only 모드 재시도까지 실패",
+    _FAILURE_DIFF_PREEMPTIVE:
+        "사전 예산 fallback 으로 diff-only 모드에서 시도 (full 모드 미시도)",
+}
+
+
 def _engine_failure_message(
     pr: PullRequest,
     dump: FileDump,
     exc: BaseException,
     *,
-    attempted_diff: bool,
+    failure_mode: str,
 ) -> str:
     """엔진 호출이 모두 실패했을 때 PR 에 게시할 진단 코멘트.
 
-    `attempted_diff` 가 True 면 full→diff 재시도까지 둘 다 실패한 상황. False 면
-    diff fallback 이 아예 불가능해서 시도조차 안 한 상황 (patch 없음·옵트아웃 등).
-
-    PR 에 아무 메시지도 안 달리는 "조용한 실패" 를 막는 것이 목적 — 운영자가
-    무엇이 잘못됐는지 즉시 인지할 수 있도록 모드/모델/원인을 노출한다.
+    `failure_mode` 는 `_FAILURE_*` 상수 중 하나로, 운영자가 어떤 시도가 있었는지
+    정확히 인지할 수 있도록 한다 (이전 boolean `attempted_diff` 표현은
+    "사전 diff 실패" 와 "full→diff 실패" 를 구분 못 했음 — codex PR #18 Minor).
 
     보안 고려:
       - `str(exc)` 는 stderr 마지막 줄을 포함할 수 있어 토큰 URL / 인증 헤더가
@@ -318,14 +342,14 @@ def _engine_failure_message(
         detail = detail[:1000] + "…"
     detail = _make_code_fence_safe(detail)
 
-    mode_desc = "diff-only 모드까지 재시도" if attempted_diff else "full 모드만 시도"
+    mode_desc = _FAILURE_MODE_DESCRIPTIONS.get(failure_mode, failure_mode)
     advice = (
         "1. `CODEX_MAX_INPUT_TOKENS` 를 모델 실제 윈도우보다 작게 조정 "
         "(예: 150000) → 큰 PR 은 자동 diff 모드로 떨어집니다.\n"
         "2. 더 큰 컨텍스트 윈도우의 모델로 `CODEX_MODEL` 변경.\n"
         "3. 서버 로그(stderr 전체) 를 확인해 모델/CLI 측 메시지 검증.\n"
     )
-    if not attempted_diff:
+    if failure_mode == _FAILURE_FULL_ONLY:
         advice += (
             "4. `CODEX_ENABLE_DIFF_FALLBACK=true` 확인 또는 GitHub 가 patch 를 반환했는지 "
             "확인 (큰 PR / binary 변경만으로 구성된 경우 patch 누락 가능).\n"

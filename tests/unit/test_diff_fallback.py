@@ -853,7 +853,7 @@ async def test_use_case_falls_back_to_diff_when_engine_rejects_full_input() -> N
       - PR 변경 파일이 정상적으로 full dump 에 포함됨 (exceeded_budget=False)
       - 하지만 실제 codex exec 호출 시 모델이 returncode 1 로 거부
       - 사전 예산 fallback 은 트리거 안 됨 (조건 불충족)
-      - 반응형 fallback 이 RuntimeError 잡아 diff dump 로 재시도 → 성공
+      - 반응형 fallback 이 ReviewEngineError 잡아 diff dump 로 재시도 → 성공
     """
     github = _CapturingGitHub()
     # full dump 는 정상 — 예산 안 넘음.
@@ -897,7 +897,7 @@ async def test_use_case_falls_back_to_diff_when_engine_rejects_full_input() -> N
 async def test_use_case_posts_diagnostic_when_both_modes_fail() -> None:
     """diff fallback 까지 실패 → PR 에 진단 코멘트 게시 (조용한 실패 방지).
 
-    이전엔 봇이 RuntimeError 그대로 raise 해서 PR 에 아무것도 안 달리고 운영자가
+    이전엔 봇이 ReviewEngineError 그대로 raise 해서 PR 에 아무것도 안 달리고 운영자가
     서버 로그를 직접 뒤져야 했음. 이제는 진단 정보가 PR 본문에 그대로 노출.
     """
     github = _CapturingGitHub()
@@ -930,7 +930,8 @@ async def test_use_case_posts_diagnostic_when_both_modes_fail() -> None:
     _, comment_body = github.posted_comments[0]
     assert "리뷰 엔진 실패" in comment_body
     assert "model not available" in comment_body
-    assert "diff-only 모드까지 재시도" in comment_body
+    # 명확한 시도 경로 표기 (codex PR #18 Minor): full → diff 재시도까지 실패.
+    assert "full 모드 실패 → diff-only 모드 재시도까지 실패" in comment_body
 
 
 async def test_use_case_posts_diagnostic_when_diff_fallback_unavailable() -> None:
@@ -961,7 +962,8 @@ async def test_use_case_posts_diagnostic_when_diff_fallback_unavailable() -> Non
     assert len(github.posted_comments) == 1
     _, body = github.posted_comments[0]
     assert "리뷰 엔진 실패" in body
-    assert "full 모드만 시도" in body  # diff 시도 안 됐음을 명시
+    # diff fallback 사용 불가 (patch 부재 또는 옵트아웃) 으로 분류돼야 한다.
+    assert "diff-only fallback 사용 불가" in body
     assert "CODEX_ENABLE_DIFF_FALLBACK" in body  # 운영자에게 옵트아웃 확인 안내
 
 
@@ -1145,6 +1147,14 @@ async def test_use_case_does_not_recurse_when_failing_in_diff_mode() -> None:
     assert engine.seen_dumps[0].mode == DUMP_MODE_DIFF
     # 진단 코멘트 게시
     assert len(github.posted_comments) == 1
+    # 회귀 (codex PR #18 Minor): 사전 fallback 으로 진입한 diff 실패는 "full → diff 재시도"
+    # 가 아니라 "사전 fallback 으로 diff-only 모드에서 시도" 로 표기돼야 운영자가 시도
+    # 경로를 정확히 인지한다.
+    _, body = github.posted_comments[0]
+    assert "사전 예산 fallback 으로 diff-only 모드에서 시도" in body
+    assert "full 모드 미시도" in body
+    # 잘못된 분류 (full → diff 재시도) 는 절대 들어가면 안 됨.
+    assert "full 모드 실패 → diff-only 모드 재시도" not in body
 
 
 async def test_use_case_fallback_empty_result_goes_to_budget_notice() -> None:
