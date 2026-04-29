@@ -435,3 +435,38 @@ def test_parse_unwraps_outer_dict_starting_with_line_key() -> None:
     """
     result = parse_review(raw)
     assert result.findings[0].body == "리뷰 본문 텍스트"
+
+
+def test_parse_unwraps_pretty_printed_json_with_space_after_brace() -> None:
+    """회귀 (codex / gemini / coderabbit PR #20 합의): pretty-printed JSON 은
+    `{ "message": ... }` 처럼 여는 중괄호와 첫 키 사이에 공백이 들어간다. 이전
+    트리거 정규식 `^\\s*\\{['"]` 은 이 케이스를 놓쳐 정화가 작동하지 않았다.
+    """
+    raw = """
+    {
+      "summary": "ok",
+      "event": "COMMENT",
+      "comments": [
+        {"path": "x.py", "line": 1, "severity": "major",
+         "body": "{ \\"message\\": \\"공백이 끼워진 pretty JSON\\" }"}
+      ]
+    }
+    """
+    result = parse_review(raw)
+    assert result.findings[0].body == "공백이 끼워진 pretty JSON"
+
+
+def test_parse_unwraps_pretty_printed_json_with_newline_indent() -> None:
+    """`{\\n  "severity": ... }` 처럼 줄바꿈 + 들여쓰기가 끼워진 형태도 잡아야 한다."""
+    raw = """
+    {
+      "summary": "ok",
+      "event": "COMMENT",
+      "comments": [
+        {"path": "x.py", "line": 1, "severity": "major",
+         "body": "{\\n  \\"severity\\": \\"major\\",\\n  \\"message\\": \\"여러 줄 dict\\"\\n}"}
+      ]
+    }
+    """
+    result = parse_review(raw)
+    assert result.findings[0].body == "여러 줄 dict"

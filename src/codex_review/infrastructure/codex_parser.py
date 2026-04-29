@@ -138,8 +138,12 @@ def _parse_findings(raw: object) -> list[Finding]:
 # 두 집합의 합집합을 트리거에 둔다 — 모델이 outer comment dict 전체를 박은
 # (`{'path': 'x.py', 'line': 12, 'body': '실제 본문'}`) 경우도 잡아 본문에서 `body` 를
 # 추출하도록 보장.
+#
+# `\{` 와 첫 키 사이의 `\s*` (codex / gemini / coderabbit PR #20 후속): 모델이 pretty-
+# print 한 JSON 은 `{ "message": ... }` 또는 `{\n  "severity": ... }` 처럼 여는 중괄호와
+# 따옴표 사이에 공백·줄바꿈을 끼워 넣는다. 이 형태도 정화 트리거가 발동하도록 허용.
 _DICT_REPR_RE = re.compile(
-    r"^\s*\{['\"](?:severity|path|line|message|body|text|detail|finding)['\"]"
+    r"^\s*\{\s*['\"](?:severity|path|line|message|body|text|detail|finding)['\"]"
 )
 
 
