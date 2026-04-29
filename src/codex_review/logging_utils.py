@@ -99,11 +99,21 @@ def configure_logging(level: str = "INFO") -> None:
       - 이미 root.handlers 가 있으면(예: uvicorn 이 먼저 dictConfig 로 구성) 그 핸들러
         들 **각각에** `_RedactFilter` 를 추가 부착 — 토큰이 포함된 stderr 가 마스킹
         없이 외부 핸들러로 흘러가는 보안 갭을 막는다 (codex PR #18 Critical 반영).
+      - **root 우회 로거** 도 함께 처리 — uvicorn 의 `uvicorn.error` / `uvicorn.access`
+        등은 자체 핸들러를 부착하고 `propagate=False` 로 root 를 지나치지 않는 경우가
+        많다. 이런 로거에 토큰이 섞인 stderr 가 흘러가면 root 핸들러에만 부착된 필터로
+        는 마스킹이 안 된다. `loggerDict` 를 순회해 이미 알려진 모든 로거의 핸들러까지
+        커버한다 (gemini PR #18 Major 반영).
       - 같은 필터가 이미 붙어 있으면 중복 부착 안 함 (재호출 안전).
 
     필터는 logger 가 아니라 **handler 단위**에 부착해야 한다 — Python logging 의 propagation
     경로는 부모 logger 의 handlers 를 직접 호출하지 부모 logger 의 handle() 을 거치지
     않으므로, logger 자체에 attach 한 필터는 propagated record 에 적용되지 않는다.
+
+    한계: 이 함수 호출 시점 기준의 스냅샷 적용이다. 호출 *이후* 새로 만들어진 로거에
+    핸들러가 부착되면 그쪽은 커버되지 않는다. uvicorn 처럼 lifespan 시작 직전 로거를
+    초기화하는 케이스는 시간상 이 함수가 뒤에 호출되므로 안전하지만, 늦게 import 되는
+    플러그인이 자체 logger 를 만들면 별도 처리 필요.
     """
     root = logging.getLogger()
     redact_filter = _RedactFilter()
@@ -124,6 +134,16 @@ def configure_logging(level: str = "INFO") -> None:
         )
         handler.addFilter(redact_filter)
         root.addHandler(handler)
+
+    # 모든 known logger 의 자체 handlers 에도 부착. PlaceHolder 는 logger 가 아닌
+    # 빈 노드라 건너뛴다. propagate=False 로 설정된 로거의 handler 까지 도달하기
+    # 위함 — 이쪽 갱신을 빠뜨리면 우회 로그가 마스킹 없이 출력된다.
+    for logger_name in list(logging.root.manager.loggerDict.keys()):
+        candidate = logging.getLogger(logger_name)
+        if not isinstance(candidate, logging.Logger):
+            continue
+        for handler in candidate.handlers:
+            _attach_if_missing(handler)
 
     # 운영자가 명시한 `level` 은 두 경로 모두에서 적용 — 외부 핸들러 환경이라도
     # 우리 함수가 호출됐다면 의도한 로그 레벨을 보장한다 (gemini PR #18 Minor).

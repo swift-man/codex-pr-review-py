@@ -145,6 +145,68 @@ def test_configure_logging_attaches_filter_to_existing_handlers() -> None:
         root.setLevel(saved_level)
 
 
+def test_configure_logging_covers_propagate_false_loggers() -> None:
+    """회귀 (gemini PR #18 Major): uvicorn 의 `uvicorn.error` / `uvicorn.access` 같은
+    로거는 root 와 별개로 자체 핸들러를 부착하고 `propagate=False` 로 설정되는 경우가
+    많다. 이런 로거는 root.handlers 만 순회하는 이전 구현으론 마스킹이 닿지 않아,
+    토큰이 섞인 stderr 가 그대로 출력될 위험이 있었다.
+
+    수정 후 동작: `loggerDict` 를 순회해 모든 known logger 의 자체 handlers 에도
+    필터를 idempotent 하게 부착. propagate=False 인 로거에서 발생한 토큰 로그도
+    마스킹된다.
+    """
+    import io
+
+    from codex_review.logging_utils import configure_logging
+
+    bypass_logger_name = "codex_review_test.uvicorn_bypass"
+    bypass_logger = logging.getLogger(bypass_logger_name)
+    saved_handlers = list(bypass_logger.handlers)
+    saved_propagate = bypass_logger.propagate
+    saved_level = bypass_logger.level
+    root = logging.getLogger()
+    saved_root_handlers = list(root.handlers)
+    saved_root_level = root.level
+    try:
+        # 우회 로거 구성: 자체 핸들러 + propagate=False (uvicorn.error 와 동일 패턴).
+        bypass_logger.handlers = []
+        bypass_buf = io.StringIO()
+        bypass_handler = logging.StreamHandler(bypass_buf)
+        bypass_handler.setFormatter(logging.Formatter("%(message)s"))
+        bypass_logger.addHandler(bypass_handler)
+        bypass_logger.propagate = False
+        bypass_logger.setLevel(logging.ERROR)
+
+        # root 도 깨끗이 — 테스트 격리.
+        root.handlers = []
+
+        # 우리 함수 호출 — 이 시점 이후로 bypass_handler 에도 필터가 붙어야 한다.
+        configure_logging("DEBUG")
+
+        assert any(
+            isinstance(f, _RedactFilter) for f in bypass_handler.filters
+        ), "propagate=False 로거 핸들러에 _RedactFilter 가 부착되지 않음"
+
+        bypass_logger.error(
+            "fatal stderr=%s",
+            "https://x-access-token:ghs_BYPASS@github.com/o/r.git",
+        )
+        bypass_handler.flush()
+        output = bypass_buf.getvalue()
+        assert "ghs_BYPASS" not in output, (
+            "propagate=False 우회 로거에서 토큰이 마스킹 없이 노출됨"
+        )
+        assert "https://***@github.com" in output
+    finally:
+        bypass_logger.handlers = saved_handlers
+        bypass_logger.propagate = saved_propagate
+        bypass_logger.setLevel(saved_level)
+        # 테스트가 만든 로거는 loggerDict 에 잔존하므로 핸들러 비우고 정리.
+        bypass_logger.handlers = []
+        root.handlers = saved_root_handlers
+        root.setLevel(saved_root_level)
+
+
 def test_redacts_dict_inside_tuple_args() -> None:
     """회귀 (codex PR #18 Major): 일반 호출 경로는 LogRecord.__init__ 가 1-tuple({dict})
     을 dict 로 unwrap 하지만, LogRecord 를 직접 만드는 테스트나 커스텀 필터 체인 등

@@ -31,6 +31,7 @@ from codex_review.domain import (
 )
 from codex_review.infrastructure.codex_prompt import build_prompt
 from codex_review.infrastructure.diff_context_collector import DiffContextCollector
+from codex_review.interfaces import ReviewEngineError
 
 
 # ---------------------------------------------------------------------------
@@ -824,8 +825,6 @@ class _FailingEngine:
     seen_dumps: list[FileDump] = field(default_factory=list)
 
     async def review(self, pr: PullRequest, dump: FileDump) -> ReviewResult:
-        from codex_review.interfaces import ReviewEngineError
-
         self.seen_dumps.append(dump)
         if dump.mode == DUMP_MODE_FULL:
             raise ReviewEngineError(self.full_error_msg, returncode=1)
@@ -839,8 +838,6 @@ class _AlwaysFailingEngine:
     seen_dumps: list[FileDump] = field(default_factory=list)
 
     async def review(self, pr: PullRequest, dump: FileDump) -> ReviewResult:
-        from codex_review.interfaces import ReviewEngineError
-
         self.seen_dumps.append(dump)
         raise ReviewEngineError(self.error_msg, returncode=1)
 
@@ -890,8 +887,58 @@ async def test_use_case_falls_back_to_diff_when_engine_rejects_full_input() -> N
     assert len(github.posted_reviews) == 1
     assert github.posted_comments == []  # 진단 코멘트 X — 정상 복구
     _, posted = github.posted_reviews[0]
-    # diff 모드 배지가 본문에 prepend
+    # diff 모드 배지가 본문에 prepend — reactive 사유 문구가 들어가야 한다
+    # (codex PR #18 Major 회귀: full 입력은 우리 예산 안에 들어왔으므로 배지가
+    # "예산 초과" 라고 단정하면 운영자에게 잘못된 원인 안내가 된다).
     assert "diff-only" in posted.summary
+    assert "리뷰 엔진이 입력을 거부" in posted.summary
+    assert "CODEX_MAX_INPUT_TOKENS" not in posted.summary
+
+
+async def test_preemptive_diff_fallback_badge_says_budget_overflow() -> None:
+    """반대 시나리오 회귀: 사전 예산 fallback 으로 진입한 diff-only 리뷰는
+    "전체 코드베이스가 입력 예산을 초과" 라고 안내해야 한다 — reactive 와 같은
+    문구를 쓰면 운영자가 무엇을 만져야 하는지 가이드가 흐려진다.
+    """
+    github = _CapturingGitHub()
+    # full 수집이 예산 초과 + 변경 파일 a.py 가 예산 컷 당함 → preemptive fallback 트리거.
+    # budget_trimmed 는 property 라 직접 세팅 불가 — `excluded` 에만 등록하고 정책
+    # 카테고리(filter_excluded / patch_missing) 에는 안 넣어 budget 컷으로 분류되게 한다.
+    pre_full = FileDump(
+        entries=(),
+        total_chars=0,
+        mode=DUMP_MODE_FULL,
+        excluded=("a.py",),
+        exceeded_budget=True,
+    )
+
+    @dataclass
+    class _OkOnDiff:
+        seen_dumps: list[FileDump] = field(default_factory=list)
+
+        async def review(self, pr: PullRequest, dump: FileDump) -> ReviewResult:
+            self.seen_dumps.append(dump)
+            return ReviewResult(event=ReviewEvent.COMMENT, summary="ok\n")
+
+    engine = _OkOnDiff()
+    uc = ReviewPullRequestUseCase(
+        github=github,
+        repo_fetcher=_NoopFetcher(),
+        file_collector=_StaticFullCollector(dump=pre_full),
+        engine=engine,  # type: ignore[arg-type]
+        max_input_tokens=10_000,
+        diff_context_collector=DiffContextCollector(overhead_estimator=_zero_overhead),
+    )
+    patches = {"a.py": "@@ -1 +1 @@\n-x\n+y\n"}
+    pr = _pr(changed=("a.py",), patches=patches)
+
+    await uc.execute(pr)
+
+    assert len(github.posted_reviews) == 1
+    _, posted = github.posted_reviews[0]
+    assert "diff-only" in posted.summary
+    assert "CODEX_MAX_INPUT_TOKENS" in posted.summary  # 예산 사유 명시
+    assert "리뷰 엔진이 입력을 거부" not in posted.summary  # reactive 문구 X
 
 
 async def test_use_case_posts_diagnostic_when_both_modes_fail() -> None:
@@ -1018,8 +1065,6 @@ async def test_diagnostic_comment_masks_credentials_in_exception_message() -> No
     URL 이 PR 대화에 누출될 수 있다. **본문 게시 직전 한 번 더 redact_text** 를 적용해
     defense-in-depth 를 구현해야 한다.
     """
-    from codex_review.interfaces import ReviewEngineError
-
     github = _CapturingGitHub()
     full_ok_dump = FileDump(
         entries=(FileEntry(path="a.py", content="x", size_bytes=1, is_changed=True),),
@@ -1066,8 +1111,6 @@ async def test_diagnostic_comment_escapes_triple_backtick_in_exception() -> None
     detail 을 감싸는 ``` 코드펜스가 그 위치에서 닫혀 본문 markdown 이 깨진다.
     백틱 사이에 zero-width space 를 끼워 fence 가 끝까지 유지되도록 한다.
     """
-    from codex_review.interfaces import ReviewEngineError
-
     github = _CapturingGitHub()
     full_ok_dump = FileDump(
         entries=(FileEntry(path="a.py", content="x", size_bytes=1, is_changed=True),),
