@@ -449,3 +449,123 @@ async def test_graphql_raises_on_errors_for_mutations(make_client) -> None:
         await client.resolve_review_thread("T_unknown", 7)
     assert "GraphQL errors" in str(exc.value)
     assert "Could not resolve" in str(exc.value)
+
+
+async def test_list_review_threads_treats_deleted_user_reply_as_other_author(
+    make_client,
+) -> None:
+    """회귀 (codex PR #19 Major): GitHub 은 삭제된 사용자나 식별 불가 actor 의 댓글에서
+    `author=null` 을 반환한다. follow-up marker 도 없는 그런 답글이 있으면 사람 답글이
+    소실됐을 가능성이 있어 보수적으로 has_non_root_author_reply=True 로 카운트해야 한다.
+    이전엔 빈 author 를 무시해 자동 resolve 후보로 잘못 통과시켰다.
+    """
+    payload = {
+        "data": {
+            "repository": {
+                "pullRequest": {
+                    "reviewThreads": {
+                        "pageInfo": {"hasNextPage": False},
+                        "nodes": [
+                            {
+                                "id": "T_ghost",
+                                "isResolved": False,
+                                "comments": {
+                                    "nodes": [
+                                        {
+                                            "databaseId": 1001,
+                                            "author": {"login": "codex-review-bot[bot]"},
+                                            "path": "src/a.py",
+                                            "line": 12,
+                                            "body": "original review",
+                                            "commit": {"oid": "x"},
+                                        },
+                                        {
+                                            "databaseId": 1002,
+                                            "author": None,  # 삭제된 사용자 / ghost
+                                            "path": "src/a.py",
+                                            "line": 12,
+                                            "body": "이건 사람이 단 답글일 수 있다",
+                                            "commit": {"oid": "x"},
+                                        },
+                                    ],
+                                },
+                            },
+                        ],
+                    },
+                },
+            },
+        },
+    }
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path.endswith("/access_tokens"):
+            return httpx.Response(200, json={"token": "ITOK", "expires_at": "2030-01-01T00:00:00Z"})
+        return httpx.Response(200, json=payload)
+
+    client = make_client(handler)
+    threads = await client.list_review_threads(_pr(), 7)
+    assert len(threads) == 1
+    # 삭제된 사용자 답글은 follow-up marker 가 없으므로 보수적으로 타인 답글로 간주.
+    assert threads[0].has_non_root_author_reply is True
+
+
+async def test_list_review_threads_marker_with_null_author_still_recognized(
+    make_client,
+) -> None:
+    """회귀 (codex PR #19 Major): 우리 봇이 단 답글이지만 author 표시가 빠진 경우
+    (GitHub 가 author 메타데이터를 잃은 케이스), follow-up marker 자체가 신원 보증이므로
+    has_other_author 로 카운트하면 안 된다 — 자기 답글을 타인 답글로 오인해 영원히
+    auto-resolve 하지 못하는 dead-lock 방지.
+    """
+    payload = {
+        "data": {
+            "repository": {
+                "pullRequest": {
+                    "reviewThreads": {
+                        "pageInfo": {"hasNextPage": False},
+                        "nodes": [
+                            {
+                                "id": "T_marker_no_author",
+                                "isResolved": False,
+                                "comments": {
+                                    "nodes": [
+                                        {
+                                            "databaseId": 2001,
+                                            "author": {"login": "codex-review-bot[bot]"},
+                                            "path": "src/a.py",
+                                            "line": 5,
+                                            "body": "original review",
+                                            "commit": {"oid": "x"},
+                                        },
+                                        {
+                                            "databaseId": 2002,
+                                            "author": None,  # author 메타 소실
+                                            "path": "src/a.py",
+                                            "line": 5,
+                                            "body": f"resolved\n\n{FOLLOWUP_MARKER}",
+                                            "commit": {"oid": "x"},
+                                        },
+                                    ],
+                                },
+                            },
+                        ],
+                    },
+                },
+            },
+        },
+    }
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path.endswith("/access_tokens"):
+            return httpx.Response(200, json={"token": "ITOK", "expires_at": "2030-01-01T00:00:00Z"})
+        return httpx.Response(200, json=payload)
+
+    client = make_client(handler)
+    threads = await client.list_review_threads(_pr(), 7)
+    assert len(threads) == 1
+    # marker 가 신원 보증 → 타인 답글로 카운트하지 않음.
+    assert threads[0].has_non_root_author_reply is False
+    # 단, has_followup_marker 는 author 가 root 와 정확히 같을 때만 True 로 두는 기존
+    # 멱등성 정책을 유지 (식별 불가 author 는 우리 marker 선언에 사용하지 않음 — 다음
+    # follow-up 시 새로 marker 답글을 달지 여부는 별도 판단).
+    assert threads[0].has_followup_marker is False

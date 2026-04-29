@@ -519,14 +519,32 @@ def _parse_review_thread(raw: dict[str, Any]) -> ReviewThread | None:
 
     # 같은 스레드에 우리가 이미 follow-up 답글을 단 적이 있는지(멱등성) +
     # 사람/다른 봇이 답글을 단 적이 있는지(인간 신호 존중) 모두 root 이후 comments 에서 본다.
+    #
+    # 작성자 식별 정책 (codex PR #19 Major):
+    #   - GitHub 은 삭제된 사용자나 식별 불가 actor 의 댓글에서 author=null 을 반환한다.
+    #     이 경우 login 을 빈 문자열로 흡수하는데, 단순히 "비어 있으면 무시" 하면 사람
+    #     답글을 '대화 없음' 으로 오판해 자동 resolve 가 실행될 수 있다.
+    #   - 우리 봇이 단 답글은 본문에 follow-up marker 가 박혀 있어 author 가 비어도 식별
+    #     가능 (marker 는 다른 누구도 쓰지 않는 우리 시그니처). marker 가 있으면 우리 것
+    #     으로 보고 has_other_author 로 카운트하지 않는다.
+    #   - marker 가 없고 author 가 root 와 다르거나 비어 있으면 보수적으로 대화 진행 신호
+    #     로 간주해 has_other_author=True. 즉 식별 불가 답글은 무조건 "타인 답글" 쪽으로
+    #     기울인다 — false positive (무해한 차단) 보다 false negative (인간 답글 무시하고
+    #     resolve) 가 훨씬 위험하기 때문.
     has_followup_marker = False
     has_other_author = False
     for c in comments[1:]:
         body = c.get("body") or ""
         author = ((c.get("author") or {}).get("login")) or ""
-        if FOLLOWUP_MARKER in body and author == root_author:
+        is_our_followup = FOLLOWUP_MARKER in body
+        if is_our_followup and author == root_author:
             has_followup_marker = True
-        if author and author != root_author:
+        if is_our_followup:
+            # 우리 follow-up 답글로 식별됨 (author 가 비어도 marker 가 신원 보증).
+            continue
+        # marker 가 없으면 우리 답글이 아님. author 가 root 와 다르거나 비어 있으면
+        # 보수적으로 타인 답글로 카운트.
+        if author != root_author:
             has_other_author = True
 
     if comments_truncated:
