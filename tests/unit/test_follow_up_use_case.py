@@ -97,12 +97,26 @@ class _FakeGitHub:
 
 @dataclass
 class _DiskFetcher:
-    """tmp 경로의 실제 파일 시스템을 그대로 노출하는 fetcher 더블."""
+    """tmp 경로의 실제 파일 시스템을 그대로 노출하는 fetcher 더블.
+
+    `head_sha` 는 기본적으로 `pr.head_sha` 를 그대로 반환해 정상 경로를 시뮬레이션.
+    SHA 불일치 회귀 테스트에서는 `forced_head_sha` 를 세팅해 어긋난 상태를 만든다.
+    """
     root: Path
+    # None 이면 실제 PR 의 head_sha 와 일치한다고 가정. 회귀 테스트가 다른 SHA 를
+    # 강제할 때 채운다 — repo session 이 잘못된 commit 에 머문 상태를 시뮬레이션.
+    forced_head_sha: str | None = None
 
     @asynccontextmanager
     async def session(self, pr, token) -> AsyncIterator[Path]:
+        # 가짜로 인자만 묶어 두는 컨텍스트 매니저. 실제 git checkout 은 안 함.
+        self._last_pr_sha = pr.head_sha
         yield self.root
+
+    async def head_sha(self, repo_path: Path) -> str:
+        if self.forced_head_sha is not None:
+            return self.forced_head_sha
+        return getattr(self, "_last_pr_sha", "")
 
 
 def _make_use_case(github: _FakeGitHub, root: Path) -> FollowUpReviewUseCase:
@@ -410,3 +424,41 @@ async def test_resolve_failure_does_not_post_reply_marker(tmp_path: Path) -> Non
     # 핵심 계약: resolve 실패 시 reply 절대 호출 X (마커 박지 않음 → 다음 push 재시도 가능).
     assert github.replies == []
     assert github.resolved_ids == []  # resolve 가 raise 했으므로 등록도 안 됨
+
+
+async def test_aborts_when_repo_head_sha_does_not_match_pr_head(
+    tmp_path: Path, caplog
+) -> None:
+    """회귀 (codex PR #19 Major): repo_fetcher.session() 은 작업 트리를 pr.head_sha
+    로 checkout 한다는 계약이지만, 캐시 손상 등 극단 상황에서 다른 SHA 에 머무를
+    수 있다. 그 상태로 follow-up 을 진행하면 다른 commit 의 파일 상태로 valid
+    thread 를 잘못 resolve 해 silent feedback loss 가 발생.
+
+    SHA 가 어긋나면 전체 follow-up 을 skip 하고 경고만 남기는지 확인.
+    """
+    # 파일이 실제로는 없지만, SHA 불일치로 follow-up 이 skip 되면 분류 단계까지 가지
+    # 않으므로 로컬 파일 상태와 무관하게 결과는 "아무 작업 안 함" 이어야 한다.
+    threads = (_thread(id="T_X", root_comment_id=1, path="ghost.py", line=1),)
+    github = _FakeGitHub(threads=threads)
+    fetcher = _DiskFetcher(root=tmp_path, forced_head_sha="0" * 40)
+    uc = FollowUpReviewUseCase(
+        github=github, repo_fetcher=fetcher, bot_user_login="codex-review-bot[bot]"
+    )
+
+    import logging as _logging
+    with caplog.at_level(
+        _logging.WARNING, logger="codex_review.application.follow_up_use_case"
+    ):
+        await uc.execute(_pr())
+
+    # 분류조차 안 했으므로 어떤 thread 도 resolve / reply 되지 않음.
+    assert github.resolved_ids == []
+    assert github.replies == []
+    # 경고 로그에 SHA 불일치 사유가 명시돼야 운영자가 추적 가능.
+    abort_log = next(
+        (r for r in caplog.records
+         if r.levelname == "WARNING" and "aborting" in r.getMessage()),
+        None,
+    )
+    assert abort_log is not None
+    assert "0000000000000000000000000000000000000000" in abort_log.getMessage()

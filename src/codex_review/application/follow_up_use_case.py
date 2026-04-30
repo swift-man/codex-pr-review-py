@@ -90,6 +90,20 @@ class FollowUpReviewUseCase:
         token = await self._github.get_installation_token(pr.installation_id)
         actions: list[tuple[ReviewThread, _Action]] = []
         async with self._repo_fetcher.session(pr, token) as repo_path:
+            # Sanity check (codex PR #19 Major): repo_fetcher 의 session() 은 작업 트리
+            # 를 pr.head_sha 로 checkout 하기로 계약하지만, 캐시 손상이나 git 의 비정상
+            # 동작으로 다른 SHA 에 머무는 극단 상황이 가능하다. 그 상태에서 follow-up 을
+            # 진행하면 다른 commit 의 파일 상태로 유효한 review thread 를 잘못 resolve 할
+            # 수 있어 silent feedback loss 가 발생. SHA 가 어긋나면 전체 follow-up 을 skip
+            # 하고 경고만 남긴다 — main review 는 별도 use case 라 영향 없음.
+            actual_sha = await self._repo_fetcher.head_sha(repo_path)
+            if actual_sha != pr.head_sha:
+                logger.warning(
+                    "follow-up: aborting — repo HEAD %s does not match pr.head_sha %s "
+                    "on %s#%d (skipping classification to avoid stale-state resolve)",
+                    actual_sha, pr.head_sha, pr.repo.full_name, pr.number,
+                )
+                return
             for thread in candidates:
                 action = await asyncio.to_thread(
                     _classify_thread, thread, repo_path
