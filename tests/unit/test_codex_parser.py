@@ -591,3 +591,78 @@ def test_parse_does_not_crash_on_recursion_error_during_sanitize(monkeypatch) ->
     # 정화는 실패했지만 (RecursionError suppressed → parsed 가 dict 가 아님 → 원본 반환)
     # 예외가 새지 않고 finding 이 정상적으로 생성된다.
     assert len(result.findings) == 1
+
+
+# ---------------------------------------------------------------------------
+# Section 단위 dict-repr 누출 회귀 — Today-s-Fortune PR #3 실 사고
+# ---------------------------------------------------------------------------
+
+
+def test_parse_unwraps_dict_repr_inside_improvements_array() -> None:
+    """회귀 (Today-s-Fortune#3 실 사고): 모델이 `improvements` 배열 한 항목으로
+    `{'severity': 'major', 'message': '...'}` 를 박아 PR 본문 권장 개선 섹션에 raw
+    dict 가 그대로 노출된 사례. comments[].body 정화만으로는 못 막음 — 본문 섹션
+    리스트도 모두 정화 대상으로 포함.
+    """
+    raw = """
+    {
+      "summary": "ok",
+      "event": "COMMENT",
+      "improvements": [
+        "{'severity': 'major', 'message': '저장 동작이 비동기 begin 호출에서 동기 runModal 호출로 바뀌었다.'}"
+      ]
+    }
+    """
+    result = parse_review(raw)
+    assert len(result.improvements) == 1
+    item = result.improvements[0]
+    assert item.startswith("저장 동작이")
+    assert "'severity'" not in item
+    assert "'message'" not in item
+
+
+def test_parse_unwraps_dict_repr_inside_must_fix_and_positives() -> None:
+    """`must_fix` 와 `positives` 도 동일하게 정화 대상."""
+    raw = """
+    {
+      "summary": "ok",
+      "event": "REQUEST_CHANGES",
+      "positives": [
+        "{'message': '도메인 분리 깔끔'}"
+      ],
+      "must_fix": [
+        "{'severity': 'critical', 'message': '인증 누락'}"
+      ]
+    }
+    """
+    result = parse_review(raw)
+    assert result.positives == ("도메인 분리 깔끔",)
+    assert result.must_fix == ("인증 누락",)
+
+
+def test_parse_unwraps_dict_repr_inside_summary() -> None:
+    """summary 가 통째로 dict repr 인 극단 케이스도 메시지만 추출."""
+    raw = """
+    {
+      "summary": "{'severity': 'major', 'message': '전반적으로 견고하지만 테스트가 부족.'}",
+      "event": "COMMENT"
+    }
+    """
+    result = parse_review(raw)
+    assert result.summary == "전반적으로 견고하지만 테스트가 부족."
+
+
+def test_parse_preserves_normal_prose_in_sections() -> None:
+    """평문 섹션 항목은 절대 건드리지 않는다 (false-positive 방지)."""
+    raw = """
+    {
+      "summary": "전반적으로 깔끔합니다.",
+      "event": "COMMENT",
+      "positives": ["Protocol 패턴 적용", "테스트 커버리지 좋음"],
+      "improvements": ["문서화 보강 권장"]
+    }
+    """
+    result = parse_review(raw)
+    assert result.summary == "전반적으로 깔끔합니다."
+    assert result.positives == ("Protocol 패턴 적용", "테스트 커버리지 좋음")
+    assert result.improvements == ("문서화 보강 권장",)

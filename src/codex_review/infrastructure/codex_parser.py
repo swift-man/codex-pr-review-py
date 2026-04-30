@@ -41,7 +41,12 @@ def parse_review(raw: str) -> ReviewResult:
 
     event = _parse_event(payload.get("event"))
     findings = tuple(_parse_findings(payload.get("comments")))
-    must_fix = tuple(_as_str_list(payload.get("must_fix")))
+    # `_sanitize_body` 는 `comments[].body` 외에도 본문 섹션 (`summary` /
+    # `positives` / `must_fix` / `improvements`) 어디서든 dict repr 누출 가능 —
+    # 실제 운영에서 모델이 `improvements` 배열 한 항목으로 `{'severity':'major',
+    # 'message':'...'}` 를 박아 PR 본문에 raw dict 가 노출된 사고 발생.
+    # 모든 사람이 읽는 텍스트 필드에 동일하게 적용해 단일 차단선으로 통일.
+    must_fix = tuple(_sanitize_body(v) for v in _as_str_list(payload.get("must_fix")))
 
     # 차단 신호가 **어떤 형태로든** 있으면 이벤트를 `REQUEST_CHANGES` 로 강제 승격해
     # 병합 차단 효과를 살려야 한다.
@@ -65,11 +70,13 @@ def parse_review(raw: str) -> ReviewResult:
         event = ReviewEvent.REQUEST_CHANGES
 
     return ReviewResult(
-        summary=str(payload.get("summary", "")).strip() or "요약 없음",
+        summary=_sanitize_body(str(payload.get("summary") or "").strip()) or "요약 없음",
         event=event,
-        positives=tuple(_as_str_list(payload.get("positives"))),
+        positives=tuple(_sanitize_body(v) for v in _as_str_list(payload.get("positives"))),
         must_fix=must_fix,
-        improvements=tuple(_as_str_list(payload.get("improvements"))),
+        improvements=tuple(
+            _sanitize_body(v) for v in _as_str_list(payload.get("improvements"))
+        ),
         findings=findings,
     )
 
