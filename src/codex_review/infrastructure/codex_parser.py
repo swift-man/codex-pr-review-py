@@ -110,6 +110,9 @@ def _parse_findings(raw: object) -> list[Finding]:
         if not isinstance(item, dict):
             continue
         path = str(item.get("path", "")).strip()
+        # 추출 후 한 번 더 정화 (coderabbit PR #20 Major): 모델이 이중 직렬화한
+        # `{"body": "{'message': '...'}"}` 케이스를 한 번에 한 단계만 벗기면 inner
+        # dict repr 가 그대로 남는다. 깊이 상한으로 무한 재귀 방지.
         body = _sanitize_body(str(item.get("body", "")).strip())
         line = _coerce_line(item.get("line"))
         # 라인 번호가 없는 지적은 PR 인라인 코멘트로 붙을 수 없다. 제품 스펙상 "라인 고정 기술 단위
@@ -147,7 +150,15 @@ _DICT_REPR_RE = re.compile(
 )
 
 
-def _sanitize_body(body: str) -> str:
+# 이중 직렬화 보호 상한 (coderabbit PR #20 Major):
+#   `{"body": "{'message': '실제 본문'}"}` 처럼 한 번 더 직렬화된 payload 는 outer 만
+#   벗기면 inner dict repr 가 그대로 남는다. 추출 후 한 번 더 정화를 적용해 누출을
+#   막되, 무한 재귀를 막기 위해 깊이 상한을 둔다. 실 운영에서 2 단계 초과는 본 적
+#   없고, 깊이가 그 이상이면 모델 출력이 비정상이라 fallback 분기로 떨어지는 게 안전.
+_SANITIZE_MAX_DEPTH = 4
+
+
+def _sanitize_body(body: str, depth: int = 0) -> str:
     """모델이 `body` 안에 dict repr 을 박았을 때 message 만 추출. 실패 시 원본 유지.
 
     추출 로직:
@@ -156,10 +167,22 @@ def _sanitize_body(body: str) -> str:
       2) `ast.literal_eval` 로 안전 파싱 (eval 아님 — 임의 코드 실행 위험 없음).
          JSON 도 시도.
       3) dict 안에 `message` / `body` / `text` 같은 흔한 키가 있으면 그 값을 새 body 로.
-      4) 어느 단계든 실패하면 원본 그대로 — false negative 가 false positive 보다 안전.
+      4) 추출된 값이 또 dict repr 모양이면 같은 절차를 한 번 더 적용 (이중 직렬화 보호).
+      5) 어느 단계든 실패하면 원본 그대로 — false negative 가 false positive 보다 안전.
     """
     if not _DICT_REPR_RE.match(body):
         return body
+    if depth >= _SANITIZE_MAX_DEPTH:
+        # 비정상적으로 깊은 중첩 — 모델이 손상된 출력을 낸 신호. 더 벗기지 않고 안전한
+        # 안내 문구로 감싼다. 무한 재귀 방어선.
+        logger.warning(
+            "_sanitize_body hit depth limit %d — wrapping raw (len=%d)",
+            _SANITIZE_MAX_DEPTH, len(body),
+        )
+        return (
+            "⚠️ 모델 응답이 비정상적으로 깊게 중첩된 dict 형식으로 도착해 본문 추출에 "
+            "실패했습니다. 원본:\n```\n" + body + "\n```"
+        )
 
     parsed: object | None = None
     # JSON 먼저 — 더 엄격하므로 평문 파싱 오류로 떨어질 가능성이 낮다.
@@ -182,7 +205,8 @@ def _sanitize_body(body: str) -> str:
                 "(len=%d → %d)",
                 key, len(body), len(extracted),
             )
-            return extracted
+            # 추출한 문자열이 또 dict repr 이면 한 번 더 정화 (이중 직렬화 보호).
+            return _sanitize_body(extracted, depth + 1)
 
     # dict 였지만 message-like 키가 없는 경우. raw dict 를 그대로 노출하면 리뷰어가
     # 혼란 → 한국어 안내 문구로 감싸서 fallback.

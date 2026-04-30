@@ -470,3 +470,65 @@ def test_parse_unwraps_pretty_printed_json_with_newline_indent() -> None:
     """
     result = parse_review(raw)
     assert result.findings[0].body == "여러 줄 dict"
+
+
+def test_parse_unwraps_double_encoded_dict_repr_recursively() -> None:
+    """회귀 (coderabbit PR #20 Major): outer dict 의 `body` 값이 또 다른 dict repr
+    문자열인 이중 직렬화 케이스. 한 번만 unwrap 하면 inner dict repr 가 그대로 PR
+    인라인 코멘트에 노출된다. 두 단계까지는 자동으로 정화한다.
+    """
+    raw = """
+    {
+      "summary": "ok",
+      "event": "COMMENT",
+      "comments": [
+        {"path": "x.py", "line": 1, "severity": "major",
+         "body": "{'body': \\"{'message': '진짜 본문 텍스트'}\\"}"}
+      ]
+    }
+    """
+    result = parse_review(raw)
+    body = result.findings[0].body
+    # 두 번 벗긴 결과가 노출돼야 한다.
+    assert body == "진짜 본문 텍스트"
+    assert "'message'" not in body
+    assert "'body'" not in body
+
+
+def test_parse_double_encoded_with_outer_path_wrapper() -> None:
+    """`{'path':..., 'body':"{'message': '...'}"}` 처럼 outer 가 path 시작이고
+    inner 가 message 인 케이스도 두 단계 정화로 깨끗한 본문이 노출돼야 한다.
+    """
+    raw = """
+    {
+      "summary": "ok",
+      "event": "COMMENT",
+      "comments": [
+        {"path": "x.py", "line": 1, "severity": "major",
+         "body": "{'path': 'x.py', 'line': 1, 'body': \\"{'message': '실제 리뷰 메시지'}\\"}"}
+      ]
+    }
+    """
+    result = parse_review(raw)
+    assert result.findings[0].body == "실제 리뷰 메시지"
+
+
+def test_parse_recursive_sanitize_respects_depth_limit() -> None:
+    """비정상적으로 깊게 중첩된 dict repr 은 무한 재귀 대신 안내 문구로 감싸 보호."""
+    # 4단계 초과 깊이로 손상된 모델 출력 시뮬레이션.
+    deep = "'마지막'"
+    for _ in range(6):
+        deep = "{'message': " + repr(deep) + "}"
+    raw_payload = {
+        "summary": "ok",
+        "event": "COMMENT",
+        "comments": [
+            {"path": "x.py", "line": 1, "severity": "minor", "body": deep},
+        ],
+    }
+    import json as _json
+    result = parse_review(_json.dumps(raw_payload))
+    body = result.findings[0].body
+    # 정상 파싱 끝까지 가지는 못해도 raw dict 가 평문에 그대로 새지는 않아야 한다 —
+    # 안내 문구로 감싼 fallback (`추출에 실패` 또는 `깊게 중첩`) 이 등장.
+    assert ("실패" in body) or ("중첩" in body)
