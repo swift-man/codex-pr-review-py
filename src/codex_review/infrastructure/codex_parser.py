@@ -78,7 +78,11 @@ def _extract_json(text: str) -> dict[str, object] | None:
     stripped = text.strip()
     if stripped.startswith("{"):
         # 통째로 JSON 이면 그대로 사용. 파싱 실패는 "JSON 아닐 수 있다" 는 정상 신호이므로 의도적으로 무시.
-        with contextlib.suppress(json.JSONDecodeError):
+        # `RecursionError` 는 모델이 비정상적으로 깊게 중첩된 출력을 냈을 때 던질 수 있어
+        # 함께 잡는다 — 정화 시도가 실패하면 다음 후보로 넘어가고, 마지막엔 None 으로 수렴해
+        # parse_review 의 plain-text fallback 경로가 동작하게 한다 (codex / gemini /
+        # coderabbit PR #20 Major).
+        with contextlib.suppress(json.JSONDecodeError, RecursionError):
             return json.loads(stripped)
 
     # Codex agentic 실행은 "추론 → 최종 답" 순서로 여러 JSON 조각을 내뱉을 수 있다.
@@ -87,7 +91,7 @@ def _extract_json(text: str) -> dict[str, object] | None:
     candidates = _JSON_BLOCK.findall(text)
     for candidate in reversed(candidates):
         # 후보 하나가 JSON 이 아니면 다음 후보로 넘어간다 — JSONDecodeError 는 의도적으로 삼킨다.
-        with contextlib.suppress(json.JSONDecodeError):
+        with contextlib.suppress(json.JSONDecodeError, RecursionError):
             data = json.loads(candidate)
             if isinstance(data, dict) and "summary" in data:
                 return data
@@ -109,11 +113,15 @@ def _parse_findings(raw: object) -> list[Finding]:
     for item in raw:
         if not isinstance(item, dict):
             continue
-        path = str(item.get("path", "")).strip()
+        path = str(item.get("path") or "").strip()
+        # `or ""` 로 None 흡수 (gemini PR #20 Minor): 모델이 `"body": null` 을 보내면
+        # `item.get("body", "")` 는 키가 존재하므로 default 가 무시되고 `None` 이 반환,
+        # `str(None)` = "None" 이 그대로 본문이 돼 PR 코멘트에 "None" 문자열이 노출된다.
+        # `or ""` 는 None / 빈 문자열 둘 다 안전한 기본값으로 수렴.
         # 추출 후 한 번 더 정화 (coderabbit PR #20 Major): 모델이 이중 직렬화한
         # `{"body": "{'message': '...'}"}` 케이스를 한 번에 한 단계만 벗기면 inner
         # dict repr 가 그대로 남는다. 깊이 상한으로 무한 재귀 방지.
-        body = _sanitize_body(str(item.get("body", "")).strip())
+        body = _sanitize_body(str(item.get("body") or "").strip())
         line = _coerce_line(item.get("line"))
         # 라인 번호가 없는 지적은 PR 인라인 코멘트로 붙을 수 없다. 제품 스펙상 "라인 고정 기술 단위
         # 코멘트"만 인라인 대상이며, 나머지 거시적 지적은 improvements/must_fix 섹션으로 모델이 분류해야 한다.
@@ -186,12 +194,17 @@ def _sanitize_body(body: str, depth: int = 0) -> str:
 
     parsed: object | None = None
     # JSON 먼저 — 더 엄격하므로 평문 파싱 오류로 떨어질 가능성이 낮다.
-    with contextlib.suppress(json.JSONDecodeError):
+    # `RecursionError` 는 비정상적으로 깊게 중첩된 입력에서 두 파서 모두 던질 수 있음
+    # (codex / gemini / coderabbit PR #20 Major). 잡지 않으면 리뷰 워커 파이프라인 전체가
+    # 크래시해 PR 게시가 중단된다 — 정화 실패는 원본 유지로 수렴해야지 예외로 번지면 안 됨.
+    with contextlib.suppress(json.JSONDecodeError, RecursionError):
         parsed = json.loads(body)
     if not isinstance(parsed, dict):
         # Python dict literal (싱글 쿼터, True/False/None) 도 `ast.literal_eval` 로 시도.
         # 임의 코드 실행이 아니라 리터럴만 평가하므로 모델 출력에 부작용 없음.
-        with contextlib.suppress(ValueError, SyntaxError, MemoryError, TypeError):
+        with contextlib.suppress(
+            ValueError, SyntaxError, MemoryError, TypeError, RecursionError,
+        ):
             parsed = ast.literal_eval(body)
     if not isinstance(parsed, dict):
         return body

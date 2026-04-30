@@ -532,3 +532,62 @@ def test_parse_recursive_sanitize_respects_depth_limit() -> None:
     # 정상 파싱 끝까지 가지는 못해도 raw dict 가 평문에 그대로 새지는 않아야 한다 —
     # 안내 문구로 감싼 fallback (`추출에 실패` 또는 `깊게 중첩`) 이 등장.
     assert ("실패" in body) or ("중첩" in body)
+
+
+def test_parse_drops_finding_when_body_is_json_null() -> None:
+    """회귀 (gemini PR #20 Minor): 모델이 `"body": null` 을 보낼 때 `str(None)` 으로
+    평가돼 "None" 문자열이 그대로 인라인 코멘트가 되는 누출. `or ""` 로 흡수해
+    빈 본문은 falsy 체크에서 그대로 drop 되도록.
+    """
+    raw = """
+    {
+      "summary": "ok",
+      "event": "COMMENT",
+      "comments": [
+        {"path": "x.py", "line": 1, "severity": "minor", "body": null},
+        {"path": "y.py", "line": 2, "severity": "major", "body": "정상 본문"}
+      ]
+    }
+    """
+    result = parse_review(raw)
+    # null body 는 drop, 정상 본문만 통과.
+    assert len(result.findings) == 1
+    assert result.findings[0].path == "y.py"
+    assert result.findings[0].body == "정상 본문"
+
+
+def test_parse_does_not_crash_on_recursion_error_during_sanitize(monkeypatch) -> None:
+    """회귀 (codex / gemini / coderabbit PR #20 Major): json.loads / ast.literal_eval
+    이 비정상적으로 깊게 중첩된 입력에서 RecursionError 를 던질 수 있다. suppress
+    에 잡혀 있지 않으면 parse_review 전체가 크래시해 리뷰 게시가 중단된다.
+
+    `ast.literal_eval` 을 강제로 RecursionError 를 던지게 만들어 _sanitize_body 가
+    예외를 흘리지 않고 원본 유지 fallback 으로 수렴하는지 검증. (`json.loads` 도 동일
+    suppress 가 추가됐지만, 그 경로는 outer `_extract_json` 까지 같이 잡혀 시나리오
+    구분이 어렵다 — 여기서는 ast.literal_eval 경로만 정밀 검증한다.)
+    """
+    from codex_review.infrastructure import codex_parser as _parser
+
+    def boom(_s):
+        raise RecursionError("simulated stack overflow during literal_eval")
+
+    monkeypatch.setattr(_parser.ast, "literal_eval", boom)
+
+    # body 값이 JSON 으로는 파싱되지 않고 (싱글 쿼터 → JSONDecodeError) ast.literal_eval
+    # 로만 시도되는 형태. 본문은 dict repr 모양이라 trigger regex 가 발동.
+    raw = """
+    {
+      "summary": "ok",
+      "event": "COMMENT",
+      "comments": [
+        {"path": "x.py", "line": 1, "severity": "minor",
+         "body": "{'severity': 'minor', 'message': '실제 본문'}"}
+      ]
+    }
+    """
+    # parse_review 자체가 예외 없이 끝나야 한다.
+    result = parse_review(raw)
+
+    # 정화는 실패했지만 (RecursionError suppressed → parsed 가 dict 가 아님 → 원본 반환)
+    # 예외가 새지 않고 finding 이 정상적으로 생성된다.
+    assert len(result.findings) == 1
