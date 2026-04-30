@@ -255,3 +255,339 @@ def test_parse_drops_findings_without_valid_line() -> None:
     paths = [f.path for f in result.findings]
     assert paths == ["src/d.py"]
     assert result.findings[0].line == 5
+
+
+# ---------------------------------------------------------------------------
+# body 정화 — 모델이 dict repr 을 박는 실 운영 사고 회귀
+# ---------------------------------------------------------------------------
+
+
+def test_parse_unwraps_python_dict_repr_in_body_into_message() -> None:
+    """회귀(실 운영 사고): 모델이 가끔 `body` 안에 또 한 번 Python dict repr 을 박아
+    `{'severity': 'major', 'message': '...'}` 라는 raw 문자열이 PR 인라인 코멘트에
+    그대로 노출되는 사례. 본문에서 message 만 추출해 자연어로 보이게 정화한다.
+    """
+    raw = """
+    {
+      "summary": "ok",
+      "event": "COMMENT",
+      "comments": [
+        {"path": "src/a.py", "line": 7, "severity": "major",
+         "body": "{'severity': 'major', 'message': '거래어 감지 정규식에서 경계를 완전히 제거하면서 감사요/회사요 같은 일반 문장도 거래 안내를 발사할 수 있습니다.'}"}
+      ]
+    }
+    """
+    result = parse_review(raw)
+    assert len(result.findings) == 1
+    f = result.findings[0]
+    assert f.body.startswith("거래어 감지 정규식")
+    # raw dict 형태가 본문에 새지 않는다.
+    assert "'severity'" not in f.body
+    assert "'message'" not in f.body
+
+
+def test_parse_unwraps_json_dict_with_message_key() -> None:
+    """JSON 형식(쌍따옴표) 으로 박힌 dict 도 동일하게 unwrap."""
+    raw = """
+    {
+      "summary": "ok",
+      "event": "COMMENT",
+      "comments": [
+        {"path": "x.py", "line": 1, "severity": "minor",
+         "body": "{\\"severity\\": \\"minor\\", \\"message\\": \\"네이밍이 일관되지 않습니다.\\"}"}
+      ]
+    }
+    """
+    result = parse_review(raw)
+    assert result.findings[0].body == "네이밍이 일관되지 않습니다."
+
+
+def test_parse_preserves_inline_dict_quote_in_plain_prose() -> None:
+    """평문 본문 안에 짧은 dict 가 인용된 케이스는 unwrap 시도하지 않는다 (false
+    positive 방지). 정화는 body 전체가 dict literal 모양일 때만 적용.
+    """
+    raw = """
+    {
+      "summary": "ok",
+      "event": "COMMENT",
+      "comments": [
+        {"path": "x.py", "line": 1, "severity": "suggestion",
+         "body": "이 옵션은 `{'a': 1}` 처럼 dict 형태로 넘기는 게 직관적입니다."}
+      ]
+    }
+    """
+    result = parse_review(raw)
+    body = result.findings[0].body
+    # 원문이 그대로 보존돼야 한다.
+    assert "{'a': 1}" in body
+    assert "직관적입니다" in body
+
+
+def test_parse_falls_back_when_dict_lacks_message_key() -> None:
+    """dict 인데 message 류 키가 없으면 raw 를 코드펜스로 감싸 noise 최소화 + 경고 안내."""
+    raw = """
+    {
+      "summary": "ok",
+      "event": "COMMENT",
+      "comments": [
+        {"path": "x.py", "line": 1, "severity": "minor",
+         "body": "{'severity': 'minor', 'foo': 'bar'}"}
+      ]
+    }
+    """
+    result = parse_review(raw)
+    body = result.findings[0].body
+    assert "추출에 실패" in body
+    assert "```" in body  # 코드펜스로 감싸 시각 노이즈 최소화
+
+
+def test_parse_keeps_body_unchanged_when_not_dict_shape() -> None:
+    """일반 평문 + 코드펜스 포함 본문은 절대 건드리지 않는다 — happy path 보존."""
+    raw = """
+    {
+      "summary": "ok",
+      "event": "COMMENT",
+      "comments": [
+        {"path": "x.py", "line": 1, "severity": "major",
+         "body": "문제: ... 영향: ... 제안: ```python\\nuse Path\\n```"}
+      ]
+    }
+    """
+    result = parse_review(raw)
+    body = result.findings[0].body
+    assert body.startswith("문제:")
+    assert "```python" in body
+
+
+# ---------------------------------------------------------------------------
+# 트리거 키 누락 회귀 (codex PR #20 리뷰)
+# ---------------------------------------------------------------------------
+
+
+def test_parse_unwraps_text_key_dict_repr() -> None:
+    """추출 루프는 `text` 도 지원하는데 트리거 정규식이 빠뜨려 아예 정화 시도가
+    안 되던 회귀. text 키 단독 dict 도 잡혀야 한다.
+    """
+    raw = """
+    {
+      "summary": "ok",
+      "event": "COMMENT",
+      "comments": [
+        {"path": "x.py", "line": 1, "severity": "minor",
+         "body": "{\\"text\\": \\"이 변수는 사용되지 않습니다.\\"}"}
+      ]
+    }
+    """
+    result = parse_review(raw)
+    assert result.findings[0].body == "이 변수는 사용되지 않습니다."
+
+
+def test_parse_unwraps_detail_key_dict_repr() -> None:
+    """`detail` 키도 동일."""
+    raw = """
+    {
+      "summary": "ok",
+      "event": "COMMENT",
+      "comments": [
+        {"path": "x.py", "line": 1, "severity": "minor",
+         "body": "{'detail': '경계 조건 누락'}"}
+      ]
+    }
+    """
+    result = parse_review(raw)
+    assert result.findings[0].body == "경계 조건 누락"
+
+
+def test_parse_unwraps_outer_comment_dict_with_path_first() -> None:
+    """모델이 outer comment 스키마 전체를 body 안에 박은 케이스.
+    (`{'path': '...', 'line': 1, 'body': '실제 본문'}`)
+    트리거가 `path` 로 시작해도 발동해 inner `body` 가 추출돼야 한다.
+    """
+    raw = """
+    {
+      "summary": "ok",
+      "event": "COMMENT",
+      "comments": [
+        {"path": "x.py", "line": 1, "severity": "major",
+         "body": "{'path': 'x.py', 'line': 1, 'severity': 'major', 'body': '경계 조건이 무시됩니다.'}"}
+      ]
+    }
+    """
+    result = parse_review(raw)
+    body = result.findings[0].body
+    assert body == "경계 조건이 무시됩니다."
+    # raw outer dict 형태가 본문에 새지 않는다.
+    assert "'path'" not in body
+    assert "'line'" not in body
+
+
+def test_parse_unwraps_outer_dict_starting_with_line_key() -> None:
+    """outer dict 의 키 순서가 다를 때도 (`line` 먼저) 트리거가 발동해야 한다."""
+    raw = """
+    {
+      "summary": "ok",
+      "event": "COMMENT",
+      "comments": [
+        {"path": "x.py", "line": 1, "severity": "major",
+         "body": "{'line': 1, 'path': 'x.py', 'body': '리뷰 본문 텍스트'}"}
+      ]
+    }
+    """
+    result = parse_review(raw)
+    assert result.findings[0].body == "리뷰 본문 텍스트"
+
+
+def test_parse_unwraps_pretty_printed_json_with_space_after_brace() -> None:
+    """회귀 (codex / gemini / coderabbit PR #20 합의): pretty-printed JSON 은
+    `{ "message": ... }` 처럼 여는 중괄호와 첫 키 사이에 공백이 들어간다. 이전
+    트리거 정규식 `^\\s*\\{['"]` 은 이 케이스를 놓쳐 정화가 작동하지 않았다.
+    """
+    raw = """
+    {
+      "summary": "ok",
+      "event": "COMMENT",
+      "comments": [
+        {"path": "x.py", "line": 1, "severity": "major",
+         "body": "{ \\"message\\": \\"공백이 끼워진 pretty JSON\\" }"}
+      ]
+    }
+    """
+    result = parse_review(raw)
+    assert result.findings[0].body == "공백이 끼워진 pretty JSON"
+
+
+def test_parse_unwraps_pretty_printed_json_with_newline_indent() -> None:
+    """`{\\n  "severity": ... }` 처럼 줄바꿈 + 들여쓰기가 끼워진 형태도 잡아야 한다."""
+    raw = """
+    {
+      "summary": "ok",
+      "event": "COMMENT",
+      "comments": [
+        {"path": "x.py", "line": 1, "severity": "major",
+         "body": "{\\n  \\"severity\\": \\"major\\",\\n  \\"message\\": \\"여러 줄 dict\\"\\n}"}
+      ]
+    }
+    """
+    result = parse_review(raw)
+    assert result.findings[0].body == "여러 줄 dict"
+
+
+def test_parse_unwraps_double_encoded_dict_repr_recursively() -> None:
+    """회귀 (coderabbit PR #20 Major): outer dict 의 `body` 값이 또 다른 dict repr
+    문자열인 이중 직렬화 케이스. 한 번만 unwrap 하면 inner dict repr 가 그대로 PR
+    인라인 코멘트에 노출된다. 두 단계까지는 자동으로 정화한다.
+    """
+    raw = """
+    {
+      "summary": "ok",
+      "event": "COMMENT",
+      "comments": [
+        {"path": "x.py", "line": 1, "severity": "major",
+         "body": "{'body': \\"{'message': '진짜 본문 텍스트'}\\"}"}
+      ]
+    }
+    """
+    result = parse_review(raw)
+    body = result.findings[0].body
+    # 두 번 벗긴 결과가 노출돼야 한다.
+    assert body == "진짜 본문 텍스트"
+    assert "'message'" not in body
+    assert "'body'" not in body
+
+
+def test_parse_double_encoded_with_outer_path_wrapper() -> None:
+    """`{'path':..., 'body':"{'message': '...'}"}` 처럼 outer 가 path 시작이고
+    inner 가 message 인 케이스도 두 단계 정화로 깨끗한 본문이 노출돼야 한다.
+    """
+    raw = """
+    {
+      "summary": "ok",
+      "event": "COMMENT",
+      "comments": [
+        {"path": "x.py", "line": 1, "severity": "major",
+         "body": "{'path': 'x.py', 'line': 1, 'body': \\"{'message': '실제 리뷰 메시지'}\\"}"}
+      ]
+    }
+    """
+    result = parse_review(raw)
+    assert result.findings[0].body == "실제 리뷰 메시지"
+
+
+def test_parse_recursive_sanitize_respects_depth_limit() -> None:
+    """비정상적으로 깊게 중첩된 dict repr 은 무한 재귀 대신 안내 문구로 감싸 보호."""
+    # 4단계 초과 깊이로 손상된 모델 출력 시뮬레이션.
+    deep = "'마지막'"
+    for _ in range(6):
+        deep = "{'message': " + repr(deep) + "}"
+    raw_payload = {
+        "summary": "ok",
+        "event": "COMMENT",
+        "comments": [
+            {"path": "x.py", "line": 1, "severity": "minor", "body": deep},
+        ],
+    }
+    import json as _json
+    result = parse_review(_json.dumps(raw_payload))
+    body = result.findings[0].body
+    # 정상 파싱 끝까지 가지는 못해도 raw dict 가 평문에 그대로 새지는 않아야 한다 —
+    # 안내 문구로 감싼 fallback (`추출에 실패` 또는 `깊게 중첩`) 이 등장.
+    assert ("실패" in body) or ("중첩" in body)
+
+
+def test_parse_drops_finding_when_body_is_json_null() -> None:
+    """회귀 (gemini PR #20 Minor): 모델이 `"body": null` 을 보낼 때 `str(None)` 으로
+    평가돼 "None" 문자열이 그대로 인라인 코멘트가 되는 누출. `or ""` 로 흡수해
+    빈 본문은 falsy 체크에서 그대로 drop 되도록.
+    """
+    raw = """
+    {
+      "summary": "ok",
+      "event": "COMMENT",
+      "comments": [
+        {"path": "x.py", "line": 1, "severity": "minor", "body": null},
+        {"path": "y.py", "line": 2, "severity": "major", "body": "정상 본문"}
+      ]
+    }
+    """
+    result = parse_review(raw)
+    # null body 는 drop, 정상 본문만 통과.
+    assert len(result.findings) == 1
+    assert result.findings[0].path == "y.py"
+    assert result.findings[0].body == "정상 본문"
+
+
+def test_parse_does_not_crash_on_recursion_error_during_sanitize(monkeypatch) -> None:
+    """회귀 (codex / gemini / coderabbit PR #20 Major): json.loads / ast.literal_eval
+    이 비정상적으로 깊게 중첩된 입력에서 RecursionError 를 던질 수 있다. suppress
+    에 잡혀 있지 않으면 parse_review 전체가 크래시해 리뷰 게시가 중단된다.
+
+    `ast.literal_eval` 을 강제로 RecursionError 를 던지게 만들어 _sanitize_body 가
+    예외를 흘리지 않고 원본 유지 fallback 으로 수렴하는지 검증. (`json.loads` 도 동일
+    suppress 가 추가됐지만, 그 경로는 outer `_extract_json` 까지 같이 잡혀 시나리오
+    구분이 어렵다 — 여기서는 ast.literal_eval 경로만 정밀 검증한다.)
+    """
+    from codex_review.infrastructure import codex_parser as _parser
+
+    def boom(_s):
+        raise RecursionError("simulated stack overflow during literal_eval")
+
+    monkeypatch.setattr(_parser.ast, "literal_eval", boom)
+
+    # body 값이 JSON 으로는 파싱되지 않고 (싱글 쿼터 → JSONDecodeError) ast.literal_eval
+    # 로만 시도되는 형태. 본문은 dict repr 모양이라 trigger regex 가 발동.
+    raw = """
+    {
+      "summary": "ok",
+      "event": "COMMENT",
+      "comments": [
+        {"path": "x.py", "line": 1, "severity": "minor",
+         "body": "{'severity': 'minor', 'message': '실제 본문'}"}
+      ]
+    }
+    """
+    # parse_review 자체가 예외 없이 끝나야 한다.
+    result = parse_review(raw)
+
+    # 정화는 실패했지만 (RecursionError suppressed → parsed 가 dict 가 아님 → 원본 반환)
+    # 예외가 새지 않고 finding 이 정상적으로 생성된다.
+    assert len(result.findings) == 1
