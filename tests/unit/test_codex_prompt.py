@@ -105,3 +105,92 @@ def test_prompt_mentions_exclusions_when_budget_truncated() -> None:
     prompt = build_prompt(_pr(), dump)
     assert "제외된 파일" in prompt
     assert "big/foo.py" in prompt
+
+
+# ---------------------------------------------------------------------------
+# REVIEW HISTORY 섹션 — 이전 라운드 코멘트 / 다른 봇 의견 노출
+# ---------------------------------------------------------------------------
+
+
+from datetime import datetime
+
+from codex_review.domain import ReviewComment, ReviewHistory
+
+
+def test_prompt_omits_history_section_when_empty() -> None:
+    """첫 리뷰 호환성: history 가 None 이거나 비어 있으면 섹션 자체 생략."""
+    dump = FileDump(
+        entries=(FileEntry(path="x.py", content="a", size_bytes=1, is_changed=True),),
+        total_chars=1,
+    )
+    prompt_no_history = build_prompt(_pr(), dump)
+    prompt_empty_history = build_prompt(_pr(), dump, history=ReviewHistory())
+    # SYSTEM_RULES 본문에는 "REVIEW HISTORY" 가 메타리플라이 안내 일부로 등장 가능 →
+    # 실제 섹션 헤더 (`=== REVIEW HISTORY ===`) 의 부재로 판단.
+    assert "=== REVIEW HISTORY ===" not in prompt_no_history
+    assert "=== REVIEW HISTORY ===" not in prompt_empty_history
+
+
+def test_prompt_renders_history_section_chronologically() -> None:
+    """history 가 있으면 섹션이 추가되고 시간순 (오래된 → 최신) 으로 직렬화."""
+    dump = FileDump(
+        entries=(FileEntry(path="x.py", content="a", size_bytes=1, is_changed=True),),
+        total_chars=1,
+    )
+    history = ReviewHistory(comments=(
+        ReviewComment(
+            author_login="gemini-pr-review-bot[bot]",
+            kind="inline",
+            body="[Major] phantom quote 가능성",
+            created_at=datetime(2026, 5, 1, 12, 0, 0),
+            comment_id=12345,
+            path="x.py",
+            line=10,
+        ),
+        ReviewComment(
+            author_login="codex-review-bot[bot]",
+            kind="review-summary",
+            body="이전 라운드 우리 봇 리뷰 본문",
+            created_at=datetime(2026, 5, 2, 3, 0, 0),
+        ),
+    ))
+
+    prompt = build_prompt(_pr(), dump, history=history)
+    assert "=== REVIEW HISTORY ===" in prompt
+    # 두 코멘트 모두 본문에 등장.
+    assert "phantom quote" in prompt
+    assert "이전 라운드 우리 봇 리뷰" in prompt
+    # 시간순: 5월 1일 항목이 5월 2일 항목보다 앞에.
+    pos_inline = prompt.find("phantom quote")
+    pos_summary = prompt.find("이전 라운드 우리 봇 리뷰")
+    assert 0 < pos_inline < pos_summary
+    # inline 항목은 comment_id 노출 — 메타리플라이 타깃 회수용.
+    assert "comment_id=12345" in prompt
+    # deferred 키워드 가이드가 동봉됐는지.
+    assert "deferred" in prompt or "별도 PR" in prompt
+
+
+def test_prompt_history_truncates_oldest_when_exceeding_total_cap() -> None:
+    """누적 크기 cap 초과 시 가장 오래된 항목부터 drop. 최근 라운드 정보 우선."""
+    dump = FileDump(
+        entries=(FileEntry(path="x.py", content="a", size_bytes=1, is_changed=True),),
+        total_chars=1,
+    )
+    # 각 코멘트 약 1300 chars (cap 1500 미만이라 per-comment truncation 안 발동).
+    big_body = "X" * 1300
+    comments = tuple(
+        ReviewComment(
+            author_login=f"bot{i}",
+            kind="issue",
+            body=big_body + f" #{i}",
+            created_at=datetime(2026, 5, i + 1, 0, 0, 0),
+        )
+        for i in range(15)  # 1300 * 15 ≈ 19500 chars > _HISTORY_TOTAL_CAP=12000
+    )
+    history = ReviewHistory(comments=comments)
+
+    prompt = build_prompt(_pr(), dump, history=history)
+    # 가장 오래된 #0 은 잘려 나가야 한다.
+    assert "#0" not in prompt
+    # 가장 최신 #14 는 보존돼야 한다.
+    assert "#14" in prompt

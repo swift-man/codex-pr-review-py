@@ -570,3 +570,128 @@ async def test_list_review_threads_marker_with_null_author_still_recognized(
     # 로 둬서, GitHub 가 우리 follow-up 댓글의 author 메타를 잃어버린 케이스에 다음
     # 사이클이 같은 스레드에 또 답글을 다는 중복 게시가 발생했다.
     assert threads[0].has_followup_marker is True
+
+
+# ---------------------------------------------------------------------------
+# fetch_review_history — 3개 엔드포인트 병렬 fetch + 시간순 merge + filter
+# ---------------------------------------------------------------------------
+
+
+async def test_fetch_review_history_merges_three_sources_chronologically(make_client) -> None:
+    """issue / inline / review summaries 가 모두 가져와지고 created_at 시간순 정렬되는지."""
+    issue_payload = [
+        {"id": 1, "user": {"login": "alice"}, "body": "리뷰 부탁",
+         "created_at": "2026-05-01T10:00:00Z"},
+    ]
+    inline_payload = [
+        {"id": 12345, "user": {"login": "gemini-pr-review-bot[bot]"},
+         "body": "[Major] phantom 가능성", "path": "x.py", "line": 10,
+         "created_at": "2026-05-02T03:00:00Z"},
+    ]
+    reviews_payload = [
+        {"user": {"login": "codex-review-bot[bot]"},
+         "body": "이전 라운드 codex 리뷰 본문",
+         "submitted_at": "2026-05-02T05:00:00Z"},
+    ]
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path.endswith("/access_tokens"):
+            return httpx.Response(200, json={"token": "ITOK", "expires_at": "2030-01-01T00:00:00Z"})
+        path = req.url.path
+        if path.endswith("/issues/42/comments"):
+            return httpx.Response(200, json=issue_payload)
+        if path.endswith("/pulls/42/comments"):
+            return httpx.Response(200, json=inline_payload)
+        if path.endswith("/pulls/42/reviews"):
+            return httpx.Response(200, json=reviews_payload)
+        raise AssertionError(f"unexpected path: {path}")
+
+    client = make_client(handler)
+    history = await client.fetch_review_history(_pr(), 7)
+
+    assert len(history.comments) == 3
+    # 시간순: 5/1 issue → 5/2 03:00 inline → 5/2 05:00 review-summary
+    assert history.comments[0].kind == "issue"
+    assert history.comments[1].kind == "inline"
+    assert history.comments[2].kind == "review-summary"
+    # inline 의 comment_id 가 보존되어야 메타리플라이 타깃 회수 가능.
+    assert history.comments[1].comment_id == 12345
+
+
+async def test_fetch_review_history_filters_our_followup_marker(make_client) -> None:
+    """우리 봇이 단 follow-up 자동 답글은 history 에서 제외."""
+    inline_payload = [
+        {"id": 1, "user": {"login": "codex-review-bot[bot]"},
+         "body": f"resolved\n\n{FOLLOWUP_MARKER}",
+         "path": "x.py", "line": 10,
+         "created_at": "2026-05-01T10:00:00Z"},
+        {"id": 2, "user": {"login": "gemini-pr-review-bot[bot]"},
+         "body": "정상 리뷰 코멘트",
+         "path": "x.py", "line": 20,
+         "created_at": "2026-05-01T11:00:00Z"},
+    ]
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path.endswith("/access_tokens"):
+            return httpx.Response(200, json={"token": "ITOK", "expires_at": "2030-01-01T00:00:00Z"})
+        path = req.url.path
+        if path.endswith("/pulls/42/comments"):
+            return httpx.Response(200, json=inline_payload)
+        return httpx.Response(200, json=[])
+
+    client = make_client(handler)
+    history = await client.fetch_review_history(_pr(), 7)
+
+    # FOLLOWUP_MARKER 박힌 첫 항목은 제외 — gemini 의 정상 코멘트만 남음.
+    assert len(history.comments) == 1
+    assert history.comments[0].comment_id == 2
+
+
+async def test_fetch_review_history_empty_when_pr_has_no_comments(make_client) -> None:
+    """3개 엔드포인트 모두 빈 배열이면 빈 history — 첫 리뷰 호환성."""
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path.endswith("/access_tokens"):
+            return httpx.Response(200, json={"token": "ITOK", "expires_at": "2030-01-01T00:00:00Z"})
+        return httpx.Response(200, json=[])
+
+    client = make_client(handler)
+    history = await client.fetch_review_history(_pr(), 7)
+    assert history.is_empty
+
+
+async def test_fetch_review_history_respects_page_safety_cap(make_client) -> None:
+    """회귀 (gemini PR #24 Major): GitHub 가 비정상적으로 무한 Link rel=next 를 반환해도
+    `_collect_pages` 가 100 페이지 cap 에서 멈춰 무한 루프 / OOM 을 방지.
+
+    handler 가 항상 다음 페이지로 가리키는 Link 헤더를 반환하도록 만들고, 호출 횟수가
+    일정 상한 안에 머무는지 (≤100 페이지/엔드포인트 × 3 엔드포인트 + 토큰 1) 확인.
+    """
+    call_counts = {"issues": 0, "pulls_comments": 0, "pulls_reviews": 0, "token": 0}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        path = req.url.path
+        if path.endswith("/access_tokens"):
+            call_counts["token"] += 1
+            return httpx.Response(200, json={"token": "ITOK", "expires_at": "2030-01-01T00:00:00Z"})
+        if path.endswith("/issues/42/comments"):
+            call_counts["issues"] += 1
+        elif path.endswith("/pulls/42/comments"):
+            call_counts["pulls_comments"] += 1
+        elif path.endswith("/pulls/42/reviews"):
+            call_counts["pulls_reviews"] += 1
+        # 한 항목만 담아 응답 + 항상 다음 페이지로 가리키는 Link 헤더 → 무한 루프 시뮬.
+        next_url = "https://api.github.com" + path + "?page=next"
+        return httpx.Response(
+            200, json=[],  # 빈 배열로도 cap 동작 확인 가능
+            headers={"Link": f'<{next_url}>; rel="next"'},
+        )
+
+    client = make_client(handler)
+    history = await client.fetch_review_history(_pr(), 7)
+
+    # 각 엔드포인트가 정확히 100 번까지만 호출됐는지 (101 번째에서 cap).
+    assert call_counts["issues"] == 100
+    assert call_counts["pulls_comments"] == 100
+    assert call_counts["pulls_reviews"] == 100
+    # body 는 빈 응답이라 history 도 비어 있음 — 핵심 계약은 "무한 루프 안 빠짐".
+    assert history.is_empty
