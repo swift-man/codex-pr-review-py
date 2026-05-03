@@ -657,3 +657,41 @@ async def test_fetch_review_history_empty_when_pr_has_no_comments(make_client) -
     client = make_client(handler)
     history = await client.fetch_review_history(_pr(), 7)
     assert history.is_empty
+
+
+async def test_fetch_review_history_respects_page_safety_cap(make_client) -> None:
+    """회귀 (gemini PR #24 Major): GitHub 가 비정상적으로 무한 Link rel=next 를 반환해도
+    `_collect_pages` 가 100 페이지 cap 에서 멈춰 무한 루프 / OOM 을 방지.
+
+    handler 가 항상 다음 페이지로 가리키는 Link 헤더를 반환하도록 만들고, 호출 횟수가
+    일정 상한 안에 머무는지 (≤100 페이지/엔드포인트 × 3 엔드포인트 + 토큰 1) 확인.
+    """
+    call_counts = {"issues": 0, "pulls_comments": 0, "pulls_reviews": 0, "token": 0}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        path = req.url.path
+        if path.endswith("/access_tokens"):
+            call_counts["token"] += 1
+            return httpx.Response(200, json={"token": "ITOK", "expires_at": "2030-01-01T00:00:00Z"})
+        if path.endswith("/issues/42/comments"):
+            call_counts["issues"] += 1
+        elif path.endswith("/pulls/42/comments"):
+            call_counts["pulls_comments"] += 1
+        elif path.endswith("/pulls/42/reviews"):
+            call_counts["pulls_reviews"] += 1
+        # 한 항목만 담아 응답 + 항상 다음 페이지로 가리키는 Link 헤더 → 무한 루프 시뮬.
+        next_url = "https://api.github.com" + path + "?page=next"
+        return httpx.Response(
+            200, json=[],  # 빈 배열로도 cap 동작 확인 가능
+            headers={"Link": f'<{next_url}>; rel="next"'},
+        )
+
+    client = make_client(handler)
+    history = await client.fetch_review_history(_pr(), 7)
+
+    # 각 엔드포인트가 정확히 100 번까지만 호출됐는지 (101 번째에서 cap).
+    assert call_counts["issues"] == 100
+    assert call_counts["pulls_comments"] == 100
+    assert call_counts["pulls_reviews"] == 100
+    # body 는 빈 응답이라 history 도 비어 있음 — 핵심 계약은 "무한 루프 안 빠짐".
+    assert history.is_empty

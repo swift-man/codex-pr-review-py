@@ -450,9 +450,11 @@ def _format_review_history(history: ReviewHistory | None) -> str:
     for c in history.comments:
         rendered.append(_format_review_history_item(c))
 
-    # 누적 cap 초과 시 오래된 것부터 drop.
-    while rendered and sum(len(r) for r in rendered) > _HISTORY_TOTAL_CAP:
-        rendered.pop(0)
+    # 누적 cap 초과 시 오래된 것부터 drop. `sum(...)` 을 매 반복 재계산하면 O(N²) 라
+    # 누적 길이를 한 번 계산하고 pop 마다 차감 (gemini PR #24 Minor — 일관성).
+    total = sum(len(r) for r in rendered)
+    while rendered and total > _HISTORY_TOTAL_CAP:
+        total -= len(rendered.pop(0))
 
     if not rendered:
         return ""

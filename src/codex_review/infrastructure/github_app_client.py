@@ -409,16 +409,30 @@ class GitHubAppClient:
         return ReviewHistory(comments=tuple(comments))
 
     async def _collect_pages(self, url_or_path: str, *, auth: str) -> list[Any]:
-        """`Link rel=next` 따라 끝까지 순회하며 모든 페이지 항목을 평탄화해 반환."""
+        """`Link rel=next` 따라 끝까지 순회하며 모든 페이지 항목을 평탄화해 반환.
+
+        Safety cap (gemini PR #24 Major): GitHub 가 잘못된 Link 헤더를 반환하거나
+        악의적 / 비정상적으로 코멘트 수가 매우 많은 PR 에서 무한 루프 / OOM /
+        secondary rate limit 초과를 막기 위해 100 페이지 (=10K 항목, per_page=100)
+        까지만 순회. GraphQL `list_review_threads` 쪽 페이지네이션과 동일한 cap.
+        """
         out: list[Any] = []
         next_url: str | None = url_or_path
-        while next_url:
+        for _ in range(100):
+            if not next_url:
+                break
             page, next_url = await self._get_page_with_next(next_url, auth=auth)
             if isinstance(page, list):
                 out.extend(page)
             else:
                 # 비정상 응답 (dict 등) 은 무시하고 종료.
                 break
+        else:
+            # `for ... else` — break 없이 한도 도달 시 실행. 정상 PR 은 절대 도달 X.
+            logger.warning(
+                "REST pagination exceeded safety cap (100 pages) for %s",
+                url_or_path,
+            )
         return out
 
     async def reply_to_review_comment(
