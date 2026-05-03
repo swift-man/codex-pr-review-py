@@ -17,7 +17,9 @@ from codex_review.domain import (
     Finding,
     PullRequest,
     RepoRef,
+    ReviewComment,
     ReviewEvent,
+    ReviewHistory,
     ReviewResult,
     ReviewThread,
 )
@@ -347,6 +349,78 @@ class GitHubAppClient:
             )
         return tuple(out)
 
+    async def fetch_review_history(
+        self, pr: PullRequest, installation_id: int
+    ) -> ReviewHistory:
+        """이전 PR 코멘트 / 리뷰 기록을 시간순으로 묶어 반환.
+
+        병렬 fetch 대상:
+          1. `GET /issues/{n}/comments` — PR 본문 아래 일반 코멘트
+          2. `GET /pulls/{n}/comments` — 라인에 붙은 inline review comment
+          3. `GET /pulls/{n}/reviews` — 다른 봇 / 사람 리뷰의 summary 본문
+
+        필터:
+          - `FOLLOWUP_MARKER` 가 박힌 우리 봇 자동 답글 제외 (메타 신호 노이즈).
+          - `body` 가 비어 있는 항목 제외.
+
+        정렬: `created_at` 오름차순 — 모델이 시간 흐름을 인지해 deferred / 처리완료
+        신호를 정확히 해석하도록.
+
+        구현 상수:
+          - 우리 봇 식별: `pr.repo` 단위 review_model_label 만 갖고는 본인 식별 못함.
+            대신 `is_our_bot=True` 플래그를 follow-up 마커 또는 `review_model_label`
+            footer 패턴으로 추정. footer 가 빈 코멘트라도 author 가 동일하면 True.
+
+        토큰 한계 / 페이지네이션: per_page=100, Link rel=next 추적. issue/inline 은
+        많아질 수 있어 페이지네이션 필수. reviews 는 보통 적지만 동일 패턴.
+        """
+        token = await self.get_installation_token(installation_id)
+        repo_pulls = f"/repos/{pr.repo.full_name}/pulls/{pr.number}"
+        repo_issue = f"/repos/{pr.repo.full_name}/issues/{pr.number}"
+
+        # 3개 엔드포인트 병렬 — 같은 PR 의 독립 리소스라 race 없음.
+        async with asyncio.TaskGroup() as tg:
+            issue_task = tg.create_task(
+                self._collect_pages(
+                    f"{repo_issue}/comments?per_page=100", auth=f"token {token}"
+                )
+            )
+            inline_task = tg.create_task(
+                self._collect_pages(
+                    f"{repo_pulls}/comments?per_page=100", auth=f"token {token}"
+                )
+            )
+            reviews_task = tg.create_task(
+                self._collect_pages(
+                    f"{repo_pulls}/reviews?per_page=100", auth=f"token {token}"
+                )
+            )
+        issue_items = issue_task.result()
+        inline_items = inline_task.result()
+        review_items = reviews_task.result()
+
+        comments: list[ReviewComment] = []
+        comments.extend(_parse_issue_comments(issue_items))
+        comments.extend(_parse_inline_comments(inline_items))
+        comments.extend(_parse_review_summaries(review_items))
+
+        # 정렬 후 다시 튜플로. created_at 동률은 안정 정렬로 입력 순서 유지.
+        comments.sort(key=lambda c: c.created_at)
+        return ReviewHistory(comments=tuple(comments))
+
+    async def _collect_pages(self, url_or_path: str, *, auth: str) -> list[Any]:
+        """`Link rel=next` 따라 끝까지 순회하며 모든 페이지 항목을 평탄화해 반환."""
+        out: list[Any] = []
+        next_url: str | None = url_or_path
+        while next_url:
+            page, next_url = await self._get_page_with_next(next_url, auth=auth)
+            if isinstance(page, list):
+                out.extend(page)
+            else:
+                # 비정상 응답 (dict 등) 은 무시하고 종료.
+                break
+        return out
+
     async def reply_to_review_comment(
         self, pr: PullRequest, comment_id: int, body: str
     ) -> None:
@@ -569,6 +643,119 @@ def _parse_review_thread(raw: dict[str, Any]) -> ReviewThread | None:
         has_non_root_author_reply=has_other_author,
         has_followup_marker=has_followup_marker,
     )
+
+
+# --- Review history parsers ------------------------------------------------
+# `fetch_review_history` 가 받은 GitHub REST 응답 (issue / inline / review summaries)
+# 을 도메인 `ReviewComment` 시퀀스로 변환. 각 종류의 GitHub 스키마가 다르므로 별도
+# 헬퍼로 분리. 본문이 비어 있거나 우리 follow-up marker 가 박힌 자동 답글은 제외.
+
+
+def _parse_iso_datetime(value: object) -> datetime | None:
+    """`"2025-01-02T03:04:05Z"` 같은 ISO 8601 → naive datetime. 실패 시 None.
+
+    `datetime.fromisoformat` 은 Python 3.11+ 에서 `Z` 접미사를 UTC 로 받아들인다.
+    """
+    if not isinstance(value, str) or not value:
+        return None
+    with contextlib.suppress(ValueError):
+        return datetime.fromisoformat(value)
+    return None
+
+
+def _is_our_followup_marker(body: str) -> bool:
+    """우리 봇의 자동 답글에는 `FOLLOWUP_MARKER` 가 박혀 있다. history 에서 제외해
+    메타 신호 노이즈를 차단."""
+    return FOLLOWUP_MARKER in body
+
+
+def _is_bot_login(login: str) -> bool:
+    """GitHub App 본문 작성자는 `<slug>[bot]` 형태로 끝난다 — 사람 로그인에는 없는 패턴."""
+    return login.endswith("[bot]")
+
+
+def _parse_issue_comments(items: list[Any]) -> list[ReviewComment]:
+    """`GET /issues/{n}/comments` 응답 항목 → 도메인 `ReviewComment(kind="issue")`."""
+    out: list[ReviewComment] = []
+    for raw in items:
+        if not isinstance(raw, dict):
+            continue
+        body = str(raw.get("body") or "").strip()
+        if not body or _is_our_followup_marker(body):
+            continue
+        login = str(((raw.get("user") or {}).get("login")) or "")
+        created = _parse_iso_datetime(raw.get("created_at"))
+        if created is None:
+            continue
+        out.append(ReviewComment(
+            author_login=login,
+            kind="issue",
+            body=body,
+            created_at=created,
+        ))
+    return out
+
+
+def _parse_inline_comments(items: list[Any]) -> list[ReviewComment]:
+    """`GET /pulls/{n}/comments` 응답 항목 → 도메인 `ReviewComment(kind="inline")`.
+
+    inline 은 메타리플라이 타깃이라 `comment_id` (REST `id`) 보존 필수. path/line 도
+    사용 가능한 경우 함께.
+    """
+    out: list[ReviewComment] = []
+    for raw in items:
+        if not isinstance(raw, dict):
+            continue
+        body = str(raw.get("body") or "").strip()
+        if not body or _is_our_followup_marker(body):
+            continue
+        login = str(((raw.get("user") or {}).get("login")) or "")
+        created = _parse_iso_datetime(raw.get("created_at"))
+        if created is None:
+            continue
+        comment_id = raw.get("id")
+        comment_id_int = comment_id if isinstance(comment_id, int) else None
+        path = raw.get("path")
+        path_str = str(path) if isinstance(path, str) else None
+        # `line` 이 None 이면 outdated 처리된 댓글 — line 정보 없이 보존.
+        raw_line = raw.get("line")
+        line = raw_line if isinstance(raw_line, int) else None
+        out.append(ReviewComment(
+            author_login=login,
+            kind="inline",
+            body=body,
+            created_at=created,
+            comment_id=comment_id_int,
+            path=path_str,
+            line=line,
+        ))
+    return out
+
+
+def _parse_review_summaries(items: list[Any]) -> list[ReviewComment]:
+    """`GET /pulls/{n}/reviews` 응답 → 도메인 `ReviewComment(kind="review-summary")`.
+
+    review summary 본문이 비어 있는 경우 (예: APPROVED 만 박고 본문 없는 케이스) 는
+    history 에 노이즈만 추가하므로 제외. submitted_at 을 created_at 으로 사용.
+    """
+    out: list[ReviewComment] = []
+    for raw in items:
+        if not isinstance(raw, dict):
+            continue
+        body = str(raw.get("body") or "").strip()
+        if not body or _is_our_followup_marker(body):
+            continue
+        login = str(((raw.get("user") or {}).get("login")) or "")
+        created = _parse_iso_datetime(raw.get("submitted_at") or raw.get("created_at"))
+        if created is None:
+            continue
+        out.append(ReviewComment(
+            author_login=login,
+            kind="review-summary",
+            body=body,
+            created_at=created,
+        ))
+    return out
 
 
 __all__ = ["FOLLOWUP_MARKER", "GitHubAppClient", "ReviewEvent", "_default_tls_context"]

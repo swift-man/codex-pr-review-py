@@ -4,13 +4,17 @@ import json
 import logging
 import re
 
-from codex_review.domain import Finding, ReviewEvent, ReviewResult
+from codex_review.domain import Finding, MetaReply, ReviewEvent, ReviewResult
 from codex_review.domain.finding import (
     SEVERITY_CRITICAL,
     SEVERITY_MINOR,
     SEVERITY_SUGGESTION,
     VALID_SEVERITIES,
 )
+
+# 메타리플라이는 노이즈 차단을 위해 한 라운드에 1건만 허용. 모델이 더 많이 산출해도
+# 첫 항목만 채택하고 로그만 남긴다 (작성자 정책: "대댓글은 1개면 될 것 같다").
+_META_REPLY_MAX = 1
 
 # 레거시 값 → 새 4단계 매핑. 이전 프롬프트가 "must_fix"/"suggest" 만 쓰던 시기의
 # 응답도 무해하게 받아들이기 위함 — 신규 프롬프트 배포 직후 쌓여 있던 작업 큐 방어.
@@ -78,7 +82,39 @@ def parse_review(raw: str) -> ReviewResult:
             _sanitize_body(v) for v in _as_str_list(payload.get("improvements"))
         ),
         findings=findings,
+        meta_replies=tuple(_parse_meta_replies(payload.get("meta_replies"))),
     )
+
+
+def _parse_meta_replies(raw: object) -> list[MetaReply]:
+    """모델이 산출한 `meta_replies` 배열 → `MetaReply` 시퀀스.
+
+    최대 `_META_REPLY_MAX` (=1) 건만 채택. 그 이상은 노이즈 방지를 위해 drop 하고
+    로그로만 남긴다. body 가 비어 있거나 comment_id 가 정수가 아닌 항목은 스킵.
+
+    `body` 도 `_sanitize_body` 로 통과시켜 dict-repr 누출을 메타리플라이 경로에서도
+    동일하게 차단.
+    """
+    if not isinstance(raw, list):
+        return []
+    out: list[MetaReply] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        comment_id = item.get("reply_to_comment_id")
+        if not isinstance(comment_id, int) or comment_id <= 0:
+            continue
+        body = _sanitize_body(str(item.get("body") or "").strip())
+        if not body:
+            continue
+        out.append(MetaReply(reply_to_comment_id=comment_id, body=body))
+    if len(out) > _META_REPLY_MAX:
+        logger.info(
+            "model returned %d meta_replies — capping to %d (LRU = first item)",
+            len(out), _META_REPLY_MAX,
+        )
+        out = out[:_META_REPLY_MAX]
+    return out
 
 
 def _extract_json(text: str) -> dict[str, object] | None:

@@ -720,3 +720,90 @@ def test_parse_preserves_approve_with_zero_findings() -> None:
     }
     """
     assert parse_review(raw).event == ReviewEvent.APPROVE
+
+
+# ---------------------------------------------------------------------------
+# meta_replies 파싱 — 다른 봇 inline comment 에 대한 대댓글
+# ---------------------------------------------------------------------------
+
+
+def test_parse_meta_replies_extracts_single_item() -> None:
+    """모델이 산출한 메타리플라이 1건이 도메인 객체로 추출되는지."""
+    raw = """
+    {
+      "summary": "ok",
+      "event": "APPROVE",
+      "meta_replies": [
+        {"reply_to_comment_id": 12345, "body": "다른 봇 phantom 지적 — 실제 코드에 그 패턴 없음."}
+      ]
+    }
+    """
+    result = parse_review(raw)
+    assert len(result.meta_replies) == 1
+    m = result.meta_replies[0]
+    assert m.reply_to_comment_id == 12345
+    assert "phantom" in m.body
+
+
+def test_parse_meta_replies_caps_at_one_when_model_oversharing() -> None:
+    """노이즈 차단을 위해 모델이 여러 건 보내도 첫 항목 1건만 채택."""
+    raw = """
+    {
+      "summary": "ok",
+      "event": "APPROVE",
+      "meta_replies": [
+        {"reply_to_comment_id": 1, "body": "동의"},
+        {"reply_to_comment_id": 2, "body": "또 다른 동의"},
+        {"reply_to_comment_id": 3, "body": "세 번째"}
+      ]
+    }
+    """
+    result = parse_review(raw)
+    assert len(result.meta_replies) == 1
+    assert result.meta_replies[0].reply_to_comment_id == 1
+
+
+def test_parse_meta_replies_skips_invalid_items() -> None:
+    """comment_id 누락 / 음수 / body 빈 문자열은 스킵."""
+    raw = """
+    {
+      "summary": "ok",
+      "event": "APPROVE",
+      "meta_replies": [
+        {"reply_to_comment_id": "abc", "body": "string id 무효"},
+        {"reply_to_comment_id": -1, "body": "음수 무효"},
+        {"reply_to_comment_id": 99, "body": ""},
+        {"reply_to_comment_id": 100, "body": "정상"}
+      ]
+    }
+    """
+    result = parse_review(raw)
+    assert len(result.meta_replies) == 1
+    assert result.meta_replies[0].reply_to_comment_id == 100
+
+
+def test_parse_meta_replies_empty_when_field_missing() -> None:
+    """meta_replies 필드가 없으면 빈 튜플 — 첫 리뷰 호환성."""
+    raw = """
+    {
+      "summary": "ok",
+      "event": "APPROVE"
+    }
+    """
+    assert parse_review(raw).meta_replies == ()
+
+
+def test_parse_meta_replies_sanitizes_dict_repr_in_body() -> None:
+    """body 가 dict repr 이면 _sanitize_body 가 통과 — 누출 차단 일관성 유지."""
+    raw = """
+    {
+      "summary": "ok",
+      "event": "APPROVE",
+      "meta_replies": [
+        {"reply_to_comment_id": 99, "body": "{'message': '실제 응답 텍스트'}"}
+      ]
+    }
+    """
+    result = parse_review(raw)
+    assert len(result.meta_replies) == 1
+    assert result.meta_replies[0].body == "실제 응답 텍스트"

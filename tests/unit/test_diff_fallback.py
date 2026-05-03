@@ -81,6 +81,11 @@ class _CapturingGitHub:
     async def get_installation_token(self, installation_id: int) -> str:
         return "tkn"
 
+    async def fetch_review_history(self, pr, installation_id):
+        # diff fallback 테스트는 history 미사용 — 빈 history 로 첫 리뷰 동작 시뮬.
+        from codex_review.domain import ReviewHistory
+        return ReviewHistory()
+
 
 class _NoopFetcher:
     @asynccontextmanager
@@ -113,7 +118,7 @@ class _CapturingEngine:
     result: ReviewResult
     seen_dumps: list[FileDump] = field(default_factory=list)
 
-    async def review(self, pr: PullRequest, dump: FileDump) -> ReviewResult:
+    async def review(self, pr: PullRequest, dump: FileDump, *, history=None) -> ReviewResult:
         self.seen_dumps.append(dump)
         return self.result
 
@@ -834,7 +839,7 @@ class _FailingEngine:
     full_error_msg: str = "codex exec failed (rc=1, model=gpt-5.5): context length exceeded"
     seen_dumps: list[FileDump] = field(default_factory=list)
 
-    async def review(self, pr: PullRequest, dump: FileDump) -> ReviewResult:
+    async def review(self, pr: PullRequest, dump: FileDump, *, history=None) -> ReviewResult:
         self.seen_dumps.append(dump)
         if dump.mode == DUMP_MODE_FULL:
             raise ReviewEngineError(self.full_error_msg, returncode=1)
@@ -847,7 +852,7 @@ class _AlwaysFailingEngine:
     error_msg: str = "codex exec failed (rc=1): something deeply broken"
     seen_dumps: list[FileDump] = field(default_factory=list)
 
-    async def review(self, pr: PullRequest, dump: FileDump) -> ReviewResult:
+    async def review(self, pr: PullRequest, dump: FileDump, *, history=None) -> ReviewResult:
         self.seen_dumps.append(dump)
         raise ReviewEngineError(self.error_msg, returncode=1)
 
@@ -926,7 +931,7 @@ async def test_preemptive_diff_fallback_badge_says_budget_overflow() -> None:
     class _OkOnDiff:
         seen_dumps: list[FileDump] = field(default_factory=list)
 
-        async def review(self, pr: PullRequest, dump: FileDump) -> ReviewResult:
+        async def review(self, pr: PullRequest, dump: FileDump, *, history=None) -> ReviewResult:
             self.seen_dumps.append(dump)
             return ReviewResult(event=ReviewEvent.COMMENT, summary="ok\n")
 
@@ -1042,7 +1047,7 @@ async def test_use_case_propagates_non_engine_errors_without_fallback() -> None:
     class _BuggyEngine:
         seen_dumps: list[FileDump] = field(default_factory=list)
 
-        async def review(self, pr: PullRequest, dump: FileDump) -> ReviewResult:
+        async def review(self, pr: PullRequest, dump: FileDump, *, history=None) -> ReviewResult:
             self.seen_dumps.append(dump)
             # 의도적으로 무관한 버그 (엔진 입력 거부가 아님)
             raise KeyError("config_section")
@@ -1086,7 +1091,7 @@ async def test_diagnostic_comment_masks_credentials_in_exception_message() -> No
     class _LeakingEngine:
         seen_dumps: list[FileDump] = field(default_factory=list)
 
-        async def review(self, pr: PullRequest, dump: FileDump) -> ReviewResult:
+        async def review(self, pr: PullRequest, dump: FileDump, *, history=None) -> ReviewResult:
             self.seen_dumps.append(dump)
             # 엔진이 마스킹 안 한 채로 토큰 URL 이 들어간 메시지를 raise — 다른 엔진
             # 구현/향후 변경에서 발생할 수 있는 시나리오.
@@ -1132,7 +1137,7 @@ async def test_diagnostic_comment_escapes_triple_backtick_in_exception() -> None
     class _BacktickEngine:
         seen_dumps: list[FileDump] = field(default_factory=list)
 
-        async def review(self, pr: PullRequest, dump: FileDump) -> ReviewResult:
+        async def review(self, pr: PullRequest, dump: FileDump, *, history=None) -> ReviewResult:
             self.seen_dumps.append(dump)
             # 백틱 3개가 포함된 메시지 — 코드펜스 깨짐 유발 시도
             raise ReviewEngineError(
@@ -1254,3 +1259,177 @@ def test_pull_request_diff_patches_external_mutation_does_not_leak() -> None:
     pr = _pr(patches=mutable)
     mutable["b.py"] = "patch2"  # 생성 이후 원본 변경
     assert "b.py" not in pr.diff_patches
+
+
+# ---------------------------------------------------------------------------
+# Review history fetch + meta_replies 게시 — Use case 통합
+# ---------------------------------------------------------------------------
+
+
+from datetime import datetime as _dt
+
+from codex_review.domain import (
+    MetaReply,
+    ReviewComment,
+    ReviewHistory,
+)
+
+
+@dataclass
+class _HistoryAwareGitHub:
+    """history fetch 와 reply_to_review_comment 를 캡쳐하는 더블."""
+    history: ReviewHistory = field(default_factory=ReviewHistory)
+    posted_reviews: list = field(default_factory=list)
+    posted_comments: list = field(default_factory=list)
+    replies: list[tuple[int, str]] = field(default_factory=list)
+    fetch_calls: int = 0
+
+    async def fetch_pull_request(self, repo, number, installation_id):
+        raise AssertionError("not used")
+
+    async def post_review(self, pr, result):
+        self.posted_reviews.append((pr, result))
+
+    async def post_comment(self, pr, body):
+        self.posted_comments.append((pr, body))
+
+    async def get_installation_token(self, installation_id):
+        return "tkn"
+
+    async def fetch_review_history(self, pr, installation_id):
+        self.fetch_calls += 1
+        return self.history
+
+    async def reply_to_review_comment(self, pr, comment_id, body):
+        self.replies.append((comment_id, body))
+
+
+@dataclass
+class _HistoryEngine:
+    """history 가 그대로 전달되는지 캡쳐 + 결과 반환."""
+    result: ReviewResult
+    seen_history: list[ReviewHistory | None] = field(default_factory=list)
+
+    async def review(self, pr, dump, *, history=None):
+        self.seen_history.append(history)
+        return self.result
+
+
+async def test_use_case_fetches_history_and_passes_to_engine() -> None:
+    """use case 실행 시 history 를 fetch 하고 engine.review 에 그대로 전달하는지."""
+    history = ReviewHistory(comments=(
+        ReviewComment(
+            author_login="gemini-pr-review-bot[bot]",
+            kind="inline",
+            body="prior comment",
+            created_at=_dt(2026, 5, 1),
+            comment_id=999,
+            path="x.py",
+            line=1,
+        ),
+    ))
+    github = _HistoryAwareGitHub(history=history)
+    engine = _HistoryEngine(
+        result=ReviewResult(summary="ok", event=ReviewEvent.COMMENT)
+    )
+    full_dump = FileDump(
+        entries=(FileEntry(path="a.py", content="x", size_bytes=1, is_changed=True),),
+        total_chars=1, mode=DUMP_MODE_FULL,
+    )
+    uc = ReviewPullRequestUseCase(
+        github=github,
+        repo_fetcher=_NoopFetcher(),
+        file_collector=_StaticFullCollector(dump=full_dump),
+        engine=engine,
+        max_input_tokens=10_000,
+    )
+
+    await uc.execute(_pr(changed=("a.py",), patches={"a.py": "@@ -1 +1 @@\n-x\n+y\n"}))
+
+    assert github.fetch_calls == 1
+    assert engine.seen_history == [history]
+    assert len(github.posted_reviews) == 1
+
+
+async def test_use_case_history_fetch_failure_falls_back_to_empty() -> None:
+    """history fetch 가 실패해도 use case 흐름은 멈추지 않는다 (비치명) — engine 은 빈
+    history 또는 None 받음.
+    """
+    @dataclass
+    class _FailingHistoryGitHub(_HistoryAwareGitHub):
+        async def fetch_review_history(self, pr, installation_id):
+            self.fetch_calls += 1
+            raise RuntimeError("transient API outage")
+
+    github = _FailingHistoryGitHub()
+    engine = _HistoryEngine(
+        result=ReviewResult(summary="ok", event=ReviewEvent.COMMENT)
+    )
+    full_dump = FileDump(
+        entries=(FileEntry(path="a.py", content="x", size_bytes=1, is_changed=True),),
+        total_chars=1, mode=DUMP_MODE_FULL,
+    )
+    uc = ReviewPullRequestUseCase(
+        github=github,
+        repo_fetcher=_NoopFetcher(),
+        file_collector=_StaticFullCollector(dump=full_dump),
+        engine=engine,
+        max_input_tokens=10_000,
+    )
+
+    await uc.execute(_pr(changed=("a.py",), patches={"a.py": "@@ -1 +1 @@\n-x\n+y\n"}))
+
+    assert github.fetch_calls == 1
+    # engine 은 빈 history 받음 — 첫 리뷰 호환성 동작.
+    assert len(engine.seen_history) == 1
+    seen = engine.seen_history[0]
+    assert seen is not None and seen.is_empty
+    # 리뷰 게시는 정상 진행.
+    assert len(github.posted_reviews) == 1
+
+
+async def test_use_case_posts_meta_replies_after_review() -> None:
+    """모델이 메타리플라이 1건 산출 → review post 후 reply_to_review_comment 호출."""
+    github = _HistoryAwareGitHub()
+    engine = _HistoryEngine(result=ReviewResult(
+        summary="ok",
+        event=ReviewEvent.COMMENT,
+        meta_replies=(MetaReply(reply_to_comment_id=42, body="phantom 가능성"),),
+    ))
+    full_dump = FileDump(
+        entries=(FileEntry(path="a.py", content="x", size_bytes=1, is_changed=True),),
+        total_chars=1, mode=DUMP_MODE_FULL,
+    )
+    uc = ReviewPullRequestUseCase(
+        github=github,
+        repo_fetcher=_NoopFetcher(),
+        file_collector=_StaticFullCollector(dump=full_dump),
+        engine=engine,
+        max_input_tokens=10_000,
+    )
+
+    await uc.execute(_pr(changed=("a.py",), patches={"a.py": "@@ -1 +1 @@\n-x\n+y\n"}))
+
+    assert len(github.posted_reviews) == 1  # 메인 리뷰 게시
+    assert github.replies == [(42, "phantom 가능성")]
+
+
+async def test_use_case_skips_meta_reply_post_when_none() -> None:
+    """meta_replies 가 빈 튜플이면 reply 호출 단계 자체 생략 — 첫 리뷰 호환성."""
+    github = _HistoryAwareGitHub()
+    engine = _HistoryEngine(result=ReviewResult(summary="ok", event=ReviewEvent.COMMENT))
+    full_dump = FileDump(
+        entries=(FileEntry(path="a.py", content="x", size_bytes=1, is_changed=True),),
+        total_chars=1, mode=DUMP_MODE_FULL,
+    )
+    uc = ReviewPullRequestUseCase(
+        github=github,
+        repo_fetcher=_NoopFetcher(),
+        file_collector=_StaticFullCollector(dump=full_dump),
+        engine=engine,
+        max_input_tokens=10_000,
+    )
+
+    await uc.execute(_pr(changed=("a.py",), patches={"a.py": "@@ -1 +1 @@\n-x\n+y\n"}))
+
+    assert github.replies == []

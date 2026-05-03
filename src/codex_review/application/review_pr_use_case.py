@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from collections.abc import Mapping
 from dataclasses import replace
@@ -7,6 +8,7 @@ from codex_review.domain import (
     FileDump,
     Finding,
     PullRequest,
+    ReviewHistory,
     ReviewResult,
     TokenBudget,
 )
@@ -52,6 +54,18 @@ class ReviewPullRequestUseCase:
     async def execute(self, pr: PullRequest) -> None:
         token = await self._github.get_installation_token(pr.installation_id)
 
+        # 이전 라운드의 PR 코멘트 / 다른 봇 의견을 history 로 가져와 prompt 컨텍스트에
+        # 노출 — 모델이 동일 항목 반복 지적, deferred 신호 무시, 다른 봇 환각 미식별을
+        # 피하도록 한다. fetch 실패는 비치명: 빈 history 로 fallback (첫 리뷰 동작).
+        try:
+            history = await self._github.fetch_review_history(pr, pr.installation_id)
+        except Exception:
+            logger.exception(
+                "fetch_review_history failed for %s#%d — proceeding with empty history",
+                pr.repo.full_name, pr.number,
+            )
+            history = ReviewHistory()
+
         # 저장소 락 범위를 checkout ~ 파일 수집 전체로 확대한다. 이전 구현은 `checkout()`
         # 리턴과 동시에 락이 풀려, 같은 저장소의 다른 PR 이 head SHA 를 바꾸는 동안
         # 이 쪽 collect 가 파일을 읽어 "다른 PR 의 트리" 를 수집하는 경쟁이 있었다.
@@ -91,7 +105,7 @@ class ReviewPullRequestUseCase:
         # 사유 — diff 배지 문구를 "예산 초과" vs "엔진 거부 후 재시도" 로 분기시키는 근거.
         entered_diff_preemptively = dump.mode == DUMP_MODE_DIFF
         result = await self._review_with_fallback(
-            pr, dump, entered_diff_preemptively=entered_diff_preemptively
+            pr, dump, entered_diff_preemptively=entered_diff_preemptively, history=history,
         )
         if result is None:
             return  # 진단 코멘트 게시 후 정리 종료
@@ -103,12 +117,40 @@ class ReviewPullRequestUseCase:
 
         await self._github.post_review(pr, result)
 
+        # 메타리플라이는 review post 성공 후 별도 단계로 게시. review post 가 실패했으면
+        # meta-reply 의 의미 자체가 사라지므로 진행 안 함. 한 건이라도 실패해도 서로
+        # 영향 없도록 `gather(return_exceptions=True)` (현재는 ≤1건이라 실질적으로 단일).
+        if result.meta_replies:
+            await self._post_meta_replies(pr, result)
+
+    async def _post_meta_replies(self, pr: PullRequest, result: ReviewResult) -> None:
+        """모델이 산출한 메타리플라이를 다른 봇 inline review comment 의 thread 에 게시.
+
+        파서 단에서 이미 `_META_REPLY_MAX=1` 로 제한되지만 방어적으로 try/except 로 묶어
+        한 건 실패가 use case 흐름 (이미 review 게시 완료) 을 망치지 않게 한다.
+        """
+        results = await asyncio.gather(
+            *(
+                self._github.reply_to_review_comment(pr, m.reply_to_comment_id, m.body)
+                for m in result.meta_replies
+            ),
+            return_exceptions=True,
+        )
+        for reply, outcome in zip(result.meta_replies, results, strict=True):
+            if isinstance(outcome, BaseException):
+                logger.warning(
+                    "meta_reply post failed: comment_id=%d on %s#%d",
+                    reply.reply_to_comment_id, pr.repo.full_name, pr.number,
+                    exc_info=outcome,
+                )
+
     async def _review_with_fallback(
         self,
         pr: PullRequest,
         dump: FileDump,
         *,
         entered_diff_preemptively: bool,
+        history: ReviewHistory | None = None,
     ) -> ReviewResult | None:
         """엔진 호출을 시도하고, full 모드 실패 시 diff 모드로 재시도. 둘 다 실패하면
         PR 에 진단 코멘트를 게시하고 None 반환 — 호출자가 종료하도록 한다.
@@ -130,7 +172,7 @@ class ReviewPullRequestUseCase:
             else _SCOPE_REACTIVE_ENGINE_REJECT
         )
         try:
-            result = await self._engine.review(pr, dump)
+            result = await self._engine.review(pr, dump, history=history)
         except ReviewEngineError as exc:
             # 이미 diff 모드 dump 로 들어와 실패한 경우 → 사전(preemptive) 예산 fallback
             # 으로 진입했다는 의미. full 시도는 일어나지 않았다 (codex PR #18 Minor 반영:
@@ -170,7 +212,7 @@ class ReviewPullRequestUseCase:
                 )
                 return None
             try:
-                result = await self._engine.review(pr, fallback_dump)
+                result = await self._engine.review(pr, fallback_dump, history=history)
             except ReviewEngineError as retry_exc:
                 logger.exception(
                     "engine retry in diff mode also failed for %s#%d",
