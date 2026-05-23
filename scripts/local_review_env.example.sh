@@ -11,7 +11,10 @@ export GITHUB_WEBHOOK_SECRET="change-me-long-random"
 #   gpt-5.5, gpt-5.4, gpt-5.4-mini, gpt-5.3-codex, gpt-5.2, codex-auto-review
 export CODEX_MODEL="gpt-5.5"
 export CODEX_REASONING_EFFORT="high"   # low | medium | high | xhigh
-export CODEX_MAX_INPUT_TOKENS="300000"
+# gpt-5.5 API docs list a 1,050,000-token context window, but the Codex CLI
+# ChatGPT-auth catalog currently exposes a 272,000-token input window and uses
+# 95% of that as the effective prompt budget.
+export CODEX_MAX_INPUT_TOKENS="258400"
 export CODEX_TIMEOUT_SEC="600"
 # Codex Desktop app bundle이 설치돼 있다면:
 #   export CODEX_BIN="/Applications/Codex.app/Contents/Resources/codex"

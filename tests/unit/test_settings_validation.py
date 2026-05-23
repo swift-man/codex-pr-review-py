@@ -10,7 +10,6 @@ from pydantic import ValidationError
 
 from codex_review.config import Settings
 
-
 _REQUIRED_ENV = {
     "GITHUB_APP_ID": "1",
     "GITHUB_WEBHOOK_SECRET": "s",
@@ -58,6 +57,7 @@ def test_defaults_are_all_valid(monkeypatch: pytest.MonkeyPatch) -> None:
     s = _settings(monkeypatch)
     assert s.review_concurrency == 1
     assert s.codex_timeout_sec == 600
+    assert s.codex_max_input_tokens == 258_400
     assert s.review_queue_maxsize is None
 
 

@@ -15,7 +15,7 @@ from codex_review.domain import (
 # 봇 리뷰 한 건이 거의 그대로 들어가지만, 비정상적으로 긴 본문은 잘려서 노이즈 차단.
 _HISTORY_PER_COMMENT_CAP = 1500
 # 전체 history 섹션의 누적 cap. UTF-8 한글 1 char ≈ 3 byte 라 12000 chars ≈ 36KB —
-# `CODEX_MAX_INPUT_TOKENS=300_000` 의 약 3% 수준이라 코드 예산을 의미 있게 잠식하지
+# `CODEX_MAX_INPUT_TOKENS=258_400` 의 약 5% 수준이라 코드 예산을 의미 있게 잠식하지
 # 않는다. 초과 시 가장 오래된 코멘트부터 truncate.
 _HISTORY_TOTAL_CAP = 12_000
 
