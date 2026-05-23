@@ -83,6 +83,10 @@ REPO_FULL_NAME=owner/repo PR_NUMBER=1 INSTALLATION_ID=1234567 \
 
 ## 환경 변수
 
+> 참고: `gpt-5.5` API 문서는 컨텍스트 1,050,000 / 최대 출력 128,000을 표기하지만,
+> 이 서비스가 사용하는 Codex CLI(ChatGPT auth) 카탈로그는 현재 입력 윈도우 272,000의
+> 95%인 258,400을 유효 프롬프트 예산으로 사용한다.
+
 | 변수 | 기본값 | 설명 |
 |---|---|---|
 | `GITHUB_APP_ID` | — | GitHub App ID (필수) |
@@ -91,7 +95,7 @@ REPO_FULL_NAME=owner/repo PR_NUMBER=1 INSTALLATION_ID=1234567 \
 | `CODEX_BIN` | `codex` | Codex CLI 실행 파일 |
 | `CODEX_MODEL` | `gpt-5.5` | 모델 (`gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.3-codex`, `gpt-5.2`, `codex-auto-review`) |
 | `CODEX_REASONING_EFFORT` | `high` | `low`/`medium`/`high`/`xhigh` |
-| `CODEX_MAX_INPUT_TOKENS` | `300000` | 전체 컨텍스트 토큰 예산 |
+| `CODEX_MAX_INPUT_TOKENS` | `258400` | Codex CLI에 전달할 입력 프롬프트 토큰 예산 |
 | `CODEX_TIMEOUT_SEC` | `600` | 호출 타임아웃 |
 | `REPO_CACHE_DIR` | `~/.codex-review/repos` | clone 캐시 위치 |
 | `FILE_MAX_BYTES` | `204800` | 단일 파일 크기 상한 |
