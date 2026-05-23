@@ -151,6 +151,8 @@ class GitHubAppClient:
         operation: str,
         call: Callable[[str], Awaitable[_T]],
     ) -> _T:
+        # Only use this wrapper for idempotent read paths. A mixed ExceptionGroup is
+        # retried wholesale when it contains stale-token evidence.
         token = await self.get_installation_token(installation_id)
         try:
             return await call(token)
@@ -656,6 +658,8 @@ def _is_bad_credentials_401(exc: httpx.HTTPStatusError) -> bool:
             message = data.get("message")
             if isinstance(message, str):
                 return message.lower() == "bad credentials"
+    # Some GitHub/proxy 401 responses may omit a JSON message. For this read-only
+    # retry path, one token refresh is safer than failing a webhook on a stale cache.
     return True
 
 
