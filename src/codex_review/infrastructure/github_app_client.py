@@ -4,9 +4,10 @@ import logging
 import ssl
 import time
 import weakref
+from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass, replace
 from datetime import datetime
-from typing import Any
+from typing import Any, TypeVar
 
 import certifi
 import httpx
@@ -27,6 +28,7 @@ from codex_review.domain import (
 from .diff_parser import parse_right_lines
 
 logger = logging.getLogger(__name__)
+_T = TypeVar("_T")
 
 
 def _default_tls_context() -> ssl.SSLContext:
@@ -56,7 +58,7 @@ class _LockRegistry:
     """
 
     def __init__(self) -> None:
-        self._locks: "weakref.WeakValueDictionary[int, asyncio.Lock]" = (
+        self._locks: weakref.WeakValueDictionary[int, asyncio.Lock] = (
             weakref.WeakValueDictionary()
         )
 
@@ -143,12 +145,47 @@ class GitHubAppClient:
             self._token_cache[installation_id] = _CachedToken(token, expires_at)
             return token
 
+    async def _with_installation_token_retry(
+        self,
+        installation_id: int,
+        operation: str,
+        call: Callable[[str], Awaitable[_T]],
+    ) -> _T:
+        token = await self.get_installation_token(installation_id)
+        try:
+            return await call(token)
+        except (httpx.HTTPStatusError, ExceptionGroup) as exc:
+            if not _contains_bad_credentials_401(exc):
+                raise
+            self._drop_cached_installation_token(installation_id, token)
+            logger.warning(
+                "GitHub installation token for installation=%d was rejected during "
+                "%s; refreshing token and retrying once",
+                installation_id, operation,
+            )
+
+        fresh_token = await self.get_installation_token(installation_id)
+        return await call(fresh_token)
+
+    def _drop_cached_installation_token(self, installation_id: int, token: str) -> None:
+        cached = self._token_cache.get(installation_id)
+        if cached is not None and cached.token == token:
+            self._token_cache.pop(installation_id, None)
+
     # --- Public API ---------------------------------------------------------
 
     async def fetch_pull_request(
         self, repo: RepoRef, number: int, installation_id: int
     ) -> PullRequest:
-        token = await self.get_installation_token(installation_id)
+        return await self._with_installation_token_retry(
+            installation_id,
+            f"fetch_pull_request {repo.full_name}#{number}",
+            lambda token: self._fetch_pull_request(repo, number, installation_id, token),
+        )
+
+    async def _fetch_pull_request(
+        self, repo: RepoRef, number: int, installation_id: int, token: str
+    ) -> PullRequest:
         pr_path = f"/repos/{repo.full_name}/pulls/{number}"
 
         # PR 메타와 첫 페이지 files 는 상호 독립적이라 병렬로 조회해 네트워크 대기 단축.
@@ -595,6 +632,31 @@ class GitHubAppClient:
         body: Any = resp.json() if resp.content else {}
         next_url = resp.links.get("next", {}).get("url")
         return body, next_url
+
+
+def _contains_bad_credentials_401(exc: BaseException) -> bool:
+    return any(_is_bad_credentials_401(error) for error in _http_status_errors(exc))
+
+
+def _http_status_errors(exc: BaseException) -> Iterator[httpx.HTTPStatusError]:
+    if isinstance(exc, httpx.HTTPStatusError):
+        yield exc
+        return
+    if isinstance(exc, BaseExceptionGroup):
+        for child in exc.exceptions:
+            yield from _http_status_errors(child)
+
+
+def _is_bad_credentials_401(exc: httpx.HTTPStatusError) -> bool:
+    if exc.response.status_code != 401:
+        return False
+    with contextlib.suppress(ValueError):
+        data = exc.response.json()
+        if isinstance(data, dict):
+            message = data.get("message")
+            if isinstance(message, str):
+                return message.lower() == "bad credentials"
+    return True
 
 
 def _finding_to_comment(f: Finding) -> dict[str, object]:

@@ -6,7 +6,6 @@
 """
 
 import asyncio
-import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -26,7 +25,6 @@ from codex_review.domain import (
     TokenBudget,
 )
 from codex_review.infrastructure.github_app_client import GitHubAppClient
-
 
 # ---------------------------------------------------------------------------
 # Per-installation token locks
@@ -220,6 +218,67 @@ async def test_fetch_pull_request_follows_link_header_not_page_size(
 
     assert len(pr.changed_files) == 100
     # 페이지 2 호출이 없었음은 transport 의 500 fallback 이 트리거되지 않은 것으로 확인.
+
+
+async def test_fetch_pull_request_refreshes_cached_token_after_bad_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GitHub 이 로컬 만료 전 installation token 을 무효화하면 1회 재발급 후 재시도.
+
+    실제 운영 로그:
+      GET /repos/.../pulls/{n} → 401 {"message": "Bad credentials"}
+    이전 구현은 캐시 토큰을 계속 신뢰해 TaskGroup ExceptionGroup 으로 리뷰 전체가 실패했다.
+    """
+    token_requests = 0
+    seen_auths: list[str] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        nonlocal token_requests
+        if req.url.path.endswith("/access_tokens"):
+            token_requests += 1
+            token = "OLD" if token_requests == 1 else "NEW"
+            return httpx.Response(
+                200, json={"token": token, "expires_at": "2099-01-01T00:00:00Z"}
+            )
+
+        auth = req.headers.get("Authorization", "")
+        seen_auths.append(auth)
+        if "OLD" in auth:
+            return httpx.Response(
+                401, json={"message": "Bad credentials", "status": "401"}
+            )
+        if req.url.path.endswith("/pulls/5"):
+            return httpx.Response(
+                200,
+                json={
+                    "title": "t", "body": "",
+                    "head": {"sha": "a", "ref": "f",
+                             "repo": {"clone_url": "https://x.git"}},
+                    "base": {"sha": "b", "ref": "main"},
+                    "draft": False,
+                },
+            )
+        if "/pulls/5/files" in req.url.path:
+            return httpx.Response(
+                200,
+                json=[{"filename": "a.py", "patch": "@@ -1,1 +1,1 @@\n line"}],
+            )
+        return httpx.Response(404)
+
+    monkeypatch.setattr(jwt, "encode", lambda *a, **k: "fake.jwt")
+
+    async with httpx.AsyncClient(
+        base_url="https://api.github.com", transport=httpx.MockTransport(handler)
+    ) as http_client:
+        client = GitHubAppClient(app_id=1, private_key_pem="-", http_client=http_client)
+        assert await client.get_installation_token(7) == "OLD"
+
+        pr = await client.fetch_pull_request(RepoRef("o", "r"), number=5, installation_id=7)
+
+    assert pr.changed_files == ("a.py",)
+    assert token_requests == 2
+    assert any("OLD" in auth for auth in seen_auths)
+    assert any("NEW" in auth for auth in seen_auths)
 
 
 async def test_fetch_pull_request_issues_meta_and_first_files_in_parallel(
