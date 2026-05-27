@@ -170,6 +170,24 @@ async def test_collect_marks_exceeded_when_changed_file_excluded(repo: Path) -> 
     assert "big.py" in dump.excluded
 
 
+async def test_collect_budget_counts_line_numbered_prompt_overhead(repo: Path) -> None:
+    """A file with many short lines can fit as raw text but overflow once line numbers are added."""
+    (repo / "src" / "line_heavy.py").write_text("x\n" * 11_000, encoding="utf-8")
+    _commit_all(repo)
+
+    collector = FileDumpCollector(file_max_bytes=1024 * 1024)
+    dump = await collector.collect(
+        repo,
+        changed_files=("src/line_heavy.py",),
+        budget=TokenBudget(max_tokens=10_000),
+    )
+
+    paths = {e.path for e in dump.entries}
+    assert "src/line_heavy.py" not in paths
+    assert "src/line_heavy.py" in dump.budget_trimmed
+    assert dump.exceeded_budget is True
+
+
 def _commit_all(repo: Path) -> None:
     _git(repo, "add", "-A")
     _git(repo, "commit", "-q", "-m", "x")

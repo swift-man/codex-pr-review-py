@@ -149,11 +149,13 @@ async def test_review_logs_full_stderr_and_raises_concise_summary(
 
     eng = CodexCliEngine(binary="codex", model="gpt-5.5")
 
-    with caplog.at_level(
-        _logging.ERROR, logger="codex_review.infrastructure.codex_cli_engine"
+    with (
+        caplog.at_level(
+            _logging.ERROR, logger="codex_review.infrastructure.codex_cli_engine"
+        ),
+        pytest.raises(RuntimeError) as exc_info,
     ):
-        with pytest.raises(RuntimeError) as exc_info:
-            await eng.review(pr, dump)
+        await eng.review(pr, dump)
 
     # (1) RuntimeError 메시지엔 stderr 의 **마지막 줄** + 모델명이 포함돼 진단 가능.
     msg = str(exc_info.value)
@@ -211,3 +213,37 @@ async def test_review_masks_credentials_in_review_engine_error_message(
     assert "https://***@github.com" in msg
     # returncode 정보는 유지 (도메인 메타데이터).
     assert exc_info.value.returncode == 1
+
+
+async def test_review_uses_context_error_before_tokens_used_footer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from codex_review.domain import FileDump, FileEntry, PullRequest, RepoRef
+    from codex_review.interfaces import ReviewEngineError
+
+    stderr = (
+        b"ERROR: Codex ran out of room in the model's context window. "
+        b"Start a new thread or clear earlier history before retrying.\n"
+        b"tokens used\n"
+        b"0\n"
+    )
+    _patch_subprocess(monkeypatch, _FakeProc(1, stdout=b"", stderr=stderr))
+
+    pr = PullRequest(
+        repo=RepoRef("o", "r"), number=1, title="t", body="",
+        head_sha="abc", head_ref="feat", base_sha="def", base_ref="main",
+        clone_url="https://example/x.git", changed_files=("a.py",),
+        installation_id=7, is_draft=False,
+    )
+    dump = FileDump(
+        entries=(FileEntry(path="a.py", content="x", size_bytes=1, is_changed=True),),
+        total_chars=1,
+    )
+
+    eng = CodexCliEngine(binary="codex", model="gpt-5.5")
+    with pytest.raises(ReviewEngineError) as exc_info:
+        await eng.review(pr, dump)
+
+    msg = str(exc_info.value)
+    assert "Codex ran out of room" in msg
+    assert not msg.endswith(": 0")

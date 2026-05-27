@@ -67,7 +67,8 @@ class CodexCliEngine:
             raise CodexAuthError(
                 "Codex CLI 가 로그인되어 있지 않습니다.\n"
                 f"출력: {combined or '(empty)'}\n"
-                f"해결: 터미널에서 `{self._binary} login` 을 실행해 ChatGPT 로 로그인한 뒤 서버를 재기동하세요."
+                f"해결: 터미널에서 `{self._binary} login` 을 실행해 ChatGPT 로 로그인한 뒤 "
+                "서버를 재기동하세요."
             )
         return combined.splitlines()[0] if combined else "Logged in"
 
@@ -140,10 +141,20 @@ class CodexCliEngine:
             # 마스킹하지 않으므로, **예외에 넣기 전 단계에서 직접 마스킹** 해야 토큰 URL /
             # `authorization=Bearer ...` 같은 자격증명이 어떤 경로로도 새지 않는다
             # (codex PR #18 Critical 반영).
-            summary = redact_text(err.splitlines()[-1]) if err else "(no stderr)"
+            summary = _summarize_stderr(err)
             raise ReviewEngineError(
                 f"codex exec failed (rc={proc.returncode}, model={self._model}): {summary}",
                 returncode=proc.returncode,
             )
 
         return parse_review(stdout.decode(errors="replace"))
+
+
+def _summarize_stderr(stderr: str) -> str:
+    lines = [line.strip() for line in stderr.splitlines() if line.strip()]
+    for line in reversed(lines):
+        lowered = line.lower()
+        if lowered == "tokens used" or line.isdecimal():
+            continue
+        return redact_text(line)
+    return "(no stderr)"
