@@ -11,6 +11,10 @@ from .codex_prompt import build_prompt
 
 logger = logging.getLogger(__name__)
 
+_STDERR_TOKENS_USED_MARKER = "tokens used"
+_STDERR_EMPTY_SUMMARY = "(no stderr)"
+_STDERR_TOKEN_COUNT_SEPARATORS = ("/", ":")
+
 
 class CodexAuthError(RuntimeError):
     """Raised when the Codex CLI is not authenticated (manual `codex login` required)."""
@@ -153,8 +157,21 @@ class CodexCliEngine:
 def _summarize_stderr(stderr: str) -> str:
     lines = [line.strip() for line in stderr.splitlines() if line.strip()]
     for line in reversed(lines):
-        lowered = line.lower()
-        if lowered == "tokens used" or line.isdecimal():
+        if _is_codex_stderr_footer_line(line):
             continue
         return redact_text(line)
-    return "(no stderr)"
+    return _STDERR_EMPTY_SUMMARY
+
+
+def _is_codex_stderr_footer_line(line: str) -> bool:
+    lowered = line.lower()
+    if lowered == _STDERR_TOKENS_USED_MARKER or lowered.isdecimal():
+        return True
+    if not lowered.startswith(_STDERR_TOKENS_USED_MARKER):
+        return False
+
+    suffix = lowered.removeprefix(_STDERR_TOKENS_USED_MARKER).strip()
+    if not suffix or suffix[0] not in _STDERR_TOKEN_COUNT_SEPARATORS:
+        return False
+    token_count = suffix[1:].strip().replace(",", "")
+    return token_count.isdecimal()

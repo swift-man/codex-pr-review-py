@@ -142,6 +142,8 @@ _PRIORITY_DIRS = ("src", "app", "lib", "pkg", "internal", "packages", "apps")
 _FULL_DUMP_FILE_BUDGET_RATIO = 0.60
 _FULL_DUMP_OVERHEAD_RATIO = 0.10
 _FULL_DUMP_OVERHEAD_CAP_CHARS = 32_000
+_FORMAT_FILE_MIN_LINE_NO_WIDTH = 5
+_FORMAT_FILE_LINE_PREFIX_SUFFIX_LEN = 2  # "| "
 
 # 확장자만으로는 리뷰 가치를 단정할 수 없는(= 소스일 수도 데이터일 수도 있는) 형식.
 # 이 집합에 포함된 파일은 "크면 제외, 작으면 포함" 규칙(_data_file_max_bytes)을 따른다.
@@ -356,11 +358,21 @@ def _estimate_full_prompt_file_chars(
     header = f"--- FILE: {rel_path}{marker} ---"
     footer = "--- END FILE ---"
     lines = content.splitlines()
-    # Must mirror codex_prompt._format_file(): "NNNNN| " prefix plus joined newlines.
-    numbered_len = sum(7 + len(line) for line in lines)
+    # Must mirror codex_prompt._format_file(): "{line_no:5d}| " plus joined newlines.
+    numbered_len = sum(
+        _format_file_line_prefix_len(index) + len(line)
+        for index, line in enumerate(lines, start=1)
+    )
     if lines:
         numbered_len += len(lines) - 1
     return len(header) + 1 + numbered_len + 1 + len(footer)
+
+
+def _format_file_line_prefix_len(line_no: int) -> int:
+    return (
+        max(_FORMAT_FILE_MIN_LINE_NO_WIDTH, len(str(line_no)))
+        + _FORMAT_FILE_LINE_PREFIX_SUFFIX_LEN
+    )
 
 
 async def _git_ls_files(root: Path) -> list[str]:

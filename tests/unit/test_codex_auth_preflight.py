@@ -215,18 +215,29 @@ async def test_review_masks_credentials_in_review_engine_error_message(
     assert exc_info.value.returncode == 1
 
 
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        (
+            b"ERROR: Codex ran out of room in the model's context window. "
+            b"Start a new thread or clear earlier history before retrying.\n"
+            b"tokens used\n"
+            b"0\n"
+        ),
+        (
+            b"ERROR: Codex ran out of room in the model's context window. "
+            b"Start a new thread or clear earlier history before retrying.\n"
+            b"tokens used / 0\n"
+        ),
+    ],
+)
 async def test_review_uses_context_error_before_tokens_used_footer(
     monkeypatch: pytest.MonkeyPatch,
+    stderr: bytes,
 ) -> None:
     from codex_review.domain import FileDump, FileEntry, PullRequest, RepoRef
     from codex_review.interfaces import ReviewEngineError
 
-    stderr = (
-        b"ERROR: Codex ran out of room in the model's context window. "
-        b"Start a new thread or clear earlier history before retrying.\n"
-        b"tokens used\n"
-        b"0\n"
-    )
     _patch_subprocess(monkeypatch, _FakeProc(1, stdout=b"", stderr=stderr))
 
     pr = PullRequest(
