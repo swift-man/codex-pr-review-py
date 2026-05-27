@@ -135,6 +135,16 @@ _LOCK_FILENAMES = {
 
 _PRIORITY_DIRS = ("src", "app", "lib", "pkg", "internal", "packages", "apps")
 
+# `CODEX_MAX_INPUT_TOKENS * 4 chars` 는 raw text 에 대한 대략치다. 실제 full prompt 는
+# Codex CLI 의 system/developer 컨텍스트, 리뷰 규칙, PR 메타데이터, line-number prefix 를
+# 함께 싣는다. full-code dump 는 reactive fallback 전에 실패하기 쉬워 보수적인 예산만
+# 파일 본문에 배정한다.
+_FULL_DUMP_FILE_BUDGET_RATIO = 0.60
+_FULL_DUMP_OVERHEAD_RATIO = 0.10
+_FULL_DUMP_OVERHEAD_CAP_CHARS = 32_000
+_FORMAT_FILE_MIN_LINE_NO_WIDTH = 5
+_FORMAT_FILE_LINE_PREFIX_SUFFIX_LEN = 2  # "| "
+
 # 확장자만으로는 리뷰 가치를 단정할 수 없는(= 소스일 수도 데이터일 수도 있는) 형식.
 # 이 집합에 포함된 파일은 "크면 제외, 작으면 포함" 규칙(_data_file_max_bytes)을 따른다.
 _AMBIGUOUS_DATA_SUFFIXES = {
@@ -255,7 +265,7 @@ def _build_dump_sync(
     filter_excluded_set = set(filter_excluded)
     budget_trimmed: list[str] = []
     total_chars = 0
-    max_chars = budget.max_chars()
+    max_chars = _full_dump_file_budget_chars(budget)
 
     for rel_path in ordered:
         abs_path = root / rel_path
@@ -276,9 +286,11 @@ def _build_dump_sync(
                 filter_excluded_set.add(rel_path)
             continue
 
-        # 32자 여유는 프롬프트에 붙는 "--- FILE: path ---" / 라인 번호 접두사 등 프레이밍
-        # 오버헤드 근사치. 정확한 토큰 산정은 아니지만 보수적으로 잡아 예산 초과를 막는다.
-        entry_chars = len(content) + len(rel_path) + 32
+        entry_chars = _estimate_full_prompt_file_chars(
+            rel_path,
+            content,
+            is_changed=rel_path in changed_set,
+        )
         if total_chars + entry_chars > max_chars:
             budget_trimmed.append(rel_path)
             continue
@@ -324,6 +336,42 @@ def _build_dump_sync(
         # property 가 이 필드와 patch_missing 을 기반으로 예산 컷만 정확히 계산한다
         # (gemini PR #17 Major 지적 반영).
         filter_excluded=tuple(filter_excluded),
+    )
+
+
+def _full_dump_file_budget_chars(budget: TokenBudget) -> int:
+    raw_limit = budget.max_chars()
+    overhead = min(
+        _FULL_DUMP_OVERHEAD_CAP_CHARS,
+        int(raw_limit * _FULL_DUMP_OVERHEAD_RATIO),
+    )
+    return max(0, int((raw_limit - overhead) * _FULL_DUMP_FILE_BUDGET_RATIO))
+
+
+def _estimate_full_prompt_file_chars(
+    rel_path: str,
+    content: str,
+    *,
+    is_changed: bool,
+) -> int:
+    marker = " [CHANGED]" if is_changed else ""
+    header = f"--- FILE: {rel_path}{marker} ---"
+    footer = "--- END FILE ---"
+    lines = content.splitlines()
+    # Must mirror codex_prompt._format_file(): "{line_no:5d}| " plus joined newlines.
+    numbered_len = sum(
+        _format_file_line_prefix_len(index) + len(line)
+        for index, line in enumerate(lines, start=1)
+    )
+    if lines:
+        numbered_len += len(lines) - 1
+    return len(header) + 1 + numbered_len + 1 + len(footer)
+
+
+def _format_file_line_prefix_len(line_no: int) -> int:
+    return (
+        max(_FORMAT_FILE_MIN_LINE_NO_WIDTH, len(str(line_no)))
+        + _FORMAT_FILE_LINE_PREFIX_SUFFIX_LEN
     )
 
 

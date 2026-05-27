@@ -11,6 +11,10 @@ from .codex_prompt import build_prompt
 
 logger = logging.getLogger(__name__)
 
+_STDERR_TOKENS_USED_MARKER = "tokens used"
+_STDERR_EMPTY_SUMMARY = "(no stderr)"
+_STDERR_TOKEN_COUNT_SEPARATORS = ("/", ":")
+
 
 class CodexAuthError(RuntimeError):
     """Raised when the Codex CLI is not authenticated (manual `codex login` required)."""
@@ -67,7 +71,8 @@ class CodexCliEngine:
             raise CodexAuthError(
                 "Codex CLI 가 로그인되어 있지 않습니다.\n"
                 f"출력: {combined or '(empty)'}\n"
-                f"해결: 터미널에서 `{self._binary} login` 을 실행해 ChatGPT 로 로그인한 뒤 서버를 재기동하세요."
+                f"해결: 터미널에서 `{self._binary} login` 을 실행해 ChatGPT 로 로그인한 뒤 "
+                "서버를 재기동하세요."
             )
         return combined.splitlines()[0] if combined else "Logged in"
 
@@ -140,10 +145,33 @@ class CodexCliEngine:
             # 마스킹하지 않으므로, **예외에 넣기 전 단계에서 직접 마스킹** 해야 토큰 URL /
             # `authorization=Bearer ...` 같은 자격증명이 어떤 경로로도 새지 않는다
             # (codex PR #18 Critical 반영).
-            summary = redact_text(err.splitlines()[-1]) if err else "(no stderr)"
+            summary = _summarize_stderr(err)
             raise ReviewEngineError(
                 f"codex exec failed (rc={proc.returncode}, model={self._model}): {summary}",
                 returncode=proc.returncode,
             )
 
         return parse_review(stdout.decode(errors="replace"))
+
+
+def _summarize_stderr(stderr: str) -> str:
+    lines = [line.strip() for line in stderr.splitlines() if line.strip()]
+    for line in reversed(lines):
+        if _is_codex_stderr_footer_line(line):
+            continue
+        return redact_text(line)
+    return _STDERR_EMPTY_SUMMARY
+
+
+def _is_codex_stderr_footer_line(line: str) -> bool:
+    lowered = line.lower()
+    if lowered == _STDERR_TOKENS_USED_MARKER or lowered.isdecimal():
+        return True
+    if not lowered.startswith(_STDERR_TOKENS_USED_MARKER):
+        return False
+
+    suffix = lowered.removeprefix(_STDERR_TOKENS_USED_MARKER).strip()
+    if not suffix or suffix[0] not in _STDERR_TOKEN_COUNT_SEPARATORS:
+        return False
+    token_count = suffix[1:].strip().replace(",", "")
+    return token_count.isdecimal()

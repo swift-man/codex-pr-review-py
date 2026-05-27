@@ -3,8 +3,12 @@ from pathlib import Path
 
 import pytest
 
-from codex_review.domain import TokenBudget
-from codex_review.infrastructure.file_dump_collector import FileDumpCollector
+from codex_review.domain import FileEntry, TokenBudget
+from codex_review.infrastructure.codex_prompt import _format_file
+from codex_review.infrastructure.file_dump_collector import (
+    FileDumpCollector,
+    _estimate_full_prompt_file_chars,
+)
 
 
 def _git(cwd: Path, *args: str) -> None:
@@ -168,6 +172,40 @@ async def test_collect_marks_exceeded_when_changed_file_excluded(repo: Path) -> 
     )
     assert dump.exceeded_budget is True
     assert "big.py" in dump.excluded
+
+
+async def test_collect_budget_counts_line_numbered_prompt_overhead(repo: Path) -> None:
+    """A file with many short lines can fit as raw text but overflow once line numbers are added."""
+    (repo / "src" / "line_heavy.py").write_text("x\n" * 11_000, encoding="utf-8")
+    _commit_all(repo)
+
+    collector = FileDumpCollector(file_max_bytes=1024 * 1024)
+    dump = await collector.collect(
+        repo,
+        changed_files=("src/line_heavy.py",),
+        budget=TokenBudget(max_tokens=10_000),
+    )
+
+    paths = {e.path for e in dump.entries}
+    assert "src/line_heavy.py" not in paths
+    assert "src/line_heavy.py" in dump.budget_trimmed
+    assert dump.exceeded_budget is True
+
+
+def test_full_prompt_file_estimate_matches_six_digit_line_numbers() -> None:
+    content = "\n".join("x" for _ in range(100_001))
+    entry = FileEntry(
+        path="src/huge.py",
+        content=content,
+        size_bytes=len(content),
+        is_changed=True,
+    )
+
+    assert _estimate_full_prompt_file_chars(
+        entry.path,
+        entry.content,
+        is_changed=entry.is_changed,
+    ) == len(_format_file(entry))
 
 
 def _commit_all(repo: Path) -> None:
