@@ -151,8 +151,9 @@ class GitHubAppClient:
         operation: str,
         call: Callable[[str], Awaitable[_T]],
     ) -> _T:
-        # Only use this wrapper for idempotent read paths. A mixed ExceptionGroup is
-        # retried wholesale when it contains stale-token evidence.
+        # Retry only when GitHub rejects the installation token itself. A 401 means
+        # the protected operation did not proceed, so issuing a fresh token and trying
+        # once more is safe for both reads and writes.
         token = await self.get_installation_token(installation_id)
         try:
             return await call(token)
@@ -168,6 +169,34 @@ class GitHubAppClient:
 
         fresh_token = await self.get_installation_token(installation_id)
         return await call(fresh_token)
+
+    async def _request_with_installation_token_retry(
+        self,
+        installation_id: int,
+        operation: str,
+        method: str,
+        path: str,
+        *,
+        body: object | None = None,
+    ) -> Any:
+        return await self._with_installation_token_retry(
+            installation_id,
+            operation,
+            lambda token: self._request(method, path, auth=f"token {token}", body=body),
+        )
+
+    async def _graphql_with_installation_token_retry(
+        self,
+        installation_id: int,
+        operation: str,
+        query: str,
+        variables: dict[str, Any],
+    ) -> dict[str, Any]:
+        return await self._with_installation_token_retry(
+            installation_id,
+            operation,
+            lambda token: self._graphql(query, variables, auth=f"token {token}"),
+        )
 
     def _drop_cached_installation_token(self, installation_id: int, token: str) -> None:
         cached = self._token_cache.get(installation_id)
@@ -264,7 +293,6 @@ class GitHubAppClient:
             logger.info("DRY_RUN — review not posted: %s#%d", pr.repo.full_name, pr.number)
             return
 
-        token = await self.get_installation_token(pr.installation_id)
         path = f"/repos/{pr.repo.full_name}/pulls/{pr.number}/reviews"
 
         # commit_id 를 명시해야 리뷰가 "이 head SHA 시점"에 고정된다. 생략하면 최신 SHA 기준으로
@@ -276,7 +304,13 @@ class GitHubAppClient:
             "comments": [_finding_to_comment(f) for f in result.findings],
         }
         try:
-            await self._request("POST", path, auth=f"token {token}", body=payload)
+            await self._request_with_installation_token_retry(
+                pr.installation_id,
+                f"post_review {pr.repo.full_name}#{pr.number}",
+                "POST",
+                path,
+                body=payload,
+            )
         except httpx.HTTPStatusError as exc:
             # 방어선: use-case 단계의 diff 필터가 있음에도 422 가 나면 인라인 코멘트를 포기하고
             # 본문만 재게시한다. 리뷰 전체를 포기하는 것보다 낫다.
@@ -298,7 +332,13 @@ class GitHubAppClient:
                     retry_result.render_body(), self._review_model_label
                 )
                 payload["comments"] = []
-                await self._request("POST", path, auth=f"token {token}", body=payload)
+                await self._request_with_installation_token_retry(
+                    pr.installation_id,
+                    f"post_review fallback {pr.repo.full_name}#{pr.number}",
+                    "POST",
+                    path,
+                    body=payload,
+                )
             else:
                 raise
 
@@ -307,9 +347,14 @@ class GitHubAppClient:
             logger.info("DRY_RUN — comment not posted: %s#%d", pr.repo.full_name, pr.number)
             return
 
-        token = await self.get_installation_token(pr.installation_id)
         path = f"/repos/{pr.repo.full_name}/issues/{pr.number}/comments"
-        await self._request("POST", path, auth=f"token {token}", body={"body": body})
+        await self._request_with_installation_token_retry(
+            pr.installation_id,
+            f"post_comment {pr.repo.full_name}#{pr.number}",
+            "POST",
+            path,
+            body={"body": body},
+        )
 
     # --- Follow-up support (Phase 1) -----------------------------------------
 
@@ -530,12 +575,17 @@ class GitHubAppClient:
                 pr.repo.full_name, pr.number, comment_id,
             )
             return
-        token = await self.get_installation_token(pr.installation_id)
         path = (
             f"/repos/{pr.repo.full_name}/pulls/{pr.number}/comments/"
             f"{comment_id}/replies"
         )
-        await self._request("POST", path, auth=f"token {token}", body={"body": body})
+        await self._request_with_installation_token_retry(
+            pr.installation_id,
+            f"reply_to_review_comment {pr.repo.full_name}#{pr.number} comment={comment_id}",
+            "POST",
+            path,
+            body={"body": body},
+        )
 
     async def resolve_review_thread(
         self, thread_id: str, installation_id: int
@@ -544,7 +594,6 @@ class GitHubAppClient:
         if self._dry_run:
             logger.info("DRY_RUN — thread not resolved: %s", thread_id)
             return
-        token = await self.get_installation_token(installation_id)
         mutation = """
         mutation($threadId:ID!) {
           resolveReviewThread(input:{threadId:$threadId}) {
@@ -552,7 +601,12 @@ class GitHubAppClient:
           }
         }
         """
-        await self._graphql(mutation, {"threadId": thread_id}, auth=f"token {token}")
+        await self._graphql_with_installation_token_retry(
+            installation_id,
+            f"resolve_review_thread {thread_id}",
+            mutation,
+            {"threadId": thread_id},
+        )
 
     async def _graphql(
         self, query: str, variables: dict[str, Any], *, auth: str

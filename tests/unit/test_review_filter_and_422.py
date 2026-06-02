@@ -260,6 +260,94 @@ async def test_post_review_retries_without_comments_on_422(stubbed_github) -> No
     assert _body_of(posts[1])["comments"] == []
 
 
+async def test_post_review_refreshes_cached_token_after_bad_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """긴 리뷰 후 POST 시점에 GitHub 가 캐시 token 을 거부하면 재발급 후 1회 재시도."""
+    monkeypatch.setattr(jwt, "encode", lambda *a, **k: "fake.jwt")
+    token_requests = 0
+    seen_auths: list[str] = []
+    posts: list[httpx.Request] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        nonlocal token_requests
+        if req.url.path.endswith("/access_tokens"):
+            token_requests += 1
+            token = "OLD" if token_requests == 1 else "NEW"
+            return httpx.Response(
+                200, json={"token": token, "expires_at": "2099-01-01T00:00:00Z"}
+            )
+        if req.url.path.endswith("/pulls/1/reviews") and req.method == "POST":
+            posts.append(req)
+            auth = req.headers.get("Authorization", "")
+            seen_auths.append(auth)
+            if "OLD" in auth:
+                return httpx.Response(
+                    401, json={"message": "Bad credentials", "status": "401"}
+                )
+            return httpx.Response(200, json={})
+        return httpx.Response(404)
+
+    async with httpx.AsyncClient(
+        base_url="https://api.github.com",
+        transport=httpx.MockTransport(handler),
+    ) as http_client:
+        client = GitHubAppClient(app_id=1, private_key_pem="-", http_client=http_client)
+        await client.post_review(_pr(), _review_result_with_inline())
+
+    assert token_requests == 2
+    assert len(posts) == 2
+    assert any("OLD" in auth for auth in seen_auths)
+    assert any("NEW" in auth for auth in seen_auths)
+    assert _body_of(posts[0]) == _body_of(posts[1])
+
+
+async def test_post_review_422_fallback_refreshes_stale_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """422 fallback POST 에서도 stale token 401 이 나면 재발급 후 fallback payload 재시도."""
+    monkeypatch.setattr(jwt, "encode", lambda *a, **k: "fake.jwt")
+    token_requests = 0
+    review_posts = 0
+    posts: list[httpx.Request] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        nonlocal token_requests, review_posts
+        if req.url.path.endswith("/access_tokens"):
+            token_requests += 1
+            token = "OLD" if token_requests == 1 else "NEW"
+            return httpx.Response(
+                200, json={"token": token, "expires_at": "2099-01-01T00:00:00Z"}
+            )
+        if req.url.path.endswith("/pulls/1/reviews") and req.method == "POST":
+            review_posts += 1
+            posts.append(req)
+            if review_posts == 1:
+                return httpx.Response(422, json={"message": "Validation Failed"})
+            if "OLD" in req.headers.get("Authorization", ""):
+                return httpx.Response(
+                    401, json={"message": "Bad credentials", "status": "401"}
+                )
+            return httpx.Response(200, json={})
+        return httpx.Response(404)
+
+    async with httpx.AsyncClient(
+        base_url="https://api.github.com",
+        transport=httpx.MockTransport(handler),
+    ) as http_client:
+        client = GitHubAppClient(app_id=1, private_key_pem="-", http_client=http_client)
+        await client.post_review(
+            _pr(diff_right_lines={"a.py": frozenset({10})}),
+            _review_result_with_inline(),
+        )
+
+    assert token_requests == 2
+    assert len(posts) == 3
+    assert _body_of(posts[0])["comments"]
+    assert _body_of(posts[1])["comments"] == []
+    assert _body_of(posts[2])["comments"] == []
+
+
 async def test_post_review_422_retry_also_rerenders_body_without_findings_notice(
     stubbed_github,
 ) -> None:
