@@ -122,7 +122,8 @@ def _graphql_threads_payload() -> dict[str, Any]:
                                             "body": "[Minor] outdated",
                                             "commit": {"oid": "abcd1234"},
                                         },
-                                        # root 와 다른 author 의 답글 → has_non_root_author_reply=True
+                                        # root 와 다른 author 의 답글
+                                        # → has_non_root_author_reply=True
                                         {
                                             "databaseId": 3004,
                                             "author": {"login": "human-reviewer"},
@@ -184,6 +185,38 @@ async def test_list_review_threads_parses_all_fields(make_client) -> None:
     # T_3 은 outdated (line=None) + 사람 답글 존재
     assert t3.line is None
     assert t3.has_non_root_author_reply is True
+
+
+async def test_list_review_threads_refreshes_cached_token_after_bad_credentials(
+    make_client,
+) -> None:
+    token_requests = 0
+    graphql_auths: list[str] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        nonlocal token_requests
+        if req.url.path.endswith("/access_tokens"):
+            token_requests += 1
+            token = "OLD" if token_requests == 1 else "NEW"
+            return httpx.Response(
+                200, json={"token": token, "expires_at": "2030-01-01T00:00:00Z"}
+            )
+        if req.url.path == "/graphql":
+            auth = req.headers["Authorization"]
+            graphql_auths.append(auth)
+            if auth == "token OLD":
+                return httpx.Response(
+                    401, json={"message": "Bad credentials", "status": "401"}
+                )
+            return httpx.Response(200, json=_graphql_threads_payload())
+        raise AssertionError(f"unexpected request: {req.method} {req.url}")
+
+    client = make_client(handler)
+    threads = await client.list_review_threads(_pr(), 7)
+
+    assert len(threads) == 3
+    assert token_requests == 2
+    assert graphql_auths == ["token OLD", "token NEW"]
 
 
 async def test_list_review_threads_detects_existing_followup_marker(
@@ -291,7 +324,16 @@ async def test_resolve_sends_graphql_mutation(make_client) -> None:
         if req.url.path.endswith("/access_tokens"):
             return httpx.Response(200, json={"token": "ITOK", "expires_at": "2030-01-01T00:00:00Z"})
         posts.append(req)
-        return httpx.Response(200, json={"data": {"resolveReviewThread": {"thread": {"id": "T_1", "isResolved": True}}}})
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "resolveReviewThread": {
+                        "thread": {"id": "T_1", "isResolved": True}
+                    }
+                }
+            },
+        )
 
     client = make_client(handler)
     await client.resolve_review_thread("T_1", 7)
@@ -616,6 +658,60 @@ async def test_fetch_review_history_merges_three_sources_chronologically(make_cl
     assert history.comments[2].kind == "review-summary"
     # inline 의 comment_id 가 보존되어야 메타리플라이 타깃 회수 가능.
     assert history.comments[1].comment_id == 12345
+
+
+async def test_fetch_review_history_refreshes_cached_token_after_bad_credentials(
+    make_client,
+) -> None:
+    token_requests = 0
+    data_auths: list[str] = []
+
+    issue_payload = [
+        {"id": 1, "user": {"login": "alice"}, "body": "issue 정상",
+         "created_at": "2026-05-01T10:00:00Z"},
+    ]
+    inline_payload = [
+        {"id": 12345, "user": {"login": "gemini-pr-review-bot[bot]"},
+         "body": "inline 정상", "path": "x.py", "line": 10,
+         "created_at": "2026-05-01T11:00:00Z"},
+    ]
+    reviews_payload = [
+        {"user": {"login": "codex-review-bot[bot]"},
+         "body": "review 정상", "submitted_at": "2026-05-01T12:00:00Z"},
+    ]
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        nonlocal token_requests
+        if req.url.path.endswith("/access_tokens"):
+            token_requests += 1
+            token = "OLD" if token_requests == 1 else "NEW"
+            return httpx.Response(
+                200, json={"token": token, "expires_at": "2030-01-01T00:00:00Z"}
+            )
+
+        auth = req.headers["Authorization"]
+        data_auths.append(auth)
+        if auth == "token OLD":
+            return httpx.Response(
+                401, json={"message": "Bad credentials", "status": "401"}
+            )
+
+        path = req.url.path
+        if path.endswith("/issues/42/comments"):
+            return httpx.Response(200, json=issue_payload)
+        if path.endswith("/pulls/42/comments"):
+            return httpx.Response(200, json=inline_payload)
+        if path.endswith("/pulls/42/reviews"):
+            return httpx.Response(200, json=reviews_payload)
+        raise AssertionError(f"unexpected path: {path}")
+
+    client = make_client(handler)
+    history = await client.fetch_review_history(_pr(), 7)
+
+    assert len(history.comments) == 3
+    assert token_requests == 2
+    assert "token OLD" in data_auths
+    assert data_auths.count("token NEW") == 3
 
 
 async def test_fetch_review_history_filters_our_followup_marker(make_client) -> None:

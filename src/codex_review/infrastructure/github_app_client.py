@@ -151,8 +151,9 @@ class GitHubAppClient:
         operation: str,
         call: Callable[[str], Awaitable[_T]],
     ) -> _T:
-        # Only use this wrapper for idempotent read paths. A mixed ExceptionGroup is
-        # retried wholesale when it contains stale-token evidence.
+        # Retry only when GitHub rejects the installation token itself. A 401 means
+        # the protected operation did not proceed, so issuing a fresh token and trying
+        # once more is safe for both reads and writes.
         token = await self.get_installation_token(installation_id)
         try:
             return await call(token)
@@ -168,6 +169,34 @@ class GitHubAppClient:
 
         fresh_token = await self.get_installation_token(installation_id)
         return await call(fresh_token)
+
+    async def _request_with_installation_token_retry(
+        self,
+        installation_id: int,
+        operation: str,
+        method: str,
+        path: str,
+        *,
+        body: object | None = None,
+    ) -> Any:
+        return await self._with_installation_token_retry(
+            installation_id,
+            operation,
+            lambda token: self._request(method, path, auth=f"token {token}", body=body),
+        )
+
+    async def _graphql_with_installation_token_retry(
+        self,
+        installation_id: int,
+        operation: str,
+        query: str,
+        variables: dict[str, Any],
+    ) -> dict[str, Any]:
+        return await self._with_installation_token_retry(
+            installation_id,
+            operation,
+            lambda token: self._graphql(query, variables, auth=f"token {token}"),
+        )
 
     def _drop_cached_installation_token(self, installation_id: int, token: str) -> None:
         cached = self._token_cache.get(installation_id)
@@ -264,7 +293,6 @@ class GitHubAppClient:
             logger.info("DRY_RUN — review not posted: %s#%d", pr.repo.full_name, pr.number)
             return
 
-        token = await self.get_installation_token(pr.installation_id)
         path = f"/repos/{pr.repo.full_name}/pulls/{pr.number}/reviews"
 
         # commit_id 를 명시해야 리뷰가 "이 head SHA 시점"에 고정된다. 생략하면 최신 SHA 기준으로
@@ -276,7 +304,13 @@ class GitHubAppClient:
             "comments": [_finding_to_comment(f) for f in result.findings],
         }
         try:
-            await self._request("POST", path, auth=f"token {token}", body=payload)
+            await self._request_with_installation_token_retry(
+                pr.installation_id,
+                f"post_review {pr.repo.full_name}#{pr.number}",
+                "POST",
+                path,
+                body=payload,
+            )
         except httpx.HTTPStatusError as exc:
             # 방어선: use-case 단계의 diff 필터가 있음에도 422 가 나면 인라인 코멘트를 포기하고
             # 본문만 재게시한다. 리뷰 전체를 포기하는 것보다 낫다.
@@ -298,7 +332,13 @@ class GitHubAppClient:
                     retry_result.render_body(), self._review_model_label
                 )
                 payload["comments"] = []
-                await self._request("POST", path, auth=f"token {token}", body=payload)
+                await self._request_with_installation_token_retry(
+                    pr.installation_id,
+                    f"post_review fallback {pr.repo.full_name}#{pr.number}",
+                    "POST",
+                    path,
+                    body=payload,
+                )
             else:
                 raise
 
@@ -307,9 +347,14 @@ class GitHubAppClient:
             logger.info("DRY_RUN — comment not posted: %s#%d", pr.repo.full_name, pr.number)
             return
 
-        token = await self.get_installation_token(pr.installation_id)
         path = f"/repos/{pr.repo.full_name}/issues/{pr.number}/comments"
-        await self._request("POST", path, auth=f"token {token}", body={"body": body})
+        await self._request_with_installation_token_retry(
+            pr.installation_id,
+            f"post_comment {pr.repo.full_name}#{pr.number}",
+            "POST",
+            path,
+            body={"body": body},
+        )
 
     # --- Follow-up support (Phase 1) -----------------------------------------
 
@@ -324,7 +369,6 @@ class GitHubAppClient:
         판정하면 그 너머의 사람 답글이나 우리 마커를 놓쳐 잘못 자동 응답할 수 있다
         (coderabbitai PR #19 Major).
         """
-        token = await self.get_installation_token(installation_id)
         query = """
         query($owner:String!, $name:String!, $number:Int!, $after:String) {
           repository(owner:$owner, name:$name) {
@@ -362,7 +406,12 @@ class GitHubAppClient:
                 "number": pr.number,
                 "after": cursor,
             }
-            data = await self._graphql(query, variables, auth=f"token {token}")
+            data = await self._graphql_with_installation_token_retry(
+                installation_id,
+                f"list_review_threads {pr.repo.full_name}#{pr.number}",
+                query,
+                variables,
+            )
             repo = (data.get("data") or {}).get("repository") or {}
             prn = repo.get("pullRequest") or {}
             threads_node = prn.get("reviewThreads") or {}
@@ -413,7 +462,6 @@ class GitHubAppClient:
         토큰 한계 / 페이지네이션: per_page=100, Link rel=next 추적. issue/inline 은
         많아질 수 있어 페이지네이션 필수. reviews 는 보통 적지만 동일 패턴.
         """
-        token = await self.get_installation_token(installation_id)
         repo_pulls = f"/repos/{pr.repo.full_name}/pulls/{pr.number}"
         repo_issue = f"/repos/{pr.repo.full_name}/issues/{pr.number}"
 
@@ -425,17 +473,21 @@ class GitHubAppClient:
         #   - `ExceptionGroup` 대신 일반 예외 객체 반환 → 호출자가 추가 catch 불필요.
         #   - 인프라 계층이 자체적으로 부분 실패 처리 → 앱 계층은 httpx 등 인프라
         #     라이브러리에 직접 의존하지 않음 (DIP 회복).
-        # `get_installation_token` 실패는 별도 — 토큰 없이는 어떤 엔드포인트도 못 가서
-        # 그대로 전파해야 한다 (애초에 다음 단계 review 자체도 진행 불가).
         results = await asyncio.gather(
-            self._collect_pages(
-                f"{repo_issue}/comments?per_page=100", auth=f"token {token}"
+            self._collect_pages_with_installation_token_retry(
+                installation_id,
+                f"fetch_review_history issues/comments {pr.repo.full_name}#{pr.number}",
+                f"{repo_issue}/comments?per_page=100",
             ),
-            self._collect_pages(
-                f"{repo_pulls}/comments?per_page=100", auth=f"token {token}"
+            self._collect_pages_with_installation_token_retry(
+                installation_id,
+                f"fetch_review_history pulls/comments {pr.repo.full_name}#{pr.number}",
+                f"{repo_pulls}/comments?per_page=100",
             ),
-            self._collect_pages(
-                f"{repo_pulls}/reviews?per_page=100", auth=f"token {token}"
+            self._collect_pages_with_installation_token_retry(
+                installation_id,
+                f"fetch_review_history pulls/reviews {pr.repo.full_name}#{pr.number}",
+                f"{repo_pulls}/reviews?per_page=100",
             ),
             return_exceptions=True,
         )
@@ -475,6 +527,15 @@ class GitHubAppClient:
         # _collect_pages 가 dict 등 비정상 응답을 반환한 케이스 (이론상 없지만 방어).
         return []
 
+    async def _collect_pages_with_installation_token_retry(
+        self, installation_id: int, operation: str, url_or_path: str
+    ) -> list[Any]:
+        return await self._with_installation_token_retry(
+            installation_id,
+            operation,
+            lambda token: self._collect_pages(url_or_path, auth=f"token {token}"),
+        )
+
     async def _collect_pages(self, url_or_path: str, *, auth: str) -> list[Any]:
         """`Link rel=next` 따라 끝까지 순회하며 모든 페이지 항목을 평탄화해 반환.
 
@@ -497,6 +558,19 @@ class GitHubAppClient:
                 break
             try:
                 page, next_url = await self._get_page_with_next(next_url, auth=auth)
+            except httpx.HTTPStatusError as exc:
+                if _contains_bad_credentials_401(exc):
+                    raise
+                # 일시 장애 — 부분 데이터 보존 후 종료. 호출자 (fetch_review_history)
+                # 의 gather(return_exceptions=True) 가 결과 리스트로 받으므로 다른
+                # 엔드포인트의 정상 데이터는 유지.
+                logger.warning(
+                    "_collect_pages: transient failure mid-pagination for %s "
+                    "— preserving %d items collected so far",
+                    url_or_path, len(out),
+                    exc_info=exc,
+                )
+                break
             except (httpx.HTTPError, OSError, TimeoutError):
                 # 일시 장애 — 부분 데이터 보존 후 종료. 호출자 (fetch_review_history)
                 # 의 gather(return_exceptions=True) 가 결과 리스트로 받으므로 다른
@@ -530,12 +604,17 @@ class GitHubAppClient:
                 pr.repo.full_name, pr.number, comment_id,
             )
             return
-        token = await self.get_installation_token(pr.installation_id)
         path = (
             f"/repos/{pr.repo.full_name}/pulls/{pr.number}/comments/"
             f"{comment_id}/replies"
         )
-        await self._request("POST", path, auth=f"token {token}", body={"body": body})
+        await self._request_with_installation_token_retry(
+            pr.installation_id,
+            f"reply_to_review_comment {pr.repo.full_name}#{pr.number} comment={comment_id}",
+            "POST",
+            path,
+            body={"body": body},
+        )
 
     async def resolve_review_thread(
         self, thread_id: str, installation_id: int
@@ -544,7 +623,6 @@ class GitHubAppClient:
         if self._dry_run:
             logger.info("DRY_RUN — thread not resolved: %s", thread_id)
             return
-        token = await self.get_installation_token(installation_id)
         mutation = """
         mutation($threadId:ID!) {
           resolveReviewThread(input:{threadId:$threadId}) {
@@ -552,7 +630,12 @@ class GitHubAppClient:
           }
         }
         """
-        await self._graphql(mutation, {"threadId": thread_id}, auth=f"token {token}")
+        await self._graphql_with_installation_token_retry(
+            installation_id,
+            f"resolve_review_thread {thread_id}",
+            mutation,
+            {"threadId": thread_id},
+        )
 
     async def _graphql(
         self, query: str, variables: dict[str, Any], *, auth: str
@@ -658,8 +741,8 @@ def _is_bad_credentials_401(exc: httpx.HTTPStatusError) -> bool:
             message = data.get("message")
             if isinstance(message, str):
                 return message.lower() == "bad credentials"
-    # Some GitHub/proxy 401 responses may omit a JSON message. For this read-only
-    # retry path, one token refresh is safer than failing a webhook on a stale cache.
+    # Some GitHub/proxy 401 responses may omit a JSON message. For installation-token
+    # retry paths, one token refresh is safer than failing a webhook on a stale cache.
     return True
 
 
