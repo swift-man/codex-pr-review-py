@@ -61,8 +61,9 @@ class _CapturingGitHub:
     ) -> PullRequest:
         raise AssertionError("not used in these tests")
 
-    async def post_review(self, pr: PullRequest, result: ReviewResult) -> None:
+    async def post_review(self, pr: PullRequest, result: ReviewResult) -> bool:
         self.posted.append((pr, result))
+        return True
 
     async def post_comment(self, pr: PullRequest, body: str) -> None:
         self.comments.append((pr, body))
@@ -384,6 +385,45 @@ async def test_post_review_skips_when_head_changed_before_posting(
 
     assert posted is False
     assert posts == []
+
+
+async def test_post_review_422_fallback_skips_when_head_changes_before_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """422 fallback 본문-only POST 직전에도 HEAD를 다시 확인해 stale 리뷰를 막는다."""
+    monkeypatch.setattr(jwt, "encode", lambda *a, **k: "fake.jwt")
+    head_checks = 0
+    posts: list[httpx.Request] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        nonlocal head_checks
+        if req.url.path.endswith("/access_tokens"):
+            return httpx.Response(
+                200, json={"token": "ITOK", "expires_at": "2099-01-01T00:00:00Z"}
+            )
+        if req.url.path.endswith("/pulls/1") and req.method == "GET":
+            head_checks += 1
+            sha = "abc" if head_checks == 1 else "def"
+            return httpx.Response(200, json={"head": {"sha": sha}})
+        if req.url.path.endswith("/pulls/1/reviews") and req.method == "POST":
+            posts.append(req)
+            return httpx.Response(422, json={"message": "Validation Failed"})
+        return httpx.Response(404)
+
+    async with httpx.AsyncClient(
+        base_url="https://api.github.com",
+        transport=httpx.MockTransport(handler),
+    ) as http_client:
+        client = GitHubAppClient(app_id=1, private_key_pem="-", http_client=http_client)
+        posted = await client.post_review(
+            _pr(diff_right_lines={"a.py": frozenset({10})}),
+            _review_result_with_inline(),
+        )
+
+    assert posted is False
+    assert head_checks == 2
+    assert len(posts) == 1
+    assert _body_of(posts[0])["comments"]
 
 
 async def test_post_review_422_fallback_refreshes_stale_token(

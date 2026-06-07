@@ -294,15 +294,7 @@ class GitHubAppClient:
             return False
 
         path = f"/repos/{pr.repo.full_name}/pulls/{pr.number}/reviews"
-        current_head_sha = await self._fetch_current_pull_head_sha(pr)
-        if current_head_sha != pr.head_sha:
-            logger.info(
-                "skipping review post for %s#%d — PR head changed from %s to %s",
-                pr.repo.full_name,
-                pr.number,
-                pr.head_sha,
-                current_head_sha,
-            )
+        if not await self._is_current_pull_head(pr):
             return False
 
         # commit_id 를 명시해야 리뷰가 "이 head SHA 시점"에 고정된다. 생략하면 최신 SHA 기준으로
@@ -343,6 +335,8 @@ class GitHubAppClient:
                     retry_result.render_body(), self._review_model_label
                 )
                 payload["comments"] = []
+                if not await self._is_current_pull_head(pr):
+                    return False
                 await self._request_with_installation_token_retry(
                     pr.installation_id,
                     f"post_review fallback {pr.repo.full_name}#{pr.number}",
@@ -353,6 +347,19 @@ class GitHubAppClient:
                 return True
             else:
                 raise
+
+    async def _is_current_pull_head(self, pr: PullRequest) -> bool:
+        current_head_sha = await self._fetch_current_pull_head_sha(pr)
+        if current_head_sha == pr.head_sha:
+            return True
+        logger.info(
+            "skipping review post for %s#%d — PR head changed from %s to %s",
+            pr.repo.full_name,
+            pr.number,
+            pr.head_sha,
+            current_head_sha,
+        )
+        return False
 
     async def _fetch_current_pull_head_sha(self, pr: PullRequest) -> str:
         data = await self._request_with_installation_token_retry(
