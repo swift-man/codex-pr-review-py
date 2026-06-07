@@ -253,11 +253,12 @@ class ReviewPullRequestUseCase:
                     "engine failed in preemptive diff-only mode for %s#%d — no further fallback",
                     pr.repo.full_name, pr.number,
                 )
-                await self._github.post_comment(
+                await self._post_engine_failure_comment(
                     pr,
-                    _engine_failure_message(
-                        pr, dump, exc, failure_mode=_FAILURE_DIFF_PREEMPTIVE,
-                    ),
+                    dump,
+                    exc,
+                    failure_mode=_FAILURE_DIFF_PREEMPTIVE,
+                    history=history,
                 )
                 return None
 
@@ -275,11 +276,12 @@ class ReviewPullRequestUseCase:
                     "engine failed and diff fallback unavailable for %s#%d",
                     pr.repo.full_name, pr.number,
                 )
-                await self._github.post_comment(
+                await self._post_engine_failure_comment(
                     pr,
-                    _engine_failure_message(
-                        pr, dump, exc, failure_mode=_FAILURE_FULL_ONLY,
-                    ),
+                    dump,
+                    exc,
+                    failure_mode=_FAILURE_FULL_ONLY,
+                    history=history,
                 )
                 return None
             try:
@@ -289,12 +291,12 @@ class ReviewPullRequestUseCase:
                     "engine retry in diff mode also failed for %s#%d",
                     pr.repo.full_name, pr.number,
                 )
-                await self._github.post_comment(
+                await self._post_engine_failure_comment(
                     pr,
-                    _engine_failure_message(
-                        pr, fallback_dump, retry_exc,
-                        failure_mode=_FAILURE_FULL_THEN_DIFF,
-                    ),
+                    fallback_dump,
+                    retry_exc,
+                    failure_mode=_FAILURE_FULL_THEN_DIFF,
+                    history=history,
                 )
                 return None
             dump = fallback_dump  # 이후 배지 결정 용
@@ -305,6 +307,28 @@ class ReviewPullRequestUseCase:
         if dump.mode == DUMP_MODE_DIFF:
             result = _prepend_diff_scope_badge(result, dump, scope_reason)
         return result
+
+    async def _post_engine_failure_comment(
+        self,
+        pr: PullRequest,
+        dump: FileDump,
+        exc: BaseException,
+        *,
+        failure_mode: str,
+        history: ReviewHistory | None,
+    ) -> None:
+        is_model_limit = _is_model_limit_error(exc)
+        if is_model_limit and _has_model_limit_comment_for_current_head(history, pr):
+            logger.info(
+                "skipping duplicate model-limit diagnostic comment for %s#%d at head_sha=%s",
+                pr.repo.full_name, pr.number, pr.head_sha,
+            )
+            return
+
+        body = _engine_failure_message(pr, dump, exc, failure_mode=failure_mode)
+        if is_model_limit:
+            body = _append_model_limit_comment_marker(body, pr)
+        await self._github.post_comment(pr, body)
 
     async def _try_diff_fallback(self, pr: PullRequest) -> FileDump | None:
         """diff-only 모드로 fallback 가능 여부를 판단해 성공 시 새 dump 를 반환."""
@@ -505,6 +529,45 @@ def _make_code_fence_safe(text: str) -> str:
     파서엔 더 이상 ``` 로 인식되지 않게 만든다.
     """
     return text.replace("```", "`\u200b`\u200b`")
+
+
+_MODEL_LIMIT_COMMENT_MARKER_PREFIX = "<!-- codex-review:model-limit"
+
+_MODEL_LIMIT_ERROR_PHRASES = (
+    "context window",
+    "context length",
+    "context_length_exceeded",
+    "maximum context",
+    "too many tokens",
+    "token limit",
+    "input is too long",
+    "ran out of room",
+    "session limit",
+    "usage limit",
+)
+
+
+def _is_model_limit_error(exc: BaseException) -> bool:
+    message = str(exc).casefold()
+    return any(phrase in message for phrase in _MODEL_LIMIT_ERROR_PHRASES)
+
+
+def _model_limit_comment_marker(pr: PullRequest) -> str:
+    return f"{_MODEL_LIMIT_COMMENT_MARKER_PREFIX} version=1 head_sha={pr.head_sha} -->"
+
+
+def _append_model_limit_comment_marker(body: str, pr: PullRequest) -> str:
+    return f"{body}\n\n{_model_limit_comment_marker(pr)}"
+
+
+def _has_model_limit_comment_for_current_head(
+    history: ReviewHistory | None,
+    pr: PullRequest,
+) -> bool:
+    if history is None or history.is_empty:
+        return False
+    needle = f"{_MODEL_LIMIT_COMMENT_MARKER_PREFIX} version=1 head_sha={pr.head_sha}"
+    return any(needle in comment.body for comment in history.comments)
 
 
 # 엔진 실패 시도 경로 분류 — 진단 코멘트가 운영자에게 어떤 시도가 있었는지 정확히
