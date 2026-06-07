@@ -206,6 +206,8 @@ async def stubbed_github(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Any]:
                     return httpx.Response(
                         200, json={"token": "ITOK", "expires_at": "2026-04-22T00:00:00Z"}
                     )
+                if req.url.path.endswith("/pulls/1") and req.method == "GET":
+                    return httpx.Response(200, json={"head": {"sha": "abc"}})
                 if "/reviews" in req.url.path and req.method == "POST":
                     posts.append(req)
                     if not response_queue:
@@ -277,6 +279,8 @@ async def test_post_review_refreshes_cached_token_after_bad_credentials(
             return httpx.Response(
                 200, json={"token": token, "expires_at": "2099-01-01T00:00:00Z"}
             )
+        if req.url.path.endswith("/pulls/1") and req.method == "GET":
+            return httpx.Response(200, json={"head": {"sha": "abc"}})
         if req.url.path.endswith("/pulls/1/reviews") and req.method == "POST":
             posts.append(req)
             auth = req.headers.get("Authorization", "")
@@ -302,6 +306,86 @@ async def test_post_review_refreshes_cached_token_after_bad_credentials(
     assert _body_of(posts[0]) == _body_of(posts[1])
 
 
+async def test_post_review_refreshes_token_when_head_verification_gets_bad_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """게시 직전 HEAD 재확인 GET 이 stale installation token 401 을 만나도 재발급 후 게시."""
+    monkeypatch.setattr(jwt, "encode", lambda *a, **k: "fake.jwt")
+    token_requests = 0
+    head_checks = 0
+    posts: list[httpx.Request] = []
+    seen_head_auths: list[str] = []
+    seen_post_auths: list[str] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        nonlocal token_requests, head_checks
+        if req.url.path.endswith("/access_tokens"):
+            token_requests += 1
+            token = "OLD" if token_requests == 1 else "NEW"
+            return httpx.Response(
+                200, json={"token": token, "expires_at": "2099-01-01T00:00:00Z"}
+            )
+        if req.url.path.endswith("/pulls/1") and req.method == "GET":
+            head_checks += 1
+            auth = req.headers.get("Authorization", "")
+            seen_head_auths.append(auth)
+            if "OLD" in auth:
+                return httpx.Response(
+                    401, json={"message": "Bad credentials", "status": "401"}
+                )
+            return httpx.Response(200, json={"head": {"sha": "abc"}})
+        if req.url.path.endswith("/pulls/1/reviews") and req.method == "POST":
+            posts.append(req)
+            seen_post_auths.append(req.headers.get("Authorization", ""))
+            return httpx.Response(200, json={})
+        return httpx.Response(404)
+
+    async with httpx.AsyncClient(
+        base_url="https://api.github.com",
+        transport=httpx.MockTransport(handler),
+    ) as http_client:
+        client = GitHubAppClient(app_id=1, private_key_pem="-", http_client=http_client)
+        posted = await client.post_review(_pr(), _review_result_with_inline())
+
+    assert posted is True
+    assert token_requests == 2
+    assert head_checks == 2
+    assert len(posts) == 1
+    assert any("OLD" in auth for auth in seen_head_auths)
+    assert any("NEW" in auth for auth in seen_head_auths)
+    assert all("NEW" in auth for auth in seen_post_auths)
+
+
+async def test_post_review_skips_when_head_changed_before_posting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """리뷰 생성 중 PR head 가 바뀌면 오래된 commit_id 로 stale 리뷰를 게시하지 않는다."""
+    monkeypatch.setattr(jwt, "encode", lambda *a, **k: "fake.jwt")
+    posts: list[httpx.Request] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path.endswith("/access_tokens"):
+            return httpx.Response(
+                200, json={"token": "ITOK", "expires_at": "2099-01-01T00:00:00Z"}
+            )
+        if req.url.path.endswith("/pulls/1") and req.method == "GET":
+            return httpx.Response(200, json={"head": {"sha": "def"}})
+        if req.url.path.endswith("/pulls/1/reviews") and req.method == "POST":
+            posts.append(req)
+            return httpx.Response(200, json={})
+        return httpx.Response(404)
+
+    async with httpx.AsyncClient(
+        base_url="https://api.github.com",
+        transport=httpx.MockTransport(handler),
+    ) as http_client:
+        client = GitHubAppClient(app_id=1, private_key_pem="-", http_client=http_client)
+        posted = await client.post_review(_pr(), _review_result_with_inline())
+
+    assert posted is False
+    assert posts == []
+
+
 async def test_post_review_422_fallback_refreshes_stale_token(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -319,6 +403,8 @@ async def test_post_review_422_fallback_refreshes_stale_token(
             return httpx.Response(
                 200, json={"token": token, "expires_at": "2099-01-01T00:00:00Z"}
             )
+        if req.url.path.endswith("/pulls/1") and req.method == "GET":
+            return httpx.Response(200, json={"head": {"sha": "abc"}})
         if req.url.path.endswith("/pulls/1/reviews") and req.method == "POST":
             review_posts += 1
             posts.append(req)

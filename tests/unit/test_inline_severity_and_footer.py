@@ -102,6 +102,8 @@ async def capturing_client(
                 return httpx.Response(
                     200, json={"token": "ITOK", "expires_at": "2026-04-22T00:00:00Z"}
                 )
+            if req.url.path.endswith("/pulls/1") and req.method == "GET":
+                return httpx.Response(200, json={"head": {"sha": "abc"}})
             if "/reviews" in req.url.path and req.method == "POST":
                 posts.append(req)
             return httpx.Response(200, json={})

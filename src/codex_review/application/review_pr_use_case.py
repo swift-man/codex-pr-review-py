@@ -151,7 +151,9 @@ class ReviewPullRequestUseCase:
             review_pr.number,
         )
 
-        await self._github.post_review(review_pr, result)
+        posted = await self._github.post_review(review_pr, result)
+        if posted is False:
+            return
 
         # 메타리플라이는 review post 성공 후 별도 단계로 게시. review post 가 실패했으면
         # meta-reply 의 의미 자체가 사라지므로 진행 안 함. 한 건이라도 실패해도 서로
