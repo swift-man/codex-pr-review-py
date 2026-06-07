@@ -11,6 +11,7 @@
 """
 
 import asyncio
+import gc
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -1601,6 +1602,8 @@ async def test_model_limit_diagnostic_comment_is_not_duplicated_concurrently() -
     assert "codex-review:model-limit" in body
     assert "head_sha=abc" in body
     assert github.posted_reviews == []
+    gc.collect()
+    assert len(uc._model_limit_comment_locks) == 0
 
 
 async def test_model_limit_diagnostic_comment_ignores_marker_from_other_author() -> None:

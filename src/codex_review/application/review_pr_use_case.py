@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import weakref
 from collections.abc import Mapping
 from dataclasses import replace
 
@@ -58,7 +59,9 @@ class ReviewPullRequestUseCase:
         self._bot_login = bot_login
         # 같은 프로세스 안에서 동일 PR/head 재실행이 겹칠 때 모델 한도 진단 댓글이
         # 중복 게시되지 않도록 post 경로만 좁게 직렬화한다.
-        self._model_limit_comment_locks: dict[tuple[str, int, str], asyncio.Lock] = {}
+        self._model_limit_comment_locks: weakref.WeakValueDictionary[
+            tuple[str, int, str], asyncio.Lock
+        ] = weakref.WeakValueDictionary()
         self._model_limit_comment_locks_guard = asyncio.Lock()
 
     async def execute(self, pr: PullRequest) -> None:
