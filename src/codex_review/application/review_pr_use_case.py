@@ -56,6 +56,10 @@ class ReviewPullRequestUseCase:
         # allowlist 에서 self-exclusion 에 사용. None 이면 self-exclusion 미적용
         # (단순 bot suffix 검사) — 운영자가 GITHUB_APP_SLUG 를 설정해야만 활성화.
         self._bot_login = bot_login
+        # 같은 프로세스 안에서 동일 PR/head 재실행이 겹칠 때 모델 한도 진단 댓글이
+        # 중복 게시되지 않도록 post 경로만 좁게 직렬화한다.
+        self._model_limit_comment_locks: dict[tuple[str, int, str], asyncio.Lock] = {}
+        self._model_limit_comment_locks_guard = asyncio.Lock()
 
     async def execute(self, pr: PullRequest) -> None:
         token = await self._github.get_installation_token(pr.installation_id)
@@ -312,25 +316,54 @@ class ReviewPullRequestUseCase:
         self,
         pr: PullRequest,
         dump: FileDump,
-        exc: BaseException,
+        exc: Exception,
         *,
         failure_mode: str,
         history: ReviewHistory | None,
     ) -> None:
         is_model_limit = _is_model_limit_error(exc)
-        if is_model_limit and _has_model_limit_comment_for_current_head(
-            history, pr, self._bot_login
-        ):
+        if not is_model_limit or self._bot_login is None:
+            await self._github.post_comment(
+                pr,
+                _engine_failure_comment_body(pr, dump, exc, failure_mode, is_model_limit),
+            )
+            return
+
+        if _has_model_limit_comment_for_current_head(history, pr, self._bot_login):
             logger.info(
                 "skipping duplicate model-limit diagnostic comment for %s#%d at head_sha=%s",
                 pr.repo.full_name, pr.number, pr.head_sha,
             )
             return
 
-        body = _engine_failure_message(pr, dump, exc, failure_mode=failure_mode)
-        if is_model_limit:
-            body = _append_model_limit_comment_marker(body, pr)
-        await self._github.post_comment(pr, body)
+        lock = await self._model_limit_comment_lock(pr)
+        async with lock:
+            latest_history = await self._github.fetch_review_history(
+                pr, pr.installation_id,
+            )
+            if _has_model_limit_comment_for_current_head(
+                latest_history, pr, self._bot_login
+            ):
+                logger.info(
+                    "skipping duplicate model-limit diagnostic comment after refresh "
+                    "for %s#%d at head_sha=%s",
+                    pr.repo.full_name, pr.number, pr.head_sha,
+                )
+                return
+
+            await self._github.post_comment(
+                pr,
+                _engine_failure_comment_body(pr, dump, exc, failure_mode, is_model_limit),
+            )
+
+    async def _model_limit_comment_lock(self, pr: PullRequest) -> asyncio.Lock:
+        key = (pr.repo.full_name, pr.number, pr.head_sha)
+        async with self._model_limit_comment_locks_guard:
+            lock = self._model_limit_comment_locks.get(key)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._model_limit_comment_locks[key] = lock
+            return lock
 
     async def _try_diff_fallback(self, pr: PullRequest) -> FileDump | None:
         """diff-only 모드로 fallback 가능 여부를 판단해 성공 시 새 dump 를 반환."""
@@ -549,7 +582,7 @@ _MODEL_LIMIT_ERROR_PHRASES = (
 )
 
 
-def _is_model_limit_error(exc: BaseException) -> bool:
+def _is_model_limit_error(exc: Exception) -> bool:
     message = str(exc).casefold()
     return any(phrase in message for phrase in _MODEL_LIMIT_ERROR_PHRASES)
 
@@ -560,6 +593,19 @@ def _model_limit_comment_marker(pr: PullRequest) -> str:
 
 def _append_model_limit_comment_marker(body: str, pr: PullRequest) -> str:
     return f"{body}\n\n{_model_limit_comment_marker(pr)}"
+
+
+def _engine_failure_comment_body(
+    pr: PullRequest,
+    dump: FileDump,
+    exc: Exception,
+    failure_mode: str,
+    is_model_limit: bool,
+) -> str:
+    body = _engine_failure_message(pr, dump, exc, failure_mode=failure_mode)
+    if is_model_limit:
+        body = _append_model_limit_comment_marker(body, pr)
+    return body
 
 
 def _has_model_limit_comment_for_current_head(

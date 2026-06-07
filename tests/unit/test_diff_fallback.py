@@ -10,6 +10,7 @@
      diff 까지 넘으면 기존 안내 코멘트 게시 유지
 """
 
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -1367,6 +1368,51 @@ class _HistoryAwareGitHub:
 
 
 @dataclass
+class _ConcurrentModelLimitGitHub:
+    """두 실행이 같은 초기 history 를 보도록 막아 동시 중복 게시 경로를 재현."""
+    bot_login: str = "codex-review-bot[bot]"
+    history: ReviewHistory = field(default_factory=ReviewHistory)
+    posted_reviews: list = field(default_factory=list)
+    posted_comments: list = field(default_factory=list)
+    fetch_calls: int = 0
+    _initial_fetches: int = 0
+    _initial_fetches_ready: asyncio.Event = field(default_factory=asyncio.Event)
+
+    async def fetch_pull_request(self, repo, number, installation_id):
+        raise AssertionError("not used")
+
+    async def post_review(self, pr, result):
+        self.posted_reviews.append((pr, result))
+
+    async def post_comment(self, pr, body):
+        self.posted_comments.append((pr, body))
+        self.history = ReviewHistory(comments=self.history.comments + (
+            ReviewComment(
+                author_login=self.bot_login,
+                kind="issue",
+                body=body,
+                created_at=_dt(2026, 5, 1),
+            ),
+        ))
+
+    async def get_installation_token(self, installation_id):
+        return "tkn"
+
+    async def fetch_review_history(self, pr, installation_id):
+        self.fetch_calls += 1
+        if self.fetch_calls <= 2:
+            self._initial_fetches += 1
+            if self._initial_fetches == 2:
+                self._initial_fetches_ready.set()
+            await self._initial_fetches_ready.wait()
+            return ReviewHistory()
+        return self.history
+
+    async def reply_to_review_comment(self, pr, comment_id, body):
+        raise AssertionError("not used")
+
+
+@dataclass
 class _HistoryEngine:
     """history 가 그대로 전달되는지 캡쳐 + 결과 반환."""
     result: ReviewResult
@@ -1522,6 +1568,38 @@ async def test_model_limit_diagnostic_comment_is_not_duplicated_for_same_head() 
     await uc.execute(_pr(changed=("a.py",), patches={"a.py": "@@\n+x\n"}, head_sha="abc"))
 
     assert github.posted_comments == []
+    assert github.posted_reviews == []
+
+
+async def test_model_limit_diagnostic_comment_is_not_duplicated_concurrently() -> None:
+    """동일 PR/head 재실행이 겹쳐도 락 안에서 최신 history 를 다시 읽어 한 번만 게시한다."""
+    github = _ConcurrentModelLimitGitHub()
+    full_dump = FileDump(
+        entries=(FileEntry(path="a.py", content="x", size_bytes=1, is_changed=True),),
+        total_chars=1,
+        mode=DUMP_MODE_FULL,
+    )
+    engine = _AlwaysFailingEngine(
+        error_msg="Codex ran out of room in the model's context window."
+    )
+    uc = ReviewPullRequestUseCase(
+        github=github,
+        repo_fetcher=_NoopFetcher(),
+        file_collector=_StaticFullCollector(dump=full_dump),
+        engine=engine,
+        max_input_tokens=10_000,
+        diff_context_collector=None,
+        bot_login=github.bot_login,
+    )
+    pr = _pr(changed=("a.py",), patches={"a.py": "@@\n+x\n"}, head_sha="abc")
+
+    await asyncio.gather(uc.execute(pr), uc.execute(pr))
+
+    assert github.fetch_calls == 4
+    assert len(github.posted_comments) == 1
+    _, body = github.posted_comments[0]
+    assert "codex-review:model-limit" in body
+    assert "head_sha=abc" in body
     assert github.posted_reviews == []
 
 
