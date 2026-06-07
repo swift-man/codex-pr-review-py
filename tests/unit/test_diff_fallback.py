@@ -10,9 +10,11 @@
      diff 까지 넘으면 기존 안내 코멘트 게시 유지
 """
 
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from datetime import datetime as _dt
 from pathlib import Path
 
 import pytest
@@ -23,16 +25,18 @@ from codex_review.domain import (
     DUMP_MODE_FULL,
     FileDump,
     FileEntry,
+    MetaReply,
     PullRequest,
     RepoRef,
+    ReviewComment,
     ReviewEvent,
+    ReviewHistory,
     ReviewResult,
     TokenBudget,
 )
 from codex_review.infrastructure.codex_prompt import build_prompt
 from codex_review.infrastructure.diff_context_collector import DiffContextCollector
 from codex_review.interfaces import ReviewEngineError
-
 
 # ---------------------------------------------------------------------------
 # Fixtures / fakes
@@ -43,13 +47,14 @@ def _pr(
     changed: tuple[str, ...] = ("a.py", "b.py"),
     patches: dict[str, str] | None = None,
     diff_right: dict[str, frozenset[int]] | None = None,
+    head_sha: str = "abc",
 ) -> PullRequest:
     return PullRequest(
         repo=RepoRef("o", "r"),
         number=1,
         title="t",
         body="pr body",
-        head_sha="abc",
+        head_sha=head_sha,
         head_ref="feat",
         base_sha="def",
         base_ref="main",
@@ -329,7 +334,8 @@ async def test_diff_collector_reserves_prompt_overhead_from_budget() -> None:
     assert len(dump.entries) + len(dump.budget_trimmed) == 5
 
 
-async def test_diff_collector_early_returns_without_iterating_when_overhead_exceeds_budget() -> None:
+async def test_diff_collector_early_returns_without_iterating_when_overhead_exceeds_budget(
+) -> None:
     """회귀 (gemini PR #17 Minor): 오버헤드가 예산을 이미 넘으면 파일 순회 루프 자체를
     생략하는 early-return 경로를 타야 한다. estimator 가 초기 1회만 호출되고 이후
     호출(오버헤드 재측정·최종 verify) 이 **일어나지 않음** 을 관찰해 단락 여부 확인.
@@ -584,7 +590,12 @@ def test_build_prompt_diff_mode_switches_system_rules() -> None:
     patch_content = "=== PATCH: a.py ===\n@@ -1,1 +1,1 @@\n-old\n+new\n"
     dump = FileDump(
         entries=(
-            FileEntry(path="a.py", content=patch_content, size_bytes=len(patch_content), is_changed=True),
+            FileEntry(
+                path="a.py",
+                content=patch_content,
+                size_bytes=len(patch_content),
+                is_changed=True,
+            ),
         ),
         total_chars=len(patch_content),
         mode=DUMP_MODE_DIFF,
@@ -767,7 +778,8 @@ async def test_use_case_fallback_disabled_returns_to_legacy_behavior(
     assert "예산 초과" in github.posted_comments[0][1]
 
 
-async def test_use_case_does_not_fall_back_when_only_filter_excluded_changed_files_missing() -> None:
+async def test_use_case_does_not_fall_back_when_only_filter_excluded_changed_files_missing(
+) -> None:
     """회귀 (gemini PR #17 Major): 변경 파일이 정책(바이너리/크기) 필터로만 제외된
     경우엔 diff fallback 을 트리거하면 안 된다. 이전 `_changed_missing` 은 filter 와
     budget 을 구분하지 못해 불필요한 강등이 발생했다.
@@ -1326,15 +1338,6 @@ def test_pull_request_diff_patches_external_mutation_does_not_leak() -> None:
 # ---------------------------------------------------------------------------
 
 
-from datetime import datetime as _dt
-
-from codex_review.domain import (
-    MetaReply,
-    ReviewComment,
-    ReviewHistory,
-)
-
-
 @dataclass
 class _HistoryAwareGitHub:
     """history fetch 와 reply_to_review_comment 를 캡쳐하는 더블."""
@@ -1362,6 +1365,51 @@ class _HistoryAwareGitHub:
 
     async def reply_to_review_comment(self, pr, comment_id, body):
         self.replies.append((comment_id, body))
+
+
+@dataclass
+class _ConcurrentModelLimitGitHub:
+    """두 실행이 같은 초기 history 를 보도록 막아 동시 중복 게시 경로를 재현."""
+    bot_login: str = "codex-review-bot[bot]"
+    history: ReviewHistory = field(default_factory=ReviewHistory)
+    posted_reviews: list = field(default_factory=list)
+    posted_comments: list = field(default_factory=list)
+    fetch_calls: int = 0
+    _initial_fetches: int = 0
+    _initial_fetches_ready: asyncio.Event = field(default_factory=asyncio.Event)
+
+    async def fetch_pull_request(self, repo, number, installation_id):
+        raise AssertionError("not used")
+
+    async def post_review(self, pr, result):
+        self.posted_reviews.append((pr, result))
+
+    async def post_comment(self, pr, body):
+        self.posted_comments.append((pr, body))
+        self.history = ReviewHistory(comments=self.history.comments + (
+            ReviewComment(
+                author_login=self.bot_login,
+                kind="issue",
+                body=body,
+                created_at=_dt(2026, 5, 1),
+            ),
+        ))
+
+    async def get_installation_token(self, installation_id):
+        return "tkn"
+
+    async def fetch_review_history(self, pr, installation_id):
+        self.fetch_calls += 1
+        if self.fetch_calls <= 2:
+            self._initial_fetches += 1
+            if self._initial_fetches == 2:
+                self._initial_fetches_ready.set()
+            await self._initial_fetches_ready.wait()
+            return ReviewHistory()
+        return self.history
+
+    async def reply_to_review_comment(self, pr, comment_id, body):
+        raise AssertionError("not used")
 
 
 @dataclass
@@ -1446,6 +1494,238 @@ async def test_use_case_accepts_empty_history_from_infra_after_total_failure() -
     assert seen is not None and seen.is_empty
     # 리뷰 게시는 정상 진행.
     assert len(github.posted_reviews) == 1
+
+
+async def test_model_limit_diagnostic_comment_includes_current_head_marker() -> None:
+    """모델 한도성 실패 댓글에는 PR 상태(head_sha)를 나타내는 hidden marker 를 남긴다.
+
+    이 marker 가 있어야 같은 커밋 상태에서 재실행될 때 같은 limit 댓글을 중복 게시하지
+    않고, 새 커밋으로 head_sha 가 바뀌면 다시 알릴 수 있다.
+    """
+    github = _HistoryAwareGitHub()
+    full_dump = FileDump(
+        entries=(FileEntry(path="a.py", content="x", size_bytes=1, is_changed=True),),
+        total_chars=1,
+        mode=DUMP_MODE_FULL,
+    )
+    engine = _AlwaysFailingEngine(
+        error_msg=(
+            "codex exec failed (rc=1, model=gpt-5.5): ERROR: Codex ran out "
+            "of room in the model's context window."
+        )
+    )
+    uc = ReviewPullRequestUseCase(
+        github=github,
+        repo_fetcher=_NoopFetcher(),
+        file_collector=_StaticFullCollector(dump=full_dump),
+        engine=engine,
+        max_input_tokens=10_000,
+        diff_context_collector=None,
+        bot_login="codex-review-bot[bot]",
+    )
+
+    await uc.execute(_pr(changed=("a.py",), patches={"a.py": "@@\n+x\n"}, head_sha="abc"))
+
+    assert len(github.posted_comments) == 1
+    _, body = github.posted_comments[0]
+    assert "리뷰 엔진 실패" in body
+    assert "codex-review:model-limit" in body
+    assert "head_sha=abc" in body
+
+
+async def test_model_limit_diagnostic_comment_is_not_duplicated_for_same_head() -> None:
+    """같은 head_sha 에 이미 limit 댓글이 있으면 재실행해도 같은 댓글을 다시 달지 않는다."""
+    history = ReviewHistory(comments=(
+        ReviewComment(
+            author_login="codex-review-bot[bot]",
+            kind="issue",
+            body=(
+                "이전 limit 댓글\n\n"
+                "<!-- codex-review:model-limit version=1 head_sha=abc -->"
+            ),
+            created_at=_dt(2026, 5, 1),
+        ),
+    ))
+    github = _HistoryAwareGitHub(history=history)
+    full_dump = FileDump(
+        entries=(FileEntry(path="a.py", content="x", size_bytes=1, is_changed=True),),
+        total_chars=1,
+        mode=DUMP_MODE_FULL,
+    )
+    engine = _AlwaysFailingEngine(
+        error_msg="You've hit your session limit · resets 1:10am (Asia/Seoul)"
+    )
+    uc = ReviewPullRequestUseCase(
+        github=github,
+        repo_fetcher=_NoopFetcher(),
+        file_collector=_StaticFullCollector(dump=full_dump),
+        engine=engine,
+        max_input_tokens=10_000,
+        diff_context_collector=None,
+        bot_login="codex-review-bot[bot]",
+    )
+
+    await uc.execute(_pr(changed=("a.py",), patches={"a.py": "@@\n+x\n"}, head_sha="abc"))
+
+    assert github.posted_comments == []
+    assert github.posted_reviews == []
+
+
+async def test_model_limit_diagnostic_comment_is_not_duplicated_concurrently() -> None:
+    """동일 PR/head 재실행이 겹쳐도 락 안에서 최신 history 를 다시 읽어 한 번만 게시한다."""
+    github = _ConcurrentModelLimitGitHub()
+    full_dump = FileDump(
+        entries=(FileEntry(path="a.py", content="x", size_bytes=1, is_changed=True),),
+        total_chars=1,
+        mode=DUMP_MODE_FULL,
+    )
+    engine = _AlwaysFailingEngine(
+        error_msg="Codex ran out of room in the model's context window."
+    )
+    uc = ReviewPullRequestUseCase(
+        github=github,
+        repo_fetcher=_NoopFetcher(),
+        file_collector=_StaticFullCollector(dump=full_dump),
+        engine=engine,
+        max_input_tokens=10_000,
+        diff_context_collector=None,
+        bot_login=github.bot_login,
+    )
+    pr = _pr(changed=("a.py",), patches={"a.py": "@@\n+x\n"}, head_sha="abc")
+
+    await asyncio.gather(uc.execute(pr), uc.execute(pr))
+
+    assert github.fetch_calls == 4
+    assert len(github.posted_comments) == 1
+    _, body = github.posted_comments[0]
+    assert "codex-review:model-limit" in body
+    assert "head_sha=abc" in body
+    assert github.posted_reviews == []
+
+
+async def test_model_limit_diagnostic_comment_ignores_marker_from_other_author() -> None:
+    """다른 작성자가 같은 marker 를 남겨도 실제 모델 한도 실패 댓글을 생략하지 않는다."""
+    history = ReviewHistory(comments=(
+        ReviewComment(
+            author_login="alice",
+            kind="issue",
+            body=(
+                "marker 를 인용한 사람 댓글\n\n"
+                "<!-- codex-review:model-limit version=1 head_sha=abc -->"
+            ),
+            created_at=_dt(2026, 5, 1),
+        ),
+        ReviewComment(
+            author_login="gemini-pr-review-bot[bot]",
+            kind="issue",
+            body=(
+                "다른 봇 marker\n\n"
+                "<!-- codex-review:model-limit version=1 head_sha=abc -->"
+            ),
+            created_at=_dt(2026, 5, 1),
+        ),
+    ))
+    github = _HistoryAwareGitHub(history=history)
+    full_dump = FileDump(
+        entries=(FileEntry(path="a.py", content="x", size_bytes=1, is_changed=True),),
+        total_chars=1,
+        mode=DUMP_MODE_FULL,
+    )
+    engine = _AlwaysFailingEngine(
+        error_msg="Codex ran out of room in the model's context window."
+    )
+    uc = ReviewPullRequestUseCase(
+        github=github,
+        repo_fetcher=_NoopFetcher(),
+        file_collector=_StaticFullCollector(dump=full_dump),
+        engine=engine,
+        max_input_tokens=10_000,
+        diff_context_collector=None,
+        bot_login="codex-review-bot[bot]",
+    )
+
+    await uc.execute(_pr(changed=("a.py",), patches={"a.py": "@@\n+x\n"}, head_sha="abc"))
+
+    assert len(github.posted_comments) == 1
+    _, body = github.posted_comments[0]
+    assert "codex-review:model-limit" in body
+    assert "head_sha=abc" in body
+
+
+async def test_model_limit_diagnostic_comment_posts_when_bot_login_unknown() -> None:
+    """bot_login 을 모르면 marker 작성자 검증이 불가능하므로 중복 억제를 하지 않는다."""
+    history = ReviewHistory(comments=(
+        ReviewComment(
+            author_login="codex-review-bot[bot]",
+            kind="issue",
+            body=(
+                "이전 limit 댓글\n\n"
+                "<!-- codex-review:model-limit version=1 head_sha=abc -->"
+            ),
+            created_at=_dt(2026, 5, 1),
+        ),
+    ))
+    github = _HistoryAwareGitHub(history=history)
+    full_dump = FileDump(
+        entries=(FileEntry(path="a.py", content="x", size_bytes=1, is_changed=True),),
+        total_chars=1,
+        mode=DUMP_MODE_FULL,
+    )
+    engine = _AlwaysFailingEngine(
+        error_msg="Codex ran out of room in the model's context window."
+    )
+    uc = ReviewPullRequestUseCase(
+        github=github,
+        repo_fetcher=_NoopFetcher(),
+        file_collector=_StaticFullCollector(dump=full_dump),
+        engine=engine,
+        max_input_tokens=10_000,
+        diff_context_collector=None,
+    )
+
+    await uc.execute(_pr(changed=("a.py",), patches={"a.py": "@@\n+x\n"}, head_sha="abc"))
+
+    assert len(github.posted_comments) == 1
+
+
+async def test_model_limit_diagnostic_comment_posts_again_after_head_changes() -> None:
+    """새 커밋으로 PR head_sha 가 바뀌면 이전 limit marker 가 있어도 다시 알린다."""
+    history = ReviewHistory(comments=(
+        ReviewComment(
+            author_login="codex-review-bot[bot]",
+            kind="issue",
+            body=(
+                "이전 limit 댓글\n\n"
+                "<!-- codex-review:model-limit version=1 head_sha=abc -->"
+            ),
+            created_at=_dt(2026, 5, 1),
+        ),
+    ))
+    github = _HistoryAwareGitHub(history=history)
+    full_dump = FileDump(
+        entries=(FileEntry(path="a.py", content="x", size_bytes=1, is_changed=True),),
+        total_chars=1,
+        mode=DUMP_MODE_FULL,
+    )
+    engine = _AlwaysFailingEngine(
+        error_msg="context_length_exceeded while preparing review input"
+    )
+    uc = ReviewPullRequestUseCase(
+        github=github,
+        repo_fetcher=_NoopFetcher(),
+        file_collector=_StaticFullCollector(dump=full_dump),
+        engine=engine,
+        max_input_tokens=10_000,
+        diff_context_collector=None,
+        bot_login="codex-review-bot[bot]",
+    )
+
+    await uc.execute(_pr(changed=("a.py",), patches={"a.py": "@@\n+x\n"}, head_sha="def"))
+
+    assert len(github.posted_comments) == 1
+    _, body = github.posted_comments[0]
+    assert "codex-review:model-limit" in body
+    assert "head_sha=def" in body
 
 
 async def test_use_case_posts_meta_replies_after_review() -> None:

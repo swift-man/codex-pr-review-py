@@ -56,6 +56,10 @@ class ReviewPullRequestUseCase:
         # allowlist 에서 self-exclusion 에 사용. None 이면 self-exclusion 미적용
         # (단순 bot suffix 검사) — 운영자가 GITHUB_APP_SLUG 를 설정해야만 활성화.
         self._bot_login = bot_login
+        # 같은 프로세스 안에서 동일 PR/head 재실행이 겹칠 때 모델 한도 진단 댓글이
+        # 중복 게시되지 않도록 post 경로만 좁게 직렬화한다.
+        self._model_limit_comment_locks: dict[tuple[str, int, str], asyncio.Lock] = {}
+        self._model_limit_comment_locks_guard = asyncio.Lock()
 
     async def execute(self, pr: PullRequest) -> None:
         token = await self._github.get_installation_token(pr.installation_id)
@@ -253,11 +257,12 @@ class ReviewPullRequestUseCase:
                     "engine failed in preemptive diff-only mode for %s#%d — no further fallback",
                     pr.repo.full_name, pr.number,
                 )
-                await self._github.post_comment(
+                await self._post_engine_failure_comment(
                     pr,
-                    _engine_failure_message(
-                        pr, dump, exc, failure_mode=_FAILURE_DIFF_PREEMPTIVE,
-                    ),
+                    dump,
+                    exc,
+                    failure_mode=_FAILURE_DIFF_PREEMPTIVE,
+                    history=history,
                 )
                 return None
 
@@ -275,11 +280,12 @@ class ReviewPullRequestUseCase:
                     "engine failed and diff fallback unavailable for %s#%d",
                     pr.repo.full_name, pr.number,
                 )
-                await self._github.post_comment(
+                await self._post_engine_failure_comment(
                     pr,
-                    _engine_failure_message(
-                        pr, dump, exc, failure_mode=_FAILURE_FULL_ONLY,
-                    ),
+                    dump,
+                    exc,
+                    failure_mode=_FAILURE_FULL_ONLY,
+                    history=history,
                 )
                 return None
             try:
@@ -289,12 +295,12 @@ class ReviewPullRequestUseCase:
                     "engine retry in diff mode also failed for %s#%d",
                     pr.repo.full_name, pr.number,
                 )
-                await self._github.post_comment(
+                await self._post_engine_failure_comment(
                     pr,
-                    _engine_failure_message(
-                        pr, fallback_dump, retry_exc,
-                        failure_mode=_FAILURE_FULL_THEN_DIFF,
-                    ),
+                    fallback_dump,
+                    retry_exc,
+                    failure_mode=_FAILURE_FULL_THEN_DIFF,
+                    history=history,
                 )
                 return None
             dump = fallback_dump  # 이후 배지 결정 용
@@ -305,6 +311,59 @@ class ReviewPullRequestUseCase:
         if dump.mode == DUMP_MODE_DIFF:
             result = _prepend_diff_scope_badge(result, dump, scope_reason)
         return result
+
+    async def _post_engine_failure_comment(
+        self,
+        pr: PullRequest,
+        dump: FileDump,
+        exc: Exception,
+        *,
+        failure_mode: str,
+        history: ReviewHistory | None,
+    ) -> None:
+        is_model_limit = _is_model_limit_error(exc)
+        if not is_model_limit or self._bot_login is None:
+            await self._github.post_comment(
+                pr,
+                _engine_failure_comment_body(pr, dump, exc, failure_mode, is_model_limit),
+            )
+            return
+
+        if _has_model_limit_comment_for_current_head(history, pr, self._bot_login):
+            logger.info(
+                "skipping duplicate model-limit diagnostic comment for %s#%d at head_sha=%s",
+                pr.repo.full_name, pr.number, pr.head_sha,
+            )
+            return
+
+        lock = await self._model_limit_comment_lock(pr)
+        async with lock:
+            latest_history = await self._github.fetch_review_history(
+                pr, pr.installation_id,
+            )
+            if _has_model_limit_comment_for_current_head(
+                latest_history, pr, self._bot_login
+            ):
+                logger.info(
+                    "skipping duplicate model-limit diagnostic comment after refresh "
+                    "for %s#%d at head_sha=%s",
+                    pr.repo.full_name, pr.number, pr.head_sha,
+                )
+                return
+
+            await self._github.post_comment(
+                pr,
+                _engine_failure_comment_body(pr, dump, exc, failure_mode, is_model_limit),
+            )
+
+    async def _model_limit_comment_lock(self, pr: PullRequest) -> asyncio.Lock:
+        key = (pr.repo.full_name, pr.number, pr.head_sha)
+        async with self._model_limit_comment_locks_guard:
+            lock = self._model_limit_comment_locks.get(key)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._model_limit_comment_locks[key] = lock
+            return lock
 
     async def _try_diff_fallback(self, pr: PullRequest) -> FileDump | None:
         """diff-only 모드로 fallback 가능 여부를 판단해 성공 시 새 dump 를 반환."""
@@ -505,6 +564,65 @@ def _make_code_fence_safe(text: str) -> str:
     파서엔 더 이상 ``` 로 인식되지 않게 만든다.
     """
     return text.replace("```", "`\u200b`\u200b`")
+
+
+_MODEL_LIMIT_COMMENT_MARKER_PREFIX = "<!-- codex-review:model-limit"
+
+_MODEL_LIMIT_ERROR_PHRASES = (
+    "context window",
+    "context length",
+    "context_length_exceeded",
+    "maximum context",
+    "too many tokens",
+    "token limit",
+    "input is too long",
+    "ran out of room",
+    "session limit",
+    "usage limit",
+)
+
+
+def _is_model_limit_error(exc: Exception) -> bool:
+    message = str(exc).casefold()
+    return any(phrase in message for phrase in _MODEL_LIMIT_ERROR_PHRASES)
+
+
+def _model_limit_comment_marker(pr: PullRequest) -> str:
+    return f"{_MODEL_LIMIT_COMMENT_MARKER_PREFIX} version=1 head_sha={pr.head_sha} -->"
+
+
+def _append_model_limit_comment_marker(body: str, pr: PullRequest) -> str:
+    return f"{body}\n\n{_model_limit_comment_marker(pr)}"
+
+
+def _engine_failure_comment_body(
+    pr: PullRequest,
+    dump: FileDump,
+    exc: Exception,
+    failure_mode: str,
+    is_model_limit: bool,
+) -> str:
+    body = _engine_failure_message(pr, dump, exc, failure_mode=failure_mode)
+    if is_model_limit:
+        body = _append_model_limit_comment_marker(body, pr)
+    return body
+
+
+def _has_model_limit_comment_for_current_head(
+    history: ReviewHistory | None,
+    pr: PullRequest,
+    bot_login: str | None,
+) -> bool:
+    if history is None or history.is_empty or bot_login is None:
+        return False
+    needle = f"{_MODEL_LIMIT_COMMENT_MARKER_PREFIX} version=1 head_sha={pr.head_sha}"
+    bot_login_cf = bot_login.casefold()
+    return any(
+        comment.kind == "issue"
+        and comment.author_login.casefold() == bot_login_cf
+        and needle in comment.body
+        for comment in history.comments
+    )
 
 
 # 엔진 실패 시도 경로 분류 — 진단 코멘트가 운영자에게 어떤 시도가 있었는지 정확히
