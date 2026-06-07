@@ -288,12 +288,14 @@ class GitHubAppClient:
             diff_patches=diff_patches,
         )
 
-    async def post_review(self, pr: PullRequest, result: ReviewResult) -> None:
+    async def post_review(self, pr: PullRequest, result: ReviewResult) -> bool:
         if self._dry_run:
             logger.info("DRY_RUN — review not posted: %s#%d", pr.repo.full_name, pr.number)
-            return
+            return False
 
         path = f"/repos/{pr.repo.full_name}/pulls/{pr.number}/reviews"
+        if not await self._is_current_pull_head(pr):
+            return False
 
         # commit_id 를 명시해야 리뷰가 "이 head SHA 시점"에 고정된다. 생략하면 최신 SHA 기준으로
         # 붙어 라인 번호 오정렬이 발생할 수 있다.
@@ -311,6 +313,7 @@ class GitHubAppClient:
                 path,
                 body=payload,
             )
+            return True
         except httpx.HTTPStatusError as exc:
             # 방어선: use-case 단계의 diff 필터가 있음에도 422 가 나면 인라인 코멘트를 포기하고
             # 본문만 재게시한다. 리뷰 전체를 포기하는 것보다 낫다.
@@ -332,6 +335,8 @@ class GitHubAppClient:
                     retry_result.render_body(), self._review_model_label
                 )
                 payload["comments"] = []
+                if not await self._is_current_pull_head(pr):
+                    return False
                 await self._request_with_installation_token_retry(
                     pr.installation_id,
                     f"post_review fallback {pr.repo.full_name}#{pr.number}",
@@ -339,8 +344,42 @@ class GitHubAppClient:
                     path,
                     body=payload,
                 )
+                return True
             else:
                 raise
+
+    async def _is_current_pull_head(self, pr: PullRequest) -> bool:
+        current_head_sha = await self._fetch_current_pull_head_sha(pr)
+        if current_head_sha == pr.head_sha:
+            return True
+        logger.info(
+            "skipping review post for %s#%d — PR head changed from %s to %s",
+            pr.repo.full_name,
+            pr.number,
+            pr.head_sha,
+            current_head_sha,
+        )
+        return False
+
+    async def _fetch_current_pull_head_sha(self, pr: PullRequest) -> str:
+        data = await self._request_with_installation_token_retry(
+            pr.installation_id,
+            f"verify_pull_head_before_review_post {pr.repo.full_name}#{pr.number}",
+            "GET",
+            f"/repos/{pr.repo.full_name}/pulls/{pr.number}",
+        )
+        if not isinstance(data, dict):
+            raise RuntimeError(
+                f"GitHub pull request response was not an object for "
+                f"{pr.repo.full_name}#{pr.number}"
+            )
+        head = data.get("head")
+        if not isinstance(head, dict) or not head.get("sha"):
+            raise RuntimeError(
+                f"GitHub pull request response did not include head.sha for "
+                f"{pr.repo.full_name}#{pr.number}"
+            )
+        return str(head["sha"])
 
     async def post_comment(self, pr: PullRequest, body: str) -> None:
         if self._dry_run:

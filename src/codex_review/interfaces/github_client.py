@@ -18,7 +18,7 @@ class GitHubClient(Protocol):
         self,
         pr: PullRequest,
         result: ReviewResult,
-    ) -> None: ...
+    ) -> bool: ...
 
     async def post_comment(
         self,
