@@ -318,7 +318,9 @@ class ReviewPullRequestUseCase:
         history: ReviewHistory | None,
     ) -> None:
         is_model_limit = _is_model_limit_error(exc)
-        if is_model_limit and _has_model_limit_comment_for_current_head(history, pr):
+        if is_model_limit and _has_model_limit_comment_for_current_head(
+            history, pr, self._bot_login
+        ):
             logger.info(
                 "skipping duplicate model-limit diagnostic comment for %s#%d at head_sha=%s",
                 pr.repo.full_name, pr.number, pr.head_sha,
@@ -563,11 +565,18 @@ def _append_model_limit_comment_marker(body: str, pr: PullRequest) -> str:
 def _has_model_limit_comment_for_current_head(
     history: ReviewHistory | None,
     pr: PullRequest,
+    bot_login: str | None,
 ) -> bool:
-    if history is None or history.is_empty:
+    if history is None or history.is_empty or bot_login is None:
         return False
     needle = f"{_MODEL_LIMIT_COMMENT_MARKER_PREFIX} version=1 head_sha={pr.head_sha}"
-    return any(needle in comment.body for comment in history.comments)
+    bot_login_cf = bot_login.casefold()
+    return any(
+        comment.kind == "issue"
+        and comment.author_login.casefold() == bot_login_cf
+        and needle in comment.body
+        for comment in history.comments
+    )
 
 
 # 엔진 실패 시도 경로 분류 — 진단 코멘트가 운영자에게 어떤 시도가 있었는지 정확히

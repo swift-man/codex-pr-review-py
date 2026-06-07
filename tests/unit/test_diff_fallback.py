@@ -1475,6 +1475,7 @@ async def test_model_limit_diagnostic_comment_includes_current_head_marker() -> 
         engine=engine,
         max_input_tokens=10_000,
         diff_context_collector=None,
+        bot_login="codex-review-bot[bot]",
     )
 
     await uc.execute(_pr(changed=("a.py",), patches={"a.py": "@@\n+x\n"}, head_sha="abc"))
@@ -1515,12 +1516,98 @@ async def test_model_limit_diagnostic_comment_is_not_duplicated_for_same_head() 
         engine=engine,
         max_input_tokens=10_000,
         diff_context_collector=None,
+        bot_login="codex-review-bot[bot]",
     )
 
     await uc.execute(_pr(changed=("a.py",), patches={"a.py": "@@\n+x\n"}, head_sha="abc"))
 
     assert github.posted_comments == []
     assert github.posted_reviews == []
+
+
+async def test_model_limit_diagnostic_comment_ignores_marker_from_other_author() -> None:
+    """다른 작성자가 같은 marker 를 남겨도 실제 모델 한도 실패 댓글을 생략하지 않는다."""
+    history = ReviewHistory(comments=(
+        ReviewComment(
+            author_login="alice",
+            kind="issue",
+            body=(
+                "marker 를 인용한 사람 댓글\n\n"
+                "<!-- codex-review:model-limit version=1 head_sha=abc -->"
+            ),
+            created_at=_dt(2026, 5, 1),
+        ),
+        ReviewComment(
+            author_login="gemini-pr-review-bot[bot]",
+            kind="issue",
+            body=(
+                "다른 봇 marker\n\n"
+                "<!-- codex-review:model-limit version=1 head_sha=abc -->"
+            ),
+            created_at=_dt(2026, 5, 1),
+        ),
+    ))
+    github = _HistoryAwareGitHub(history=history)
+    full_dump = FileDump(
+        entries=(FileEntry(path="a.py", content="x", size_bytes=1, is_changed=True),),
+        total_chars=1,
+        mode=DUMP_MODE_FULL,
+    )
+    engine = _AlwaysFailingEngine(
+        error_msg="Codex ran out of room in the model's context window."
+    )
+    uc = ReviewPullRequestUseCase(
+        github=github,
+        repo_fetcher=_NoopFetcher(),
+        file_collector=_StaticFullCollector(dump=full_dump),
+        engine=engine,
+        max_input_tokens=10_000,
+        diff_context_collector=None,
+        bot_login="codex-review-bot[bot]",
+    )
+
+    await uc.execute(_pr(changed=("a.py",), patches={"a.py": "@@\n+x\n"}, head_sha="abc"))
+
+    assert len(github.posted_comments) == 1
+    _, body = github.posted_comments[0]
+    assert "codex-review:model-limit" in body
+    assert "head_sha=abc" in body
+
+
+async def test_model_limit_diagnostic_comment_posts_when_bot_login_unknown() -> None:
+    """bot_login 을 모르면 marker 작성자 검증이 불가능하므로 중복 억제를 하지 않는다."""
+    history = ReviewHistory(comments=(
+        ReviewComment(
+            author_login="codex-review-bot[bot]",
+            kind="issue",
+            body=(
+                "이전 limit 댓글\n\n"
+                "<!-- codex-review:model-limit version=1 head_sha=abc -->"
+            ),
+            created_at=_dt(2026, 5, 1),
+        ),
+    ))
+    github = _HistoryAwareGitHub(history=history)
+    full_dump = FileDump(
+        entries=(FileEntry(path="a.py", content="x", size_bytes=1, is_changed=True),),
+        total_chars=1,
+        mode=DUMP_MODE_FULL,
+    )
+    engine = _AlwaysFailingEngine(
+        error_msg="Codex ran out of room in the model's context window."
+    )
+    uc = ReviewPullRequestUseCase(
+        github=github,
+        repo_fetcher=_NoopFetcher(),
+        file_collector=_StaticFullCollector(dump=full_dump),
+        engine=engine,
+        max_input_tokens=10_000,
+        diff_context_collector=None,
+    )
+
+    await uc.execute(_pr(changed=("a.py",), patches={"a.py": "@@\n+x\n"}, head_sha="abc"))
+
+    assert len(github.posted_comments) == 1
 
 
 async def test_model_limit_diagnostic_comment_posts_again_after_head_changes() -> None:
@@ -1552,6 +1639,7 @@ async def test_model_limit_diagnostic_comment_posts_again_after_head_changes() -
         engine=engine,
         max_input_tokens=10_000,
         diff_context_collector=None,
+        bot_login="codex-review-bot[bot]",
     )
 
     await uc.execute(_pr(changed=("a.py",), patches={"a.py": "@@\n+x\n"}, head_sha="def"))
