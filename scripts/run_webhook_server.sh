@@ -28,6 +28,166 @@ source "$VENV_DIR/bin/activate"
 HOST="${HOST:-127.0.0.1}"
 PORT="${PORT:-8000}"
 
+find_existing_server_pids() {
+    if ! command -v lsof >/dev/null 2>&1; then
+        echo "Warning: lsof is not installed; cannot preflight existing server on port $PORT" >&2
+        return 0
+    fi
+
+    lsof -nP -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null | sort -u || true
+}
+
+is_codex_review_server() {
+    local pid="$1"
+    local command_line
+    command_line="$(process_command_line "$pid")"
+    [[ "$command_line" == *"codex_review.main:app_factory"* ]]
+}
+
+process_command_line() {
+    local pid="$1"
+    ps -ww -p "$pid" -o command= 2>/dev/null || true
+}
+
+process_identity() {
+    local pid="$1"
+    ps -ww -p "$pid" -o lstart= -o command= 2>/dev/null || true
+}
+
+is_process_running() {
+    local pid="$1"
+    local stat
+    stat="$(ps -p "$pid" -o stat= 2>/dev/null | tr -d '[:space:]' || true)"
+    [[ -n "$stat" && "$stat" != Z* ]]
+}
+
+collect_descendant_pids() {
+    local parent="$1"
+    local child
+
+    while IFS= read -r child; do
+        [[ -n "$child" ]] || continue
+        echo "$child"
+        collect_descendant_pids "$child"
+    done < <(pgrep -P "$parent" 2>/dev/null || true)
+}
+
+dedupe_pids() {
+    awk 'NF && !seen[$0]++'
+}
+
+related_server_pids() {
+    local pid
+    for pid in "$@"; do
+        echo "$pid"
+        collect_descendant_pids "$pid"
+    done | dedupe_pids
+}
+
+snapshot_processes() {
+    local pid
+    local identity
+    for pid in "$@"; do
+        identity="$(process_identity "$pid")"
+        [[ -n "$identity" ]] && printf '%s\t%s\n' "$pid" "$identity"
+    done
+}
+
+matching_snapshot_pids() {
+    local pid
+    local identity
+    local current_identity
+    while IFS=$'\t' read -r pid identity; do
+        [[ -n "$pid" && -n "$identity" ]] || continue
+        current_identity="$(process_identity "$pid")"
+        [[ "$current_identity" == "$identity" ]] && echo "$pid"
+    done
+}
+
+wait_for_stop() {
+    local all_stopped
+    local pid
+    for _ in {1..20}; do
+        all_stopped=1
+        for pid in "$@"; do
+            if is_process_running "$pid"; then
+                all_stopped=0
+                break
+            fi
+        done
+        [[ "$all_stopped" -eq 1 ]] && return 0
+        sleep 0.5
+    done
+
+    for pid in "$@"; do
+        is_process_running "$pid" && return 1
+    done
+    return 0
+}
+
+stop_existing_server() {
+    local pids=()
+    local related=()
+    local current_pids=()
+    local term_snapshot=""
+    local pid
+
+    while IFS= read -r pid; do
+        [[ -n "$pid" ]] && pids+=("$pid")
+    done < <(find_existing_server_pids)
+
+    [[ "${#pids[@]}" -eq 0 ]] && return 0
+
+    for pid in "${pids[@]}"; do
+        if ! is_codex_review_server "$pid"; then
+            echo "Port $PORT is already used by a non codex-review process (pid: $pid)" >&2
+            echo "Stop it manually or choose another PORT." >&2
+            exit 1
+        fi
+    done
+
+    while IFS= read -r pid; do
+        [[ -n "$pid" ]] && related+=("$pid")
+    done < <(related_server_pids "${pids[@]}")
+    term_snapshot="$(snapshot_processes "${related[@]}")"
+
+    echo "Stopping existing codex-review server on $HOST:$PORT (pid: ${related[*]})"
+    kill -TERM "${related[@]}" 2>/dev/null || true
+    if wait_for_stop "${related[@]}"; then
+        return 0
+    fi
+
+    while IFS= read -r pid; do
+        [[ -n "$pid" ]] && current_pids+=("$pid")
+    done < <(find_existing_server_pids)
+
+    for pid in "${current_pids[@]}"; do
+        if ! is_codex_review_server "$pid"; then
+            echo "Port $PORT is now used by a non codex-review process (pid: $pid)" >&2
+            echo "Stop it manually or choose another PORT." >&2
+            exit 1
+        fi
+    done
+
+    related=()
+    while IFS= read -r pid; do
+        [[ -n "$pid" ]] && related+=("$pid")
+    done < <(
+        {
+            matching_snapshot_pids <<< "$term_snapshot"
+            related_server_pids "${current_pids[@]}"
+        } | dedupe_pids
+    )
+
+    [[ "${#related[@]}" -eq 0 ]] && return 0
+
+    echo "Existing server did not stop after 10s; sending SIGKILL (pid: ${related[*]})" >&2
+    kill -KILL "${related[@]}" 2>/dev/null || true
+    wait_for_stop "${related[@]}" || true
+}
+
+stop_existing_server
+
 exec uvicorn codex_review.main:app_factory \
     --factory \
     --host "$HOST" \

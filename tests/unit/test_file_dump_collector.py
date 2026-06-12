@@ -1,9 +1,12 @@
+import asyncio
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from codex_review.domain import FileEntry, TokenBudget
+from codex_review.infrastructure import file_dump_collector
 from codex_review.infrastructure.codex_prompt import _format_file
 from codex_review.infrastructure.file_dump_collector import (
     FileDumpCollector,
@@ -324,6 +327,40 @@ async def test_package_resolved_is_skipped(repo: Path) -> None:
     collector = FileDumpCollector(file_max_bytes=1024 * 1024)
     dump = await collector.collect(repo, changed_files=(), budget=TokenBudget(10_000))
     assert "Package.resolved" not in [e.path for e in dump.entries]
+
+
+async def test_git_ls_files_times_out_and_reaps_process(
+    monkeypatch: pytest.MonkeyPatch,
+    repo: Path,
+) -> None:
+    reaped: list[object] = []
+
+    class _HangingProc:
+        returncode: int | None = None
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            await asyncio.Event().wait()
+            return b"", b""  # pragma: no cover - 도달 불가
+
+    async def fake_create(*_args: Any, **_kwargs: Any) -> _HangingProc:
+        return _HangingProc()
+
+    async def fake_kill_and_reap(proc: object) -> None:
+        reaped.append(proc)
+
+    monkeypatch.setattr(
+        "codex_review.infrastructure.file_dump_collector.asyncio.create_subprocess_exec",
+        fake_create,
+    )
+    monkeypatch.setattr(
+        "codex_review.infrastructure.file_dump_collector.kill_and_reap",
+        fake_kill_and_reap,
+    )
+
+    with pytest.raises(RuntimeError, match="git ls-files timed out after 0.01s"):
+        await file_dump_collector._git_ls_files(repo, timeout_sec=0.01)
+
+    assert reaped, "timeout 시 git ls-files 프로세스를 회수해야 한다"
 
 
 async def test_whitelisted_config_bypasses_file_max_bytes(repo: Path) -> None:

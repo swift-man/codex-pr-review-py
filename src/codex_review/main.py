@@ -45,10 +45,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 dry_run=settings.dry_run,
                 review_model_label=settings.codex_model,
             )
-            repo_fetcher = GitRepoFetcher(cache_dir=settings.repo_cache_dir)
+            repo_fetcher = GitRepoFetcher(
+                cache_dir=settings.repo_cache_dir,
+                git_timeout_sec=settings.git_timeout_sec,
+            )
             collector = FileDumpCollector(
                 file_max_bytes=settings.file_max_bytes,
                 data_file_max_bytes=settings.data_file_max_bytes,
+                git_timeout_sec=settings.git_timeout_sec,
             )
             engine = CodexCliEngine(
                 binary=settings.codex_bin,

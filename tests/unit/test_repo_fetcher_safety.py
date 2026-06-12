@@ -43,7 +43,13 @@ async def test_same_repo_sessions_serialize_across_entire_block(
     checkouts_started: list[str] = []
     release = asyncio.Event()
 
-    async def fake_run(cmd: list[str], *, check: bool = True) -> None:
+    async def fake_run(
+        cmd: list[str],
+        *,
+        check: bool = True,
+        timeout_sec: float = git_repo_fetcher.DEFAULT_GIT_TIMEOUT_SEC,
+    ) -> None:
+        _ = (check, timeout_sec)
         if "fetch" in cmd:
             checkouts_started.append(_extract_repo_key(cmd, tmp_path))
 
@@ -85,7 +91,13 @@ async def test_different_repos_sessions_run_in_parallel(
     peak = 0
     release = asyncio.Event()
 
-    async def fake_run(cmd: list[str], *, check: bool = True) -> None:
+    async def fake_run(
+        cmd: list[str],
+        *,
+        check: bool = True,
+        timeout_sec: float = git_repo_fetcher.DEFAULT_GIT_TIMEOUT_SEC,
+    ) -> None:
+        _ = (check, timeout_sec)
         nonlocal in_flight, peak
         if "fetch" in cmd:
             in_flight += 1
@@ -124,13 +136,19 @@ async def test_remote_url_is_restored_even_when_fetch_fails(
     """fetch 에서 예외가 나도 `remote set-url ... <original>` 이 호출돼 토큰이 `.git/config`
     에 남지 않아야 한다.
     """
-    restore_calls: list[list[str]] = []
+    restore_calls: list[tuple[list[str], bool]] = []
 
-    async def fake_run(cmd: list[str], *, check: bool = True) -> None:
+    async def fake_run(
+        cmd: list[str],
+        *,
+        check: bool = True,
+        timeout_sec: float = git_repo_fetcher.DEFAULT_GIT_TIMEOUT_SEC,
+    ) -> None:
+        _ = timeout_sec
         if "fetch" in cmd:
             raise RuntimeError("boom")
-        if "set-url" in cmd and not check:
-            restore_calls.append(cmd)
+        if "set-url" in cmd and cmd[-1] == "https://github.com/o/r.git":
+            restore_calls.append((cmd, check))
 
     monkeypatch.setattr(git_repo_fetcher, "_run", fake_run)
     repo_dir = tmp_path / "acme" / "a" / ".git"
@@ -143,9 +161,80 @@ async def test_remote_url_is_restored_even_when_fetch_fails(
             pass
 
     assert restore_calls, "fetch 실패 후에도 remote URL 복구가 호출돼야 한다"
-    restored_url = restore_calls[-1][-1]
+    restored_cmd, restore_check = restore_calls[-1]
+    restored_url = restored_cmd[-1]
+    assert restore_check is True
     assert "secret-token" not in restored_url
     assert restored_url == "https://github.com/o/r.git"
+
+
+@pytest.mark.parametrize(
+    "restore_exc",
+    [
+        RuntimeError("restore boom"),
+        FileNotFoundError("git missing"),
+    ],
+)
+async def test_remote_url_restore_failure_preserves_original_checkout_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    restore_exc: Exception,
+) -> None:
+    async def fake_run(
+        cmd: list[str],
+        *,
+        check: bool = True,
+        timeout_sec: float = git_repo_fetcher.DEFAULT_GIT_TIMEOUT_SEC,
+    ) -> None:
+        _ = timeout_sec
+        if "fetch" in cmd:
+            raise RuntimeError("fetch boom")
+        if "set-url" in cmd and cmd[-1] == "https://github.com/o/r.git":
+            raise restore_exc
+
+    monkeypatch.setattr(git_repo_fetcher, "_run", fake_run)
+    (tmp_path / "acme" / "a" / ".git").mkdir(parents=True)
+    fetcher = git_repo_fetcher.GitRepoFetcher(cache_dir=tmp_path)
+
+    with (
+        caplog.at_level(logging.WARNING, logger="codex_review.infrastructure.git_repo_fetcher"),
+        pytest.raises(RuntimeError, match="fetch boom"),
+    ):
+        async with fetcher.session(_pr("acme", "a"), "secret-token"):
+            pass
+
+    assert "failed to restore origin URL after checkout failure for acme/a" in caplog.text
+    assert str(restore_exc) in caplog.text
+
+
+@pytest.mark.parametrize(
+    "restore_exc",
+    [
+        RuntimeError("restore boom"),
+        FileNotFoundError("git missing"),
+    ],
+)
+async def test_remote_url_restore_failure_raises_without_checkout_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, restore_exc: Exception
+) -> None:
+    async def fake_run(
+        cmd: list[str],
+        *,
+        check: bool = True,
+        timeout_sec: float = git_repo_fetcher.DEFAULT_GIT_TIMEOUT_SEC,
+    ) -> None:
+        _ = timeout_sec
+        if "set-url" in cmd and cmd[-1] == "https://github.com/o/r.git":
+            raise restore_exc
+
+    monkeypatch.setattr(git_repo_fetcher, "_run", fake_run)
+    (tmp_path / "acme" / "a" / ".git").mkdir(parents=True)
+    fetcher = git_repo_fetcher.GitRepoFetcher(cache_dir=tmp_path)
+
+    with pytest.raises(type(restore_exc), match=str(restore_exc)):
+        async with fetcher.session(_pr("acme", "a"), "secret-token"):
+            pass
 
 
 async def test_run_kills_subprocess_and_reraises_on_cancel(
@@ -197,16 +286,56 @@ async def test_run_kills_subprocess_and_reraises_on_cancel(
     assert wait_calls, "취소 시 proc.wait() 로 수거까지 이뤄져야 한다"
 
 
+async def test_run_times_out_and_reaps_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """git 명령이 멈춰도 `_run()` 이 하위 프로세스를 회수하고 실패로 끝내야 한다."""
+    reaped: list[object] = []
+
+    class _HangingProc:
+        returncode: int | None = None
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            await asyncio.Event().wait()
+            return b"", b""  # pragma: no cover - 도달 불가
+
+    async def fake_create(*_args: Any, **_kwargs: Any) -> _HangingProc:
+        return _HangingProc()
+
+    async def fake_kill_and_reap(proc: object) -> None:
+        reaped.append(proc)
+
+    monkeypatch.setattr(
+        "codex_review.infrastructure.git_repo_fetcher.asyncio.create_subprocess_exec",
+        fake_create,
+    )
+    monkeypatch.setattr(
+        "codex_review.infrastructure.git_repo_fetcher.kill_and_reap",
+        fake_kill_and_reap,
+    )
+
+    with pytest.raises(RuntimeError, match="git command timed out after 0.01s"):
+        await git_repo_fetcher._run(["git", "status"], timeout_sec=0.01)
+
+    assert reaped, "timeout 시 하위 git 프로세스를 회수해야 한다"
+
+
 async def test_remote_url_restored_on_cancellation_too(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """CancelledError 경로에서도 URL 복구가 실행돼야 한다 (Gemini 지적)."""
     restore_calls: list[list[str]] = []
 
-    async def fake_run(cmd: list[str], *, check: bool = True) -> None:
+    async def fake_run(
+        cmd: list[str],
+        *,
+        check: bool = True,
+        timeout_sec: float = git_repo_fetcher.DEFAULT_GIT_TIMEOUT_SEC,
+    ) -> None:
+        _ = timeout_sec
         if "fetch" in cmd:
             raise asyncio.CancelledError()
-        if "set-url" in cmd and not check:
+        if "set-url" in cmd and cmd[-1] == "https://github.com/o/r.git":
             restore_calls.append(cmd)
 
     monkeypatch.setattr(git_repo_fetcher, "_run", fake_run)
@@ -218,6 +347,88 @@ async def test_remote_url_restored_on_cancellation_too(
             pass
 
     assert restore_calls, "취소 경로에서도 URL 복구가 실행돼야 한다"
+
+
+async def test_remote_url_restore_is_shielded_during_cancellation_cleanup(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    restore_started = asyncio.Event()
+    release_restore = asyncio.Event()
+    restore_calls: list[list[str]] = []
+
+    async def fake_run(
+        cmd: list[str],
+        *,
+        check: bool = True,
+        timeout_sec: float = git_repo_fetcher.DEFAULT_GIT_TIMEOUT_SEC,
+    ) -> None:
+        _ = timeout_sec
+        if "fetch" in cmd:
+            raise asyncio.CancelledError()
+        if "set-url" in cmd and cmd[-1] == "https://github.com/o/r.git":
+            restore_started.set()
+            await release_restore.wait()
+            restore_calls.append(cmd)
+
+    monkeypatch.setattr(git_repo_fetcher, "_run", fake_run)
+    (tmp_path / "acme" / "a" / ".git").mkdir(parents=True)
+    fetcher = git_repo_fetcher.GitRepoFetcher(cache_dir=tmp_path)
+
+    async def run_session() -> None:
+        async with fetcher.session(_pr("acme", "a"), "secret-token"):
+            pass
+
+    task = asyncio.create_task(run_session())
+    await asyncio.wait_for(restore_started.wait(), timeout=1)
+    task.cancel()
+    release_restore.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert restore_calls, "cleanup 중 취소가 들어와도 remote URL 복구는 끝까지 실행돼야 한다"
+
+
+async def test_remote_url_restore_cancellation_propagates_cancel_with_original_note(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    restore_started = asyncio.Event()
+    release_restore = asyncio.Event()
+    restore_calls: list[list[str]] = []
+
+    async def fake_run(
+        cmd: list[str],
+        *,
+        check: bool = True,
+        timeout_sec: float = git_repo_fetcher.DEFAULT_GIT_TIMEOUT_SEC,
+    ) -> None:
+        _ = timeout_sec
+        if "fetch" in cmd:
+            raise RuntimeError("fetch boom")
+        if "set-url" in cmd and cmd[-1] == "https://github.com/o/r.git":
+            restore_started.set()
+            await release_restore.wait()
+            restore_calls.append(cmd)
+
+    monkeypatch.setattr(git_repo_fetcher, "_run", fake_run)
+    (tmp_path / "acme" / "a" / ".git").mkdir(parents=True)
+    fetcher = git_repo_fetcher.GitRepoFetcher(cache_dir=tmp_path)
+
+    async def run_session() -> None:
+        async with fetcher.session(_pr("acme", "a"), "secret-token"):
+            pass
+
+    task = asyncio.create_task(run_session())
+    await asyncio.wait_for(restore_started.wait(), timeout=1)
+    task.cancel()
+    release_restore.set()
+
+    with pytest.raises(asyncio.CancelledError) as exc_info:
+        await task
+
+    notes = "\n".join(getattr(exc_info.value, "__notes__", ()))
+    assert "fetch boom" in notes
+    assert restore_calls, "원래 예외가 있어도 remote URL 복구는 취소로 중단되면 안 된다"
 
 
 async def test_exception_message_masks_tokens_in_stderr(

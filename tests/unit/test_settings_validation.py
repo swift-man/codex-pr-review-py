@@ -40,6 +40,7 @@ _ALL_ALIASES = (
     "REVIEW_CONCURRENCY",
     "REVIEW_QUEUE_MAXSIZE",
     "CODEX_ENABLE_DIFF_FALLBACK",
+    "GIT_TIMEOUT_SEC",
 )
 
 
@@ -57,6 +58,7 @@ def test_defaults_are_all_valid(monkeypatch: pytest.MonkeyPatch) -> None:
     s = _settings(monkeypatch)
     assert s.review_concurrency == 1
     assert s.codex_timeout_sec == 600
+    assert s.git_timeout_sec == 120
     assert s.codex_max_input_tokens == 258_400
     assert s.review_queue_maxsize is None
 
@@ -96,6 +98,11 @@ def test_review_queue_maxsize_positive_accepted(monkeypatch: pytest.MonkeyPatch)
 def test_codex_timeout_zero_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(ValidationError):
         _settings(monkeypatch, CODEX_TIMEOUT_SEC="0")
+
+
+def test_git_timeout_zero_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    with pytest.raises(ValidationError):
+        _settings(monkeypatch, GIT_TIMEOUT_SEC="0")
 
 
 def test_codex_max_input_tokens_zero_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:

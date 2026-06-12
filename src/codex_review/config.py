@@ -50,6 +50,7 @@ class Settings(BaseSettings):
     repo_cache_dir: Path = Field(
         default=Path.home() / ".codex-review" / "repos", alias="REPO_CACHE_DIR"
     )
+    git_timeout_sec: int = Field(default=120, gt=0, alias="GIT_TIMEOUT_SEC")
     file_max_bytes: int = Field(default=204_800, gt=0, alias="FILE_MAX_BYTES")
     data_file_max_bytes: int = Field(default=20_000, gt=0, alias="DATA_FILE_MAX_BYTES")
 

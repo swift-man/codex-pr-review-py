@@ -4,6 +4,8 @@ from pathlib import Path
 
 from codex_review.domain import FileDump, FileEntry, ReviewPathFilter, TokenBudget
 
+from ._subprocess import kill_and_reap
+from .git_subprocess_env import git_subprocess_env
 from .reviewbot_config import load_review_path_filter
 
 logger = logging.getLogger(__name__)
@@ -144,6 +146,7 @@ _FULL_DUMP_OVERHEAD_RATIO = 0.10
 _FULL_DUMP_OVERHEAD_CAP_CHARS = 32_000
 _FORMAT_FILE_MIN_LINE_NO_WIDTH = 5
 _FORMAT_FILE_LINE_PREFIX_SUFFIX_LEN = 2  # "| "
+_GIT_COMMAND_TIMEOUT_SEC = 120.0
 
 # 확장자만으로는 리뷰 가치를 단정할 수 없는(= 소스일 수도 데이터일 수도 있는) 형식.
 # 이 집합에 포함된 파일은 "크면 제외, 작으면 포함" 규칙(_data_file_max_bytes)을 따른다.
@@ -193,11 +196,15 @@ class FileDumpCollector:
         self,
         file_max_bytes: int,
         data_file_max_bytes: int = 20_000,
+        git_timeout_sec: float = _GIT_COMMAND_TIMEOUT_SEC,
     ) -> None:
+        if git_timeout_sec <= 0:
+            raise ValueError("git_timeout_sec must be positive")
         self._file_max_bytes = file_max_bytes
         # JSON/YAML/XML 처럼 "소스일 수도, 데이터일 수도" 있는 확장자에 대해
         # 적용할 더 엄격한 상한. 설정/매니페스트는 작아서 이 한도에 항상 통과한다.
         self._data_file_max_bytes = data_file_max_bytes
+        self._git_timeout_sec = git_timeout_sec
 
     async def collect(
         self,
@@ -206,7 +213,7 @@ class FileDumpCollector:
         budget: TokenBudget,
     ) -> FileDump:
         # git ls-files 는 async subprocess 로 먼저 실행 — 진짜 소스 파일만 뽑아낸다.
-        tracked = await _git_ls_files(root)
+        tracked = await _git_ls_files(root, timeout_sec=self._git_timeout_sec)
         changed_set = set(changed_files)
         path_filter = _load_path_filter(root, changed_set)
         # 예산이 부족할 때 하위 우선순위 파일부터 잘려 나가야 PR 컨텍스트가 살아남는다.
@@ -375,7 +382,11 @@ def _format_file_line_prefix_len(line_no: int) -> int:
     )
 
 
-async def _git_ls_files(root: Path) -> list[str]:
+async def _git_ls_files(
+    root: Path,
+    *,
+    timeout_sec: float = _GIT_COMMAND_TIMEOUT_SEC,
+) -> list[str]:
     # `-z` : NUL 구분자로 출력 → 한글/공백/따옴표 등 특수문자 파일명도 C-style escape 없이
     # 원형 그대로 전달된다. 기본 splitlines 경로는 이런 이름을 `"..."` 로 감싸 `Path.is_file()`
     # 검사가 통째로 실패한다.
@@ -383,8 +394,17 @@ async def _git_ls_files(root: Path) -> list[str]:
         "git", "-C", str(root), "ls-files", "-z",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        env=git_subprocess_env(),
     )
-    stdout, stderr = await proc.communicate()
+    try:
+        async with asyncio.timeout(timeout_sec):
+            stdout, stderr = await proc.communicate()
+    except TimeoutError as exc:
+        await kill_and_reap(proc)
+        raise RuntimeError(f"git ls-files timed out after {timeout_sec:g}s") from exc
+    except asyncio.CancelledError:
+        await kill_and_reap(proc)
+        raise
     if proc.returncode != 0:
         raise RuntimeError(
             f"git ls-files failed: {stderr.decode(errors='replace').strip()}"

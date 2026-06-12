@@ -27,5 +27,6 @@ id_rsa
 id_ed25519
 
 # runtime caches
+.runtime/
 repos_cache/
 .codex-review/
