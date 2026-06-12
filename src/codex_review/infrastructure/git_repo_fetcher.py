@@ -159,14 +159,19 @@ class GitRepoFetcher:
                         pr.repo.full_name,
                         exc_info=True,
                     )
-                except asyncio.CancelledError:
-                    if checkout_error is None:
-                        raise
-                    logger.warning(
-                        "origin URL restore was cancelled after checkout failure for %s",
-                        pr.repo.full_name,
-                        exc_info=True,
-                    )
+                except asyncio.CancelledError as exc:
+                    if checkout_error is not None:
+                        exc.add_note(
+                            "checkout already failed before origin URL restore cancellation: "
+                            f"{checkout_error!r}"
+                        )
+                        logger.warning(
+                            "origin URL restore was cancelled after checkout failure for %s; "
+                            "propagating cancellation (original failure: %r)",
+                            pr.repo.full_name,
+                            checkout_error,
+                        )
+                    raise
         return repo_path
 
 

@@ -374,7 +374,7 @@ async def test_remote_url_restore_is_shielded_during_cancellation_cleanup(
     assert restore_calls, "cleanup 중 취소가 들어와도 remote URL 복구는 끝까지 실행돼야 한다"
 
 
-async def test_remote_url_restore_cancellation_preserves_original_checkout_error(
+async def test_remote_url_restore_cancellation_propagates_cancel_with_original_note(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     restore_started = asyncio.Event()
@@ -408,9 +408,11 @@ async def test_remote_url_restore_cancellation_preserves_original_checkout_error
     task.cancel()
     release_restore.set()
 
-    with pytest.raises(RuntimeError, match="fetch boom"):
+    with pytest.raises(asyncio.CancelledError) as exc_info:
         await task
 
+    notes = "\n".join(getattr(exc_info.value, "__notes__", ()))
+    assert "fetch boom" in notes
     assert restore_calls, "원래 예외가 있어도 remote URL 복구는 취소로 중단되면 안 된다"
 
 
