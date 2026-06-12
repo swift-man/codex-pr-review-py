@@ -97,6 +97,7 @@ wait_for_stop() {
 stop_existing_server() {
     local pids=()
     local related=()
+    local term_snapshot=()
     local pid
 
     while IFS= read -r pid; do
@@ -116,6 +117,7 @@ stop_existing_server() {
     while IFS= read -r pid; do
         [[ -n "$pid" ]] && related+=("$pid")
     done < <(related_server_pids "${pids[@]}")
+    term_snapshot=("${related[@]}")
 
     echo "Stopping existing codex-review server on $HOST:$PORT (pid: ${related[*]})"
     kill -TERM "${related[@]}" 2>/dev/null || true
@@ -126,7 +128,12 @@ stop_existing_server() {
     related=()
     while IFS= read -r pid; do
         [[ -n "$pid" ]] && related+=("$pid")
-    done < <(related_server_pids "${pids[@]}")
+    done < <(
+        {
+            printf '%s\n' "${term_snapshot[@]}"
+            related_server_pids "${pids[@]}"
+        } | dedupe_pids
+    )
 
     echo "Existing server did not stop after 10s; sending SIGKILL (pid: ${related[*]})" >&2
     kill -KILL "${related[@]}" 2>/dev/null || true
