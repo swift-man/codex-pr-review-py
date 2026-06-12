@@ -1,7 +1,7 @@
 from pathlib import Path
 from typing import Annotated
 
-from pydantic import Field, StringConstraints
+from pydantic import Field, StringConstraints, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # 공백만으로 이뤄진 시크릿·호스트·모델명을 차단 — 빈 문자열뿐 아니라 `"   "` 도 거절해야
@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     # Codex CLI — 음수/0 타임아웃이나 토큰 한도는 리뷰를 즉시 실패시키므로 `gt=0` 로 고정.
     codex_bin: str = Field(default="codex", alias="CODEX_BIN")
     codex_model: NonBlankStr = Field(default="gpt-5.5", alias="CODEX_MODEL")
+    codex_model_slots: str | None = Field(default=None, alias="CODEX_MODEL_SLOTS")
     codex_reasoning_effort: str = Field(default="high", alias="CODEX_REASONING_EFFORT")
     codex_timeout_sec: int = Field(default=600, gt=0, alias="CODEX_TIMEOUT_SEC")
     codex_max_input_tokens: int = Field(default=258_400, gt=0, alias="CODEX_MAX_INPUT_TOKENS")
@@ -73,3 +74,18 @@ class Settings(BaseSettings):
         raise RuntimeError(
             "GITHUB_APP_PRIVATE_KEY 또는 GITHUB_APP_PRIVATE_KEY_PATH 중 하나가 필요합니다."
         )
+
+    @field_validator("codex_model_slots")
+    @classmethod
+    def _validate_codex_model_slots(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        slots = [slot.strip() for slot in value.split(",")]
+        if not slots or any(not slot for slot in slots):
+            raise ValueError("CODEX_MODEL_SLOTS must be a comma-separated list of models")
+        return ",".join(slots)
+
+    def codex_model_slot_values(self) -> tuple[str, ...]:
+        if self.codex_model_slots is None:
+            return (self.codex_model,)
+        return tuple(self.codex_model_slots.split(","))

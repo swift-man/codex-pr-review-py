@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import logging
 from dataclasses import dataclass
+from typing import Any
 
 from codex_review.domain import RepoRef
 from codex_review.interfaces import GitHubClient
@@ -220,7 +221,7 @@ class WebhookHandler:
         self,
         event: str,
         delivery_id: str,
-        payload: dict,
+        payload: dict[str, Any],
     ) -> tuple[int, str]:
         dlog = get_delivery_logger(__name__, delivery_id)
         if event == "ping":

@@ -1,6 +1,7 @@
 import logging
 import re
 import sys
+from collections.abc import MutableMapping
 from typing import Any
 
 # `key=value` 또는 `key: Bearer value` 형태의 평문 시크릿 패턴.
@@ -153,7 +154,11 @@ def configure_logging(level: str = "INFO") -> None:
 class DeliveryLogger(logging.LoggerAdapter[logging.Logger]):
     """Prefixes every log record with `[delivery=<id>]` for webhook tracing."""
 
-    def process(self, msg: str, kwargs: dict[str, object]) -> tuple[str, dict[str, object]]:
+    def process(
+        self,
+        msg: str,
+        kwargs: MutableMapping[str, Any],
+    ) -> tuple[str, MutableMapping[str, Any]]:
         delivery = self.extra.get("delivery", "-") if self.extra else "-"
         return f"[delivery={delivery}] {msg}", kwargs
 

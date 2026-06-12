@@ -28,6 +28,7 @@ _ALL_ALIASES = (
     "GITHUB_APP_SLUG",
     "CODEX_BIN",
     "CODEX_MODEL",
+    "CODEX_MODEL_SLOTS",
     "CODEX_REASONING_EFFORT",
     "CODEX_TIMEOUT_SEC",
     "CODEX_MAX_INPUT_TOKENS",
@@ -152,6 +153,27 @@ def test_whitespace_only_host_is_rejected(monkeypatch: pytest.MonkeyPatch) -> No
 def test_whitespace_only_codex_model_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(ValidationError):
         _settings(monkeypatch, CODEX_MODEL="\t\n ")
+
+
+def test_codex_model_slots_default_to_single_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    s = _settings(monkeypatch, CODEX_MODEL="gpt-5.5")
+    assert s.codex_model_slot_values() == ("gpt-5.5",)
+
+
+def test_codex_model_slots_parse_comma_separated_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    s = _settings(
+        monkeypatch,
+        CODEX_MODEL="fallback",
+        CODEX_MODEL_SLOTS=" slot-1, slot-2 ,slot-3 ",
+    )
+    assert s.codex_model_slot_values() == ("slot-1", "slot-2", "slot-3")
+
+
+def test_codex_model_slots_reject_empty_members(monkeypatch: pytest.MonkeyPatch) -> None:
+    with pytest.raises(ValidationError):
+        _settings(monkeypatch, CODEX_MODEL_SLOTS="slot-1,,slot-3")
 
 
 def test_enable_diff_fallback_default_is_true(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -10,6 +10,10 @@ export GITHUB_WEBHOOK_SECRET="change-me-long-random"
 # Available models (queryable via ~/.codex/models_cache.json):
 #   gpt-5.5, gpt-5.4, gpt-5.4-mini, gpt-5.3-codex, gpt-5.2, codex-auto-review
 export CODEX_MODEL="gpt-5.5"
+# Optional: comma-separated model/account slots. When set, the server remembers
+# the last successful slot and starts the next review from that slot, then rotates.
+# Example: if slot 2 was last successful, next order is 2, 3, 1.
+# export CODEX_MODEL_SLOTS="gpt-5.5-slot-1,gpt-5.5-slot-2,gpt-5.5-slot-3"
 export CODEX_REASONING_EFFORT="high"   # low | medium | high | xhigh
 # gpt-5.5 API docs list a 1,050,000-token context window, but the Codex CLI
 # ChatGPT-auth catalog currently exposes a 272,000-token input window and uses
