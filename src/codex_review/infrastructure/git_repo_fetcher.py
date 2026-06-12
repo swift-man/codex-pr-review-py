@@ -244,7 +244,6 @@ async def _restore_origin_url(repo_path: Path, clone_url: str, *, timeout_sec: f
     restore_task = asyncio.create_task(
         _run(
             ["git", "-C", str(repo_path), "remote", "set-url", "origin", clone_url],
-            check=False,
             timeout_sec=timeout_sec,
         )
     )

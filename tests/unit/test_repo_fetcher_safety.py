@@ -136,7 +136,7 @@ async def test_remote_url_is_restored_even_when_fetch_fails(
     """fetch 에서 예외가 나도 `remote set-url ... <original>` 이 호출돼 토큰이 `.git/config`
     에 남지 않아야 한다.
     """
-    restore_calls: list[list[str]] = []
+    restore_calls: list[tuple[list[str], bool]] = []
 
     async def fake_run(
         cmd: list[str],
@@ -147,8 +147,8 @@ async def test_remote_url_is_restored_even_when_fetch_fails(
         _ = timeout_sec
         if "fetch" in cmd:
             raise RuntimeError("boom")
-        if "set-url" in cmd and not check:
-            restore_calls.append(cmd)
+        if "set-url" in cmd and cmd[-1] == "https://github.com/o/r.git":
+            restore_calls.append((cmd, check))
 
     monkeypatch.setattr(git_repo_fetcher, "_run", fake_run)
     repo_dir = tmp_path / "acme" / "a" / ".git"
@@ -161,7 +161,9 @@ async def test_remote_url_is_restored_even_when_fetch_fails(
             pass
 
     assert restore_calls, "fetch 실패 후에도 remote URL 복구가 호출돼야 한다"
-    restored_url = restore_calls[-1][-1]
+    restored_cmd, restore_check = restore_calls[-1]
+    restored_url = restored_cmd[-1]
+    assert restore_check is True
     assert "secret-token" not in restored_url
     assert restored_url == "https://github.com/o/r.git"
 
@@ -180,7 +182,7 @@ async def test_remote_url_restore_failure_preserves_original_checkout_error(
         _ = timeout_sec
         if "fetch" in cmd:
             raise RuntimeError("fetch boom")
-        if "set-url" in cmd and not check:
+        if "set-url" in cmd and cmd[-1] == "https://github.com/o/r.git":
             raise RuntimeError("restore boom")
 
     monkeypatch.setattr(git_repo_fetcher, "_run", fake_run)
@@ -208,7 +210,7 @@ async def test_remote_url_restore_failure_raises_without_checkout_error(
         timeout_sec: float = git_repo_fetcher.DEFAULT_GIT_TIMEOUT_SEC,
     ) -> None:
         _ = timeout_sec
-        if "set-url" in cmd and not check:
+        if "set-url" in cmd and cmd[-1] == "https://github.com/o/r.git":
             raise RuntimeError("restore boom")
 
     monkeypatch.setattr(git_repo_fetcher, "_run", fake_run)
@@ -318,7 +320,7 @@ async def test_remote_url_restored_on_cancellation_too(
         _ = timeout_sec
         if "fetch" in cmd:
             raise asyncio.CancelledError()
-        if "set-url" in cmd and not check:
+        if "set-url" in cmd and cmd[-1] == "https://github.com/o/r.git":
             restore_calls.append(cmd)
 
     monkeypatch.setattr(git_repo_fetcher, "_run", fake_run)
@@ -348,7 +350,7 @@ async def test_remote_url_restore_is_shielded_during_cancellation_cleanup(
         _ = timeout_sec
         if "fetch" in cmd:
             raise asyncio.CancelledError()
-        if "set-url" in cmd and not check:
+        if "set-url" in cmd and cmd[-1] == "https://github.com/o/r.git":
             restore_started.set()
             await release_restore.wait()
             restore_calls.append(cmd)
@@ -388,7 +390,7 @@ async def test_remote_url_restore_cancellation_preserves_original_checkout_error
         _ = timeout_sec
         if "fetch" in cmd:
             raise RuntimeError("fetch boom")
-        if "set-url" in cmd and not check:
+        if "set-url" in cmd and cmd[-1] == "https://github.com/o/r.git":
             restore_started.set()
             await release_restore.wait()
             restore_calls.append(cmd)
