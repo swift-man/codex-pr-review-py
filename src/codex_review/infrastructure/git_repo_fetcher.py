@@ -107,6 +107,7 @@ class GitRepoFetcher:
         # 토큰 주입 시점 → cleanup 까지 전체를 try/finally 로 묶는다. clone 직후나 set-url
         # 직후 `CancelledError` 가 들어와도 finally 가 실행되어 `.git/config` 에 토큰이 남지
         # 않는다. clone 이 실패하면 `.git` 자체가 없으니 cleanup 은 그 경우를 체크한다.
+        checkout_error: BaseException | None = None
         try:
             if not (repo_path / ".git").exists():
                 logger.info("cloning %s into %s", pr.repo.full_name, repo_path)
@@ -138,14 +139,26 @@ class GitRepoFetcher:
                 ["git", "-C", str(repo_path), "clean", "-fdx"],
                 timeout_sec=self._git_timeout_sec,
             )
+        except BaseException as exc:
+            checkout_error = exc
+            raise
         finally:
             # clone 이 실패하면 .git 자체가 없을 수 있음 — 존재할 때만 복구.
             if (repo_path / ".git").exists():
-                await _run(
-                    ["git", "-C", str(repo_path), "remote", "set-url", "origin", pr.clone_url],
-                    check=False,
-                    timeout_sec=self._git_timeout_sec,
-                )
+                try:
+                    await _run(
+                        ["git", "-C", str(repo_path), "remote", "set-url", "origin", pr.clone_url],
+                        check=False,
+                        timeout_sec=self._git_timeout_sec,
+                    )
+                except RuntimeError:
+                    if checkout_error is None:
+                        raise
+                    logger.warning(
+                        "failed to restore origin URL after checkout failure for %s",
+                        pr.repo.full_name,
+                        exc_info=True,
+                    )
         return repo_path
 
 

@@ -166,6 +166,60 @@ async def test_remote_url_is_restored_even_when_fetch_fails(
     assert restored_url == "https://github.com/o/r.git"
 
 
+async def test_remote_url_restore_failure_preserves_original_checkout_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    async def fake_run(
+        cmd: list[str],
+        *,
+        check: bool = True,
+        timeout_sec: float = git_repo_fetcher.DEFAULT_GIT_TIMEOUT_SEC,
+    ) -> None:
+        _ = timeout_sec
+        if "fetch" in cmd:
+            raise RuntimeError("fetch boom")
+        if "set-url" in cmd and not check:
+            raise RuntimeError("restore boom")
+
+    monkeypatch.setattr(git_repo_fetcher, "_run", fake_run)
+    (tmp_path / "acme" / "a" / ".git").mkdir(parents=True)
+    fetcher = git_repo_fetcher.GitRepoFetcher(cache_dir=tmp_path)
+
+    with (
+        caplog.at_level(logging.WARNING, logger="codex_review.infrastructure.git_repo_fetcher"),
+        pytest.raises(RuntimeError, match="fetch boom"),
+    ):
+        async with fetcher.session(_pr("acme", "a"), "secret-token"):
+            pass
+
+    assert "failed to restore origin URL after checkout failure for acme/a" in caplog.text
+    assert "restore boom" in caplog.text
+
+
+async def test_remote_url_restore_failure_raises_without_checkout_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    async def fake_run(
+        cmd: list[str],
+        *,
+        check: bool = True,
+        timeout_sec: float = git_repo_fetcher.DEFAULT_GIT_TIMEOUT_SEC,
+    ) -> None:
+        _ = timeout_sec
+        if "set-url" in cmd and not check:
+            raise RuntimeError("restore boom")
+
+    monkeypatch.setattr(git_repo_fetcher, "_run", fake_run)
+    (tmp_path / "acme" / "a" / ".git").mkdir(parents=True)
+    fetcher = git_repo_fetcher.GitRepoFetcher(cache_dir=tmp_path)
+
+    with pytest.raises(RuntimeError, match="restore boom"):
+        async with fetcher.session(_pr("acme", "a"), "secret-token"):
+            pass
+
+
 async def test_run_kills_subprocess_and_reraises_on_cancel(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

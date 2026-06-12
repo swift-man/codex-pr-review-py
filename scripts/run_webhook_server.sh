@@ -39,8 +39,18 @@ find_existing_server_pids() {
 is_codex_review_server() {
     local pid="$1"
     local command_line
-    command_line="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+    command_line="$(process_command_line "$pid")"
     [[ "$command_line" == *"codex_review.main:app_factory"* ]]
+}
+
+process_command_line() {
+    local pid="$1"
+    ps -ww -p "$pid" -o command= 2>/dev/null || true
+}
+
+process_identity() {
+    local pid="$1"
+    ps -ww -p "$pid" -o lstart= -o command= 2>/dev/null || true
 }
 
 is_process_running() {
@@ -73,6 +83,26 @@ related_server_pids() {
     done | dedupe_pids
 }
 
+snapshot_processes() {
+    local pid
+    local identity
+    for pid in "$@"; do
+        identity="$(process_identity "$pid")"
+        [[ -n "$identity" ]] && printf '%s\t%s\n' "$pid" "$identity"
+    done
+}
+
+matching_snapshot_pids() {
+    local pid
+    local identity
+    local current_identity
+    while IFS=$'\t' read -r pid identity; do
+        [[ -n "$pid" && -n "$identity" ]] || continue
+        current_identity="$(process_identity "$pid")"
+        [[ "$current_identity" == "$identity" ]] && echo "$pid"
+    done
+}
+
 wait_for_stop() {
     local all_stopped
     local pid
@@ -97,7 +127,8 @@ wait_for_stop() {
 stop_existing_server() {
     local pids=()
     local related=()
-    local term_snapshot=()
+    local current_pids=()
+    local term_snapshot=""
     local pid
 
     while IFS= read -r pid; do
@@ -117,7 +148,7 @@ stop_existing_server() {
     while IFS= read -r pid; do
         [[ -n "$pid" ]] && related+=("$pid")
     done < <(related_server_pids "${pids[@]}")
-    term_snapshot=("${related[@]}")
+    term_snapshot="$(snapshot_processes "${related[@]}")"
 
     echo "Stopping existing codex-review server on $HOST:$PORT (pid: ${related[*]})"
     kill -TERM "${related[@]}" 2>/dev/null || true
@@ -125,15 +156,29 @@ stop_existing_server() {
         return 0
     fi
 
+    while IFS= read -r pid; do
+        [[ -n "$pid" ]] && current_pids+=("$pid")
+    done < <(find_existing_server_pids)
+
+    for pid in "${current_pids[@]}"; do
+        if ! is_codex_review_server "$pid"; then
+            echo "Port $PORT is now used by a non codex-review process (pid: $pid)" >&2
+            echo "Stop it manually or choose another PORT." >&2
+            exit 1
+        fi
+    done
+
     related=()
     while IFS= read -r pid; do
         [[ -n "$pid" ]] && related+=("$pid")
     done < <(
         {
-            printf '%s\n' "${term_snapshot[@]}"
-            related_server_pids "${pids[@]}"
+            matching_snapshot_pids <<< "$term_snapshot"
+            related_server_pids "${current_pids[@]}"
         } | dedupe_pids
     )
+
+    [[ "${#related[@]}" -eq 0 ]] && return 0
 
     echo "Existing server did not stop after 10s; sending SIGKILL (pid: ${related[*]})" >&2
     kill -KILL "${related[@]}" 2>/dev/null || true
