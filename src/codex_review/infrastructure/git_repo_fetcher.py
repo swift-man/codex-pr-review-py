@@ -10,8 +10,10 @@ from urllib.parse import urlsplit, urlunsplit
 from codex_review.domain import PullRequest
 
 from ._subprocess import kill_and_reap
+from .git_subprocess_env import git_subprocess_env
 
 logger = logging.getLogger(__name__)
+DEFAULT_GIT_TIMEOUT_SEC = 120.0
 
 # `https://user:token@host/...` 형태의 자격 증명을 포함한 URL 을 찾아 userinfo 만 마스킹.
 # 예외 메시지·stderr 텍스트 안에서도 토큰을 노출하지 않도록 전역 마스킹에 쓴다.
@@ -28,7 +30,7 @@ class _RepoLockRegistry:
 
     def __init__(self) -> None:
         # WeakValueDictionary 의 value 참조가 모두 사라지면 자동 삭제.
-        self._locks: "weakref.WeakValueDictionary[str, asyncio.Lock]" = (
+        self._locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
             weakref.WeakValueDictionary()
         )
 
@@ -48,8 +50,15 @@ class GitRepoFetcher:
     `git fetch/checkout/clean` 뿐 아니라 블록 내의 파일 읽기까지 완전히 커버.
     """
 
-    def __init__(self, cache_dir: Path) -> None:
+    def __init__(
+        self,
+        cache_dir: Path,
+        git_timeout_sec: float = DEFAULT_GIT_TIMEOUT_SEC,
+    ) -> None:
+        if git_timeout_sec <= 0:
+            raise ValueError("git_timeout_sec must be positive")
         self._cache_dir = cache_dir
+        self._git_timeout_sec = git_timeout_sec
         self._repo_locks = _RepoLockRegistry()
 
     @asynccontextmanager
@@ -69,9 +78,16 @@ class GitRepoFetcher:
             "git", "-C", str(repo_path), "rev-parse", "HEAD",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=git_subprocess_env(),
         )
         try:
-            stdout, stderr = await proc.communicate()
+            async with asyncio.timeout(self._git_timeout_sec):
+                stdout, stderr = await proc.communicate()
+        except TimeoutError as exc:
+            await kill_and_reap(proc)
+            raise RuntimeError(
+                f"git rev-parse HEAD timed out after {self._git_timeout_sec:g}s"
+            ) from exc
         except asyncio.CancelledError:
             await kill_and_reap(proc)
             raise
@@ -94,28 +110,41 @@ class GitRepoFetcher:
         try:
             if not (repo_path / ".git").exists():
                 logger.info("cloning %s into %s", pr.repo.full_name, repo_path)
-                # --filter=blob:none 은 partial clone — 블롭을 지연 로드해 초기 clone 속도·디스크 절약.
-                await _run(["git", "clone", "--filter=blob:none", authed_url, str(repo_path)])
+                # --filter=blob:none 은 partial clone — 블롭을 지연 로드해 초기 clone
+                # 속도·디스크 절약.
+                await _run(
+                    ["git", "clone", "--filter=blob:none", authed_url, str(repo_path)],
+                    timeout_sec=self._git_timeout_sec,
+                )
             else:
                 # 설치 토큰은 1시간마다 바뀌므로 기존 remote URL 의 토큰을 교체해야 fetch 성공.
                 await _run(
-                    ["git", "-C", str(repo_path), "remote", "set-url", "origin", authed_url]
+                    ["git", "-C", str(repo_path), "remote", "set-url", "origin", authed_url],
+                    timeout_sec=self._git_timeout_sec,
                 )
 
             # depth=1 로 head SHA 만 얕게 받아 네트워크/디스크 비용 최소화.
             await _run(
-                ["git", "-C", str(repo_path), "fetch", "--depth", "1", "origin", pr.head_sha]
+                ["git", "-C", str(repo_path), "fetch", "--depth", "1", "origin", pr.head_sha],
+                timeout_sec=self._git_timeout_sec,
             )
             # --force: 이전 리뷰에서 남은 local modification 이 있어도 무시하고 대상 SHA 로 전환.
-            await _run(["git", "-C", str(repo_path), "checkout", "--force", pr.head_sha])
+            await _run(
+                ["git", "-C", str(repo_path), "checkout", "--force", pr.head_sha],
+                timeout_sec=self._git_timeout_sec,
+            )
             # -fdx: 추적 안되는 파일/디렉터리/ignore 대상까지 전부 제거.
-            await _run(["git", "-C", str(repo_path), "clean", "-fdx"])
+            await _run(
+                ["git", "-C", str(repo_path), "clean", "-fdx"],
+                timeout_sec=self._git_timeout_sec,
+            )
         finally:
             # clone 이 실패하면 .git 자체가 없을 수 있음 — 존재할 때만 복구.
             if (repo_path / ".git").exists():
                 await _run(
                     ["git", "-C", str(repo_path), "remote", "set-url", "origin", pr.clone_url],
                     check=False,
+                    timeout_sec=self._git_timeout_sec,
                 )
         return repo_path
 
@@ -149,7 +178,12 @@ def _mask_tokens_in_text(text: str) -> str:
     return _URL_WITH_USERINFO.sub(r"\g<scheme>://***@", text)
 
 
-async def _run(cmd: list[str], *, check: bool = True) -> None:
+async def _run(
+    cmd: list[str],
+    *,
+    check: bool = True,
+    timeout_sec: float = DEFAULT_GIT_TIMEOUT_SEC,
+) -> None:
     # 기록 직전 토큰이 포함된 URL 을 마스킹한다 (URL 형태가 아니면 원본 그대로).
     masked_args = [_mask_token_in_url(arg) for arg in cmd[1:]]
     logger.debug("git %s", " ".join(masked_args))
@@ -158,9 +192,17 @@ async def _run(cmd: list[str], *, check: bool = True) -> None:
         *cmd,
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.PIPE,
+        env=git_subprocess_env(),
     )
     try:
-        _, stderr = await proc.communicate()
+        async with asyncio.timeout(timeout_sec):
+            _, stderr = await proc.communicate()
+    except TimeoutError as exc:
+        await kill_and_reap(proc)
+        raise RuntimeError(
+            f"git command timed out after {timeout_sec:g}s: "
+            f"{' '.join(masked_args[:2])}..."
+        ) from exc
     except asyncio.CancelledError:
         # `communicate()` 가 취소되면 생성된 git 하위 프로세스가 orphan 으로 남아,
         # 토큰이 포함된 remote URL 로 백그라운드 통신을 계속할 수 있다.

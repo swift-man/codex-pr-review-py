@@ -43,7 +43,13 @@ async def test_same_repo_sessions_serialize_across_entire_block(
     checkouts_started: list[str] = []
     release = asyncio.Event()
 
-    async def fake_run(cmd: list[str], *, check: bool = True) -> None:
+    async def fake_run(
+        cmd: list[str],
+        *,
+        check: bool = True,
+        timeout_sec: float = git_repo_fetcher.DEFAULT_GIT_TIMEOUT_SEC,
+    ) -> None:
+        _ = (check, timeout_sec)
         if "fetch" in cmd:
             checkouts_started.append(_extract_repo_key(cmd, tmp_path))
 
@@ -85,7 +91,13 @@ async def test_different_repos_sessions_run_in_parallel(
     peak = 0
     release = asyncio.Event()
 
-    async def fake_run(cmd: list[str], *, check: bool = True) -> None:
+    async def fake_run(
+        cmd: list[str],
+        *,
+        check: bool = True,
+        timeout_sec: float = git_repo_fetcher.DEFAULT_GIT_TIMEOUT_SEC,
+    ) -> None:
+        _ = (check, timeout_sec)
         nonlocal in_flight, peak
         if "fetch" in cmd:
             in_flight += 1
@@ -126,7 +138,13 @@ async def test_remote_url_is_restored_even_when_fetch_fails(
     """
     restore_calls: list[list[str]] = []
 
-    async def fake_run(cmd: list[str], *, check: bool = True) -> None:
+    async def fake_run(
+        cmd: list[str],
+        *,
+        check: bool = True,
+        timeout_sec: float = git_repo_fetcher.DEFAULT_GIT_TIMEOUT_SEC,
+    ) -> None:
+        _ = timeout_sec
         if "fetch" in cmd:
             raise RuntimeError("boom")
         if "set-url" in cmd and not check:
@@ -197,13 +215,53 @@ async def test_run_kills_subprocess_and_reraises_on_cancel(
     assert wait_calls, "취소 시 proc.wait() 로 수거까지 이뤄져야 한다"
 
 
+async def test_run_times_out_and_reaps_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """git 명령이 멈춰도 `_run()` 이 하위 프로세스를 회수하고 실패로 끝내야 한다."""
+    reaped: list[object] = []
+
+    class _HangingProc:
+        returncode: int | None = None
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            await asyncio.Event().wait()
+            return b"", b""  # pragma: no cover - 도달 불가
+
+    async def fake_create(*_args: Any, **_kwargs: Any) -> _HangingProc:
+        return _HangingProc()
+
+    async def fake_kill_and_reap(proc: object) -> None:
+        reaped.append(proc)
+
+    monkeypatch.setattr(
+        "codex_review.infrastructure.git_repo_fetcher.asyncio.create_subprocess_exec",
+        fake_create,
+    )
+    monkeypatch.setattr(
+        "codex_review.infrastructure.git_repo_fetcher.kill_and_reap",
+        fake_kill_and_reap,
+    )
+
+    with pytest.raises(RuntimeError, match="git command timed out after 0.01s"):
+        await git_repo_fetcher._run(["git", "status"], timeout_sec=0.01)
+
+    assert reaped, "timeout 시 하위 git 프로세스를 회수해야 한다"
+
+
 async def test_remote_url_restored_on_cancellation_too(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """CancelledError 경로에서도 URL 복구가 실행돼야 한다 (Gemini 지적)."""
     restore_calls: list[list[str]] = []
 
-    async def fake_run(cmd: list[str], *, check: bool = True) -> None:
+    async def fake_run(
+        cmd: list[str],
+        *,
+        check: bool = True,
+        timeout_sec: float = git_repo_fetcher.DEFAULT_GIT_TIMEOUT_SEC,
+    ) -> None:
+        _ = timeout_sec
         if "fetch" in cmd:
             raise asyncio.CancelledError()
         if "set-url" in cmd and not check:
