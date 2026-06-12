@@ -151,7 +151,7 @@ class GitRepoFetcher:
                         pr.clone_url,
                         timeout_sec=self._git_timeout_sec,
                     )
-                except RuntimeError:
+                except (RuntimeError, OSError):
                     if checkout_error is None:
                         raise
                     logger.warning(
@@ -257,7 +257,7 @@ async def _restore_origin_url(repo_path: Path, clone_url: str, *, timeout_sec: f
     except asyncio.CancelledError:
         try:
             await restore_task
-        except RuntimeError:
+        except (RuntimeError, OSError):
             logger.warning(
                 "failed to restore origin URL while cancellation was pending",
                 exc_info=True,

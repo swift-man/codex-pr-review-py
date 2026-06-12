@@ -168,10 +168,18 @@ async def test_remote_url_is_restored_even_when_fetch_fails(
     assert restored_url == "https://github.com/o/r.git"
 
 
+@pytest.mark.parametrize(
+    "restore_exc",
+    [
+        RuntimeError("restore boom"),
+        FileNotFoundError("git missing"),
+    ],
+)
 async def test_remote_url_restore_failure_preserves_original_checkout_error(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
+    restore_exc: Exception,
 ) -> None:
     async def fake_run(
         cmd: list[str],
@@ -183,7 +191,7 @@ async def test_remote_url_restore_failure_preserves_original_checkout_error(
         if "fetch" in cmd:
             raise RuntimeError("fetch boom")
         if "set-url" in cmd and cmd[-1] == "https://github.com/o/r.git":
-            raise RuntimeError("restore boom")
+            raise restore_exc
 
     monkeypatch.setattr(git_repo_fetcher, "_run", fake_run)
     (tmp_path / "acme" / "a" / ".git").mkdir(parents=True)
@@ -197,11 +205,18 @@ async def test_remote_url_restore_failure_preserves_original_checkout_error(
             pass
 
     assert "failed to restore origin URL after checkout failure for acme/a" in caplog.text
-    assert "restore boom" in caplog.text
+    assert str(restore_exc) in caplog.text
 
 
+@pytest.mark.parametrize(
+    "restore_exc",
+    [
+        RuntimeError("restore boom"),
+        FileNotFoundError("git missing"),
+    ],
+)
 async def test_remote_url_restore_failure_raises_without_checkout_error(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, restore_exc: Exception
 ) -> None:
     async def fake_run(
         cmd: list[str],
@@ -211,13 +226,13 @@ async def test_remote_url_restore_failure_raises_without_checkout_error(
     ) -> None:
         _ = timeout_sec
         if "set-url" in cmd and cmd[-1] == "https://github.com/o/r.git":
-            raise RuntimeError("restore boom")
+            raise restore_exc
 
     monkeypatch.setattr(git_repo_fetcher, "_run", fake_run)
     (tmp_path / "acme" / "a" / ".git").mkdir(parents=True)
     fetcher = git_repo_fetcher.GitRepoFetcher(cache_dir=tmp_path)
 
-    with pytest.raises(RuntimeError, match="restore boom"):
+    with pytest.raises(type(restore_exc), match=str(restore_exc)):
         async with fetcher.session(_pr("acme", "a"), "secret-token"):
             pass
 
