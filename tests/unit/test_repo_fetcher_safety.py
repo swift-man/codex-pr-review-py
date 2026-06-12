@@ -332,6 +332,86 @@ async def test_remote_url_restored_on_cancellation_too(
     assert restore_calls, "취소 경로에서도 URL 복구가 실행돼야 한다"
 
 
+async def test_remote_url_restore_is_shielded_during_cancellation_cleanup(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    restore_started = asyncio.Event()
+    release_restore = asyncio.Event()
+    restore_calls: list[list[str]] = []
+
+    async def fake_run(
+        cmd: list[str],
+        *,
+        check: bool = True,
+        timeout_sec: float = git_repo_fetcher.DEFAULT_GIT_TIMEOUT_SEC,
+    ) -> None:
+        _ = timeout_sec
+        if "fetch" in cmd:
+            raise asyncio.CancelledError()
+        if "set-url" in cmd and not check:
+            restore_started.set()
+            await release_restore.wait()
+            restore_calls.append(cmd)
+
+    monkeypatch.setattr(git_repo_fetcher, "_run", fake_run)
+    (tmp_path / "acme" / "a" / ".git").mkdir(parents=True)
+    fetcher = git_repo_fetcher.GitRepoFetcher(cache_dir=tmp_path)
+
+    async def run_session() -> None:
+        async with fetcher.session(_pr("acme", "a"), "secret-token"):
+            pass
+
+    task = asyncio.create_task(run_session())
+    await asyncio.wait_for(restore_started.wait(), timeout=1)
+    task.cancel()
+    release_restore.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert restore_calls, "cleanup 중 취소가 들어와도 remote URL 복구는 끝까지 실행돼야 한다"
+
+
+async def test_remote_url_restore_cancellation_preserves_original_checkout_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    restore_started = asyncio.Event()
+    release_restore = asyncio.Event()
+    restore_calls: list[list[str]] = []
+
+    async def fake_run(
+        cmd: list[str],
+        *,
+        check: bool = True,
+        timeout_sec: float = git_repo_fetcher.DEFAULT_GIT_TIMEOUT_SEC,
+    ) -> None:
+        _ = timeout_sec
+        if "fetch" in cmd:
+            raise RuntimeError("fetch boom")
+        if "set-url" in cmd and not check:
+            restore_started.set()
+            await release_restore.wait()
+            restore_calls.append(cmd)
+
+    monkeypatch.setattr(git_repo_fetcher, "_run", fake_run)
+    (tmp_path / "acme" / "a" / ".git").mkdir(parents=True)
+    fetcher = git_repo_fetcher.GitRepoFetcher(cache_dir=tmp_path)
+
+    async def run_session() -> None:
+        async with fetcher.session(_pr("acme", "a"), "secret-token"):
+            pass
+
+    task = asyncio.create_task(run_session())
+    await asyncio.wait_for(restore_started.wait(), timeout=1)
+    task.cancel()
+    release_restore.set()
+
+    with pytest.raises(RuntimeError, match="fetch boom"):
+        await task
+
+    assert restore_calls, "원래 예외가 있어도 remote URL 복구는 취소로 중단되면 안 된다"
+
+
 async def test_exception_message_masks_tokens_in_stderr(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -146,9 +146,9 @@ class GitRepoFetcher:
             # clone 이 실패하면 .git 자체가 없을 수 있음 — 존재할 때만 복구.
             if (repo_path / ".git").exists():
                 try:
-                    await _run(
-                        ["git", "-C", str(repo_path), "remote", "set-url", "origin", pr.clone_url],
-                        check=False,
+                    await _restore_origin_url(
+                        repo_path,
+                        pr.clone_url,
                         timeout_sec=self._git_timeout_sec,
                     )
                 except RuntimeError:
@@ -156,6 +156,14 @@ class GitRepoFetcher:
                         raise
                     logger.warning(
                         "failed to restore origin URL after checkout failure for %s",
+                        pr.repo.full_name,
+                        exc_info=True,
+                    )
+                except asyncio.CancelledError:
+                    if checkout_error is None:
+                        raise
+                    logger.warning(
+                        "origin URL restore was cancelled after checkout failure for %s",
                         pr.repo.full_name,
                         exc_info=True,
                     )
@@ -230,3 +238,24 @@ async def _run(
             f"git command failed ({proc.returncode}): "
             f"{' '.join(masked_args[:2])}...\n{safe_stderr}"
         )
+
+
+async def _restore_origin_url(repo_path: Path, clone_url: str, *, timeout_sec: float) -> None:
+    restore_task = asyncio.create_task(
+        _run(
+            ["git", "-C", str(repo_path), "remote", "set-url", "origin", clone_url],
+            check=False,
+            timeout_sec=timeout_sec,
+        )
+    )
+    try:
+        await asyncio.shield(restore_task)
+    except asyncio.CancelledError:
+        try:
+            await restore_task
+        except RuntimeError:
+            logger.warning(
+                "failed to restore origin URL while cancellation was pending",
+                exc_info=True,
+            )
+        raise

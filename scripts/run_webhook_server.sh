@@ -30,6 +30,7 @@ PORT="${PORT:-8000}"
 
 find_existing_server_pids() {
     if ! command -v lsof >/dev/null 2>&1; then
+        echo "Warning: lsof is not installed; cannot preflight existing server on port $PORT" >&2
         return 0
     fi
 
