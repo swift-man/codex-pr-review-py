@@ -27,19 +27,13 @@ class CodexCliEngine:
         self,
         binary: str = "codex",
         model: str = "codex-auto-review",
-        model_slots: tuple[str, ...] | None = None,
         reasoning_effort: str = "high",
         timeout_sec: int = 600,
     ) -> None:
         self._binary = binary
-        self._model_slots = (model,) if model_slots is None else model_slots
-        self._model_slots = tuple(slot.strip() for slot in self._model_slots)
-        if not self._model_slots or any(not slot for slot in self._model_slots):
-            raise ValueError("model_slots must contain at least one model")
+        self._model = model
         self._reasoning_effort = reasoning_effort
         self._timeout_sec = timeout_sec
-        self._last_successful_slot_index = 0
-        self._last_successful_slot_lock = asyncio.Lock()
 
     async def verify_auth(self) -> str:
         """Run `codex login status` and return the status line, or raise CodexAuthError.
@@ -90,70 +84,18 @@ class CodexCliEngine:
         history: ReviewHistory | None = None,
     ) -> ReviewResult:
         prompt = build_prompt(pr, dump, history=history)
-        last_error: ReviewEngineError | None = None
-
-        for slot_index, model in await self._model_attempt_order():
-            try:
-                result = await self._review_once(
-                    prompt,
-                    dump,
-                    model=model,
-                    slot_index=slot_index,
-                )
-            except ReviewEngineError as exc:
-                last_error = exc
-                if len(self._model_slots) == 1:
-                    raise
-                logger.warning(
-                    "codex slot %d/%d failed for %s#%d; trying next slot if available",
-                    slot_index + 1,
-                    len(self._model_slots),
-                    pr.repo.full_name,
-                    pr.number,
-                )
-                continue
-
-            await self._remember_successful_slot(slot_index)
-            return result
-
-        assert last_error is not None
-        raise last_error
-
-    async def _model_attempt_order(self) -> tuple[tuple[int, str], ...]:
-        async with self._last_successful_slot_lock:
-            start = self._last_successful_slot_index
-        slot_count = len(self._model_slots)
-        ordered_indexes = tuple(range(start, slot_count)) + tuple(range(0, start))
-        return tuple((index, self._model_slots[index]) for index in ordered_indexes)
-
-    async def _remember_successful_slot(self, slot_index: int) -> None:
-        async with self._last_successful_slot_lock:
-            self._last_successful_slot_index = slot_index
-
-    async def _review_once(
-        self,
-        prompt: str,
-        dump: FileDump,
-        *,
-        model: str,
-        slot_index: int,
-    ) -> ReviewResult:
         # "-" positional 은 codex exec 에 stdin 에서 프롬프트를 읽으라는 지시.
         # argv 로 넘기면 전체 레포 덤프가 ARG_MAX 를 초과할 수 있어 stdin 이 안전.
-        slot_label = slot_index + 1
-        slot_count = len(self._model_slots)
         logger.info(
-            "invoking codex: files=%d chars=%d model=%s slot=%d/%d effort=%s",
+            "invoking codex: files=%d chars=%d model=%s effort=%s",
             len(dump.entries),
             dump.total_chars,
-            model,
-            slot_label,
-            slot_count,
+            self._model,
             self._reasoning_effort,
         )
         proc = await asyncio.create_subprocess_exec(
             self._binary, "exec",
-            "--model", model,
+            "--model", self._model,
             # reasoning_effort 는 config 오버라이드로 넘긴다 — `codex exec` 가 별도 CLI 플래그로
             # 지원하지 않고 ~/.codex/config.toml 값만 읽기 때문.
             "--config", f"model_reasoning_effort={self._reasoning_effort}",
@@ -190,8 +132,8 @@ class CodexCliEngine:
             # `_RedactFilter` 가 record.args 까지 마스킹하므로 토큰/URL 자격증명이 stderr
             # 에 섞여 있어도 안전 (logging_utils 갱신 — codex PR #18 Major 반영).
             logger.error(
-                "codex exec failed (rc=%d, model=%s, slot=%d/%d):\n%s",
-                proc.returncode, model, slot_label, slot_count, err or "(no stderr)",
+                "codex exec failed (rc=%d, model=%s):\n%s",
+                proc.returncode, self._model, err or "(no stderr)",
             )
             # ReviewEngineError 로 분리 — use case 가 일반 버그(KeyError 등) 와 구분해
             # diff fallback 결정을 정확히 내릴 수 있게 (gemini PR #18 Major+Suggestion 반영).
@@ -205,9 +147,7 @@ class CodexCliEngine:
             # (codex PR #18 Critical 반영).
             summary = _summarize_stderr(err)
             raise ReviewEngineError(
-                "codex exec failed "
-                f"(rc={proc.returncode}, model={model}, slot={slot_label}/{slot_count}): "
-                f"{summary}",
+                f"codex exec failed (rc={proc.returncode}, model={self._model}): {summary}",
                 returncode=proc.returncode,
             )
 

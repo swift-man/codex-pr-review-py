@@ -94,7 +94,6 @@ REPO_FULL_NAME=owner/repo PR_NUMBER=1 INSTALLATION_ID=1234567 \
 | `GITHUB_WEBHOOK_SECRET` | — | HMAC 서명 검증용 비밀 (필수) |
 | `CODEX_BIN` | `codex` | Codex CLI 실행 파일 |
 | `CODEX_MODEL` | `gpt-5.5` | 모델 (`gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.3-codex`, `gpt-5.2`, `codex-auto-review`) |
-| `CODEX_MODEL_SLOTS` | — | 쉼표로 구분한 모델/슬롯 후보. 설정 시 마지막 성공 슬롯을 다음 요청의 시작점으로 기억하고 순환 재시도한다. 예: `slot-1,slot-2,slot-3` 에서 마지막 성공이 2번이면 다음 요청 순서는 2 → 3 → 1 |
 | `CODEX_REASONING_EFFORT` | `high` | `low`/`medium`/`high`/`xhigh` |
 | `CODEX_MAX_INPUT_TOKENS` | `258400` | Codex CLI에 전달할 입력 프롬프트 토큰 예산 |
 | `CODEX_TIMEOUT_SEC` | `600` | 호출 타임아웃 |
