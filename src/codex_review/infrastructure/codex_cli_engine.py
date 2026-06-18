@@ -88,9 +88,20 @@ class CodexCliEngine:
     ) -> ReviewResult:
         prompt = build_prompt(pr, dump, history=history)
         last_error: ReviewEngineError | None = None
+        attempted_models: list[str] = []
+        deadline = asyncio.get_running_loop().time() + self._timeout_sec
         for idx, model in enumerate(self._models):
+            remaining_sec = deadline - asyncio.get_running_loop().time()
+            if remaining_sec <= 0:
+                break
+            attempted_models.append(model)
             try:
-                return await self._review_with_model(prompt, dump, model=model)
+                return await self._review_with_model(
+                    prompt,
+                    dump,
+                    model=model,
+                    timeout_sec=remaining_sec,
+                )
             except ReviewEngineError as exc:
                 last_error = exc
                 next_model = self._models[idx + 1] if idx + 1 < len(self._models) else None
@@ -105,10 +116,17 @@ class CodexCliEngine:
                 )
 
         if last_error is None:
-            raise ReviewEngineError("codex exec failed before any model was attempted")
+            raise ReviewEngineError("codex exec timeout budget exhausted before any model was attempted")
+        if not attempted_models:
+            attempted = "(none)"
+        else:
+            attempted = " -> ".join(attempted_models)
+        if asyncio.get_running_loop().time() >= deadline:
+            raise ReviewEngineError(f"codex exec timeout budget exhausted (attempted={attempted})")
         if len(self._models) == 1:
             raise last_error
-        attempted = " -> ".join(self._models)
+        if not attempted:
+            attempted = " -> ".join(self._models)
         raise ReviewEngineError(
             f"codex exec fallback exhausted (models={attempted}); "
             f"last error: {last_error}",
@@ -121,6 +139,7 @@ class CodexCliEngine:
         dump: FileDump,
         *,
         model: str,
+        timeout_sec: float,
     ) -> ReviewResult:
         # "-" positional 은 codex exec 에 stdin 에서 프롬프트를 읽으라는 지시.
         # argv 로 넘기면 전체 레포 덤프가 ARG_MAX 를 초과할 수 있어 stdin 이 안전.
@@ -144,7 +163,7 @@ class CodexCliEngine:
         )
 
         try:
-            async with asyncio.timeout(self._timeout_sec):
+            async with asyncio.timeout(timeout_sec):
                 stdout, stderr = await proc.communicate(input=prompt.encode("utf-8"))
         except TimeoutError as exc:
             # 하위 프로세스 수거 대기에도 상한 — 큐 동시성 상한이 `CODEX_TIMEOUT_SEC` 을
@@ -154,7 +173,7 @@ class CodexCliEngine:
             # 분류 — use case 가 diff fallback 으로 재시도할 수 있다 (작은 입력으로 줄이면
             # 시간 안에 끝날 수 있음).
             raise ReviewEngineError(
-                f"codex exec timed out after {self._timeout_sec}s"
+                f"codex exec timed out after {timeout_sec:.1f}s on model={model}"
             ) from exc
         except asyncio.CancelledError:
             # 서버 종료/워커 취소 시 `codex exec` 하위 프로세스가 좀비로 남아 토큰·쿼터·CPU 를

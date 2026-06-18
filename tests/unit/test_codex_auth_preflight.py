@@ -3,7 +3,7 @@ from typing import Any
 
 import pytest
 
-from codex_review.domain import FileDump, FileEntry, PullRequest, RepoRef
+from codex_review.domain import FileDump, FileEntry, PullRequest, RepoRef, ReviewResult
 from codex_review.infrastructure.codex_cli_engine import CodexAuthError, CodexCliEngine
 from codex_review.interfaces import ReviewEngineError
 
@@ -242,6 +242,93 @@ async def test_review_tries_fallback_model_after_primary_failure(
         "codex-5.3-spark",
         "gpt-5.5",
     ]
+
+
+async def test_review_limits_total_timeout_across_fallbacks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, float]] = []
+
+    class _FakeLoop:
+        def __init__(self) -> None:
+            self._time = 0.0
+
+        def time(self) -> float:
+            return self._time
+
+    fake_loop = _FakeLoop()
+
+    async def _fake_review(
+        _prompt: str,
+        _dump: FileDump,
+        *,
+        model: str,
+        timeout_sec: float,
+    ) -> ReviewResult:
+        calls.append((model, timeout_sec))
+        if model == "codex-5.3-spark":
+            fake_loop._time = 4.0
+            raise ReviewEngineError("first model failed")
+        return ReviewResult(summary="ok", event="COMMENT")
+
+    pr, dump = _sample_review_input()
+    eng = CodexCliEngine(
+        binary="codex",
+        model="codex-5.3-spark",
+        fallback_models=("gpt-5.5",),
+        timeout_sec=5,
+    )
+    monkeypatch.setattr(asyncio, "get_running_loop", lambda: fake_loop)
+    eng._review_with_model = _fake_review  # type: ignore[method-assign]
+
+    result = await eng.review(pr, dump)
+
+    assert result.summary == "ok"
+    assert [model for model, _ in calls] == ["codex-5.3-spark", "gpt-5.5"]
+    assert calls[0][1] == 5.0
+    assert calls[1][1] == 1.0
+
+
+async def test_review_raises_when_timeout_budget_is_exhausted_before_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, float]] = []
+
+    class _FakeLoop:
+        def __init__(self) -> None:
+            self._time = 0.0
+
+        def time(self) -> float:
+            return self._time
+
+    fake_loop = _FakeLoop()
+
+    async def _fake_review(
+        _prompt: str,
+        _dump: FileDump,
+        *,
+        model: str,
+        timeout_sec: float,
+    ) -> ReviewResult:
+        calls.append((model, timeout_sec))
+        fake_loop._time += 6.0
+        raise ReviewEngineError(f"{model} failed")
+
+    pr, dump = _sample_review_input()
+    eng = CodexCliEngine(
+        binary="codex",
+        model="codex-5.3-spark",
+        fallback_models=("gpt-5.5",),
+        timeout_sec=5,
+    )
+    monkeypatch.setattr(asyncio, "get_running_loop", lambda: fake_loop)
+    eng._review_with_model = _fake_review  # type: ignore[method-assign]
+
+    with pytest.raises(ReviewEngineError) as exc_info:
+        await eng.review(pr, dump)
+
+    assert "timeout budget exhausted" in str(exc_info.value)
+    assert calls == [("codex-5.3-spark", 5.0)]
 
 
 async def test_review_reports_attempted_models_when_fallbacks_exhausted(
