@@ -122,7 +122,10 @@ class CodexCliEngine:
         else:
             attempted = " -> ".join(attempted_models)
         if asyncio.get_running_loop().time() >= deadline:
-            raise ReviewEngineError(f"codex exec timeout budget exhausted (attempted={attempted})")
+            budget_error = ReviewEngineError(
+                f"codex exec timeout budget exhausted (attempted={attempted})"
+            )
+            raise budget_error from last_error
         if len(self._models) == 1:
             raise last_error
         if not attempted:

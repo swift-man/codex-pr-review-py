@@ -328,6 +328,8 @@ async def test_review_raises_when_timeout_budget_is_exhausted_before_fallback(
         await eng.review(pr, dump)
 
     assert "timeout budget exhausted" in str(exc_info.value)
+    assert exc_info.value.__cause__ is not None
+    assert "codex-5.3-spark failed" in str(exc_info.value.__cause__)
     assert calls == [("codex-5.3-spark", 5.0)]
 
 
