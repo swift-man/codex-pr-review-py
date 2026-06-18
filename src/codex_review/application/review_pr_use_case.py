@@ -678,7 +678,8 @@ def _engine_failure_message(
     advice = (
         "1. `CODEX_MAX_INPUT_TOKENS` 를 모델 실제 윈도우보다 작게 조정 "
         "(예: 150000) → 큰 PR 은 자동 diff 모드로 떨어집니다.\n"
-        "2. 더 큰 컨텍스트 윈도우의 모델로 `CODEX_MODEL` 변경.\n"
+        "2. 더 큰 컨텍스트 윈도우의 모델을 `CODEX_MODEL` 또는 "
+        "`CODEX_MODEL_FALLBACKS` 에 배치.\n"
         "3. 서버 로그(stderr 전체) 를 확인해 모델/CLI 측 메시지 검증.\n"
     )
     if failure_mode == _FAILURE_FULL_ONLY:

@@ -38,7 +38,7 @@ def _default_tls_context() -> ssl.SSLContext:
     return ssl.create_default_context(cafile=certifi.where())
 
 
-# 리뷰 본문 footer 포맷. 모델명은 `CODEX_MODEL` 값을 그대로 표시한다.
+# 리뷰 본문 footer 포맷. 모델명은 설정된 모델 시도 순서를 표시한다.
 _MODEL_FOOTER_TEMPLATE = "\n\n---\n<sub>리뷰 모델: <code>{label}</code></sub>"
 
 

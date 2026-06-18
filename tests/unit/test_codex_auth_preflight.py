@@ -3,7 +3,9 @@ from typing import Any
 
 import pytest
 
+from codex_review.domain import FileDump, FileEntry, PullRequest, RepoRef, ReviewResult
 from codex_review.infrastructure.codex_cli_engine import CodexAuthError, CodexCliEngine
+from codex_review.interfaces import ReviewEngineError
 
 
 class _FakeProc:
@@ -34,8 +36,48 @@ def _patch_subprocess(monkeypatch: pytest.MonkeyPatch, result: Any) -> None:
     )
 
 
+def _patch_subprocess_sequence(
+    monkeypatch: pytest.MonkeyPatch,
+    results: list[Any],
+    calls: list[tuple[Any, ...]],
+) -> None:
+    async def fake_create(*args: Any, **_kwargs: Any) -> Any:
+        calls.append(args)
+        result = results.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    monkeypatch.setattr(
+        "codex_review.infrastructure.codex_cli_engine.asyncio.create_subprocess_exec",
+        fake_create,
+    )
+
+
 def _engine() -> CodexCliEngine:
     return CodexCliEngine(binary="codex", model="gpt-5.4")
+
+
+def _sample_review_input() -> tuple[PullRequest, FileDump]:
+    pr = PullRequest(
+        repo=RepoRef("o", "r"),
+        number=1,
+        title="t",
+        body="",
+        head_sha="abc",
+        head_ref="feat",
+        base_sha="def",
+        base_ref="main",
+        clone_url="https://example/x.git",
+        changed_files=("a.py",),
+        installation_id=7,
+        is_draft=False,
+    )
+    dump = FileDump(
+        entries=(FileEntry(path="a.py", content="x=1", size_bytes=3, is_changed=True),),
+        total_chars=3,
+    )
+    return pr, dump
 
 
 async def test_verify_auth_passes_when_logged_in_on_stdout(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -172,6 +214,159 @@ async def test_review_logs_full_stderr_and_raises_concise_summary(
     assert "model=gpt-5.5" in full_log
 
 
+async def test_review_tries_fallback_model_after_primary_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[Any, ...]] = []
+    stdout = b'{"summary":"ok","event":"COMMENT","comments":[]}\n'
+    _patch_subprocess_sequence(
+        monkeypatch,
+        [
+            _FakeProc(1, stdout=b"", stderr=b"Error: model not available\n"),
+            _FakeProc(0, stdout=stdout, stderr=b""),
+        ],
+        calls,
+    )
+
+    pr, dump = _sample_review_input()
+    eng = CodexCliEngine(
+        binary="codex",
+        model="codex-5.3-spark",
+        fallback_models=("gpt-5.5",),
+    )
+
+    result = await eng.review(pr, dump)
+
+    assert result.summary == "ok"
+    assert [call[call.index("--model") + 1] for call in calls] == [
+        "codex-5.3-spark",
+        "gpt-5.5",
+    ]
+
+
+async def test_review_limits_total_timeout_across_fallbacks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, float]] = []
+
+    class _FakeLoop:
+        def __init__(self) -> None:
+            self._time = 0.0
+
+        def time(self) -> float:
+            return self._time
+
+    fake_loop = _FakeLoop()
+
+    async def _fake_review(
+        _prompt: str,
+        _dump: FileDump,
+        *,
+        model: str,
+        timeout_sec: float,
+    ) -> ReviewResult:
+        calls.append((model, timeout_sec))
+        if model == "codex-5.3-spark":
+            fake_loop._time = 4.0
+            raise ReviewEngineError("first model failed")
+        return ReviewResult(summary="ok", event="COMMENT")
+
+    pr, dump = _sample_review_input()
+    eng = CodexCliEngine(
+        binary="codex",
+        model="codex-5.3-spark",
+        fallback_models=("gpt-5.5",),
+        timeout_sec=5,
+    )
+    monkeypatch.setattr(asyncio, "get_running_loop", lambda: fake_loop)
+    eng._review_with_model = _fake_review  # type: ignore[method-assign]
+
+    result = await eng.review(pr, dump)
+
+    assert result.summary == "ok"
+    assert [model for model, _ in calls] == ["codex-5.3-spark", "gpt-5.5"]
+    assert calls[0][1] == 5.0
+    assert calls[1][1] == 1.0
+
+
+async def test_review_raises_when_timeout_budget_is_exhausted_before_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, float]] = []
+
+    class _FakeLoop:
+        def __init__(self) -> None:
+            self._time = 0.0
+
+        def time(self) -> float:
+            return self._time
+
+    fake_loop = _FakeLoop()
+
+    async def _fake_review(
+        _prompt: str,
+        _dump: FileDump,
+        *,
+        model: str,
+        timeout_sec: float,
+    ) -> ReviewResult:
+        calls.append((model, timeout_sec))
+        fake_loop._time += 6.0
+        raise ReviewEngineError(f"{model} failed")
+
+    pr, dump = _sample_review_input()
+    eng = CodexCliEngine(
+        binary="codex",
+        model="codex-5.3-spark",
+        fallback_models=("gpt-5.5",),
+        timeout_sec=5,
+    )
+    monkeypatch.setattr(asyncio, "get_running_loop", lambda: fake_loop)
+    eng._review_with_model = _fake_review  # type: ignore[method-assign]
+
+    with pytest.raises(ReviewEngineError) as exc_info:
+        await eng.review(pr, dump)
+
+    assert "timeout budget exhausted" in str(exc_info.value)
+    assert exc_info.value.__cause__ is not None
+    assert "codex-5.3-spark failed" in str(exc_info.value.__cause__)
+    assert calls == [("codex-5.3-spark", 5.0)]
+
+
+async def test_review_reports_attempted_models_when_fallbacks_exhausted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[Any, ...]] = []
+    _patch_subprocess_sequence(
+        monkeypatch,
+        [
+            _FakeProc(1, stdout=b"", stderr=b"Error: spark unavailable\n"),
+            _FakeProc(1, stdout=b"", stderr=b"Error: gpt quota exhausted\n"),
+        ],
+        calls,
+    )
+
+    pr, dump = _sample_review_input()
+    eng = CodexCliEngine(
+        binary="codex",
+        model="codex-5.3-spark",
+        fallback_models=("gpt-5.5",),
+    )
+
+    with pytest.raises(ReviewEngineError) as exc_info:
+        await eng.review(pr, dump)
+
+    msg = str(exc_info.value)
+    assert "codex-5.3-spark -> gpt-5.5" in msg
+    assert "last error" in msg
+    assert "gpt quota exhausted" in msg
+    assert exc_info.value.returncode == 1
+    assert [call[call.index("--model") + 1] for call in calls] == [
+        "codex-5.3-spark",
+        "gpt-5.5",
+    ]
+
+
 async def test_review_masks_credentials_in_review_engine_error_message(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -182,8 +377,6 @@ async def test_review_masks_credentials_in_review_engine_error_message(
     시점에 직접 마스킹** 해야 누출 표면이 막힌다.
     """
     from codex_review.domain import FileDump, FileEntry, PullRequest, RepoRef
-    from codex_review.interfaces import ReviewEngineError
-
     stderr = (
         b"OpenAI Codex v0.124.0\n"
         b"--------\n"
@@ -235,9 +428,6 @@ async def test_review_uses_context_error_before_tokens_used_footer(
     monkeypatch: pytest.MonkeyPatch,
     stderr: bytes,
 ) -> None:
-    from codex_review.domain import FileDump, FileEntry, PullRequest, RepoRef
-    from codex_review.interfaces import ReviewEngineError
-
     _patch_subprocess(monkeypatch, _FakeProc(1, stdout=b"", stderr=stderr))
 
     pr = PullRequest(

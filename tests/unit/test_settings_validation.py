@@ -28,6 +28,7 @@ _ALL_ALIASES = (
     "GITHUB_APP_SLUG",
     "CODEX_BIN",
     "CODEX_MODEL",
+    "CODEX_MODEL_FALLBACKS",
     "CODEX_REASONING_EFFORT",
     "CODEX_TIMEOUT_SEC",
     "CODEX_MAX_INPUT_TOKENS",
@@ -56,6 +57,10 @@ def _settings(monkeypatch: pytest.MonkeyPatch, **overrides: str) -> Settings:
 
 def test_defaults_are_all_valid(monkeypatch: pytest.MonkeyPatch) -> None:
     s = _settings(monkeypatch)
+    assert s.codex_model == "codex-5.3-spark"
+    assert s.codex_model_fallbacks == ("gpt-5.5",)
+    assert s.codex_model_sequence == ("codex-5.3-spark", "gpt-5.5")
+    assert s.codex_model_label == "codex-5.3-spark -> gpt-5.5"
     assert s.review_concurrency == 1
     assert s.codex_timeout_sec == 600
     assert s.git_timeout_sec == 120
@@ -152,6 +157,28 @@ def test_whitespace_only_host_is_rejected(monkeypatch: pytest.MonkeyPatch) -> No
 def test_whitespace_only_codex_model_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(ValidationError):
         _settings(monkeypatch, CODEX_MODEL="\t\n ")
+
+
+def test_codex_model_fallbacks_are_parsed_and_deduplicated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    s = _settings(
+        monkeypatch,
+        CODEX_MODEL="codex-5.3-spark",
+        CODEX_MODEL_FALLBACKS=" gpt-5.5, codex-5.3-spark, gpt-5.4 ",
+    )
+
+    assert s.codex_model_fallbacks == ("gpt-5.5", "codex-5.3-spark", "gpt-5.4")
+    assert s.codex_model_sequence == ("codex-5.3-spark", "gpt-5.5", "gpt-5.4")
+
+
+def test_codex_model_fallbacks_can_be_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    s = _settings(monkeypatch, CODEX_MODEL_FALLBACKS="  ")
+
+    assert s.codex_model_fallbacks == ()
+    assert s.codex_model_sequence == ("codex-5.3-spark",)
 
 
 def test_enable_diff_fallback_default_is_true(monkeypatch: pytest.MonkeyPatch) -> None:
