@@ -43,7 +43,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 private_key_pem=settings.load_private_key(),
                 http_client=http_client,
                 dry_run=settings.dry_run,
-                review_model_label=settings.codex_model,
+                review_model_label=settings.codex_model_label,
             )
             repo_fetcher = GitRepoFetcher(
                 cache_dir=settings.repo_cache_dir,
@@ -57,6 +57,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             engine = CodexCliEngine(
                 binary=settings.codex_bin,
                 model=settings.codex_model,
+                fallback_models=settings.codex_model_fallbacks,
                 reasoning_effort=settings.codex_reasoning_effort,
                 timeout_sec=settings.codex_timeout_sec,
             )

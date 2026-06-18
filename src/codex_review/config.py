@@ -8,6 +8,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # HMAC 무력화·바인딩 실패 같은 조용한 설정 사고를 기동 단계에서 막을 수 있다 (codex 리뷰).
 # `strip_whitespace=True` 로 주변 공백을 제거한 뒤 `min_length=1` 을 평가한다.
 NonBlankStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+_DEFAULT_CODEX_MODEL = "codex-5.3-spark"
+_DEFAULT_CODEX_MODEL_FALLBACKS = "gpt-5.5"
 
 
 class Settings(BaseSettings):
@@ -37,7 +39,10 @@ class Settings(BaseSettings):
 
     # Codex CLI — 음수/0 타임아웃이나 토큰 한도는 리뷰를 즉시 실패시키므로 `gt=0` 로 고정.
     codex_bin: str = Field(default="codex", alias="CODEX_BIN")
-    codex_model: NonBlankStr = Field(default="gpt-5.5", alias="CODEX_MODEL")
+    codex_model: NonBlankStr = Field(default=_DEFAULT_CODEX_MODEL, alias="CODEX_MODEL")
+    codex_fallback_models: str = Field(
+        default=_DEFAULT_CODEX_MODEL_FALLBACKS, alias="CODEX_MODEL_FALLBACKS"
+    )
     codex_reasoning_effort: str = Field(default="high", alias="CODEX_REASONING_EFFORT")
     codex_timeout_sec: int = Field(default=600, gt=0, alias="CODEX_TIMEOUT_SEC")
     codex_max_input_tokens: int = Field(default=258_400, gt=0, alias="CODEX_MAX_INPUT_TOKENS")
@@ -73,3 +78,30 @@ class Settings(BaseSettings):
         raise RuntimeError(
             "GITHUB_APP_PRIVATE_KEY 또는 GITHUB_APP_PRIVATE_KEY_PATH 중 하나가 필요합니다."
         )
+
+    @property
+    def codex_model_fallbacks(self) -> tuple[str, ...]:
+        return _split_model_list(self.codex_fallback_models)
+
+    @property
+    def codex_model_sequence(self) -> tuple[str, ...]:
+        return _dedupe_models((self.codex_model, *self.codex_model_fallbacks))
+
+    @property
+    def codex_model_label(self) -> str:
+        return " -> ".join(self.codex_model_sequence)
+
+
+def _split_model_list(raw: str) -> tuple[str, ...]:
+    return tuple(part for part in (item.strip() for item in raw.split(",")) if part)
+
+
+def _dedupe_models(models: tuple[str, ...]) -> tuple[str, ...]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for model in models:
+        if model in seen:
+            continue
+        seen.add(model)
+        ordered.append(model)
+    return tuple(ordered)

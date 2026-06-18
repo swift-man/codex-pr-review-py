@@ -8,7 +8,7 @@ GitHub App 웹훅으로 PR 이벤트를 받아, 레포를 체크아웃하고 전
 
 - GitHub App 설치 토큰 기반 인증 (PAT 불필요)
 - diff가 아닌 **전체 코드베이스**를 컨텍스트로 사용
-- Codex CLI를 `subprocess`로 호출 → 로그인된 ChatGPT 계정의 OAuth 토큰 사용 (기본 모델 `gpt-5.5`)
+- Codex CLI를 `subprocess`로 호출 → 로그인된 ChatGPT 계정의 OAuth 토큰 사용 (기본 리뷰 순서 `codex-5.3-spark` → `gpt-5.5`)
 - 한국어 리뷰 고정 출력 (JSON 스키마 강제)
 - **리뷰 4섹션**: `좋은 점` / `🔴 반드시 수정할 사항` / `💡 권장 개선 사항` / `기술 단위 코멘트(라인 고정)`
 - 라인 코멘트는 **4단계 등급**(`Critical` / `Major` / `Minor` / `Suggestion`) 으로 분류되고, PR 화면에서 각 코멘트 본문 최상단에 `[Critical] …` 형태의 대괄호 접두로 표기
@@ -28,7 +28,7 @@ GitHub PR event
       2. PR 메타 / 변경 파일 조회
       3. git clone --filter=blob:none + checkout head SHA (캐시)
       4. 파일 수집 + 필터 + 우선순위 + 토큰 예산
-      5. `codex exec --model ... -` 호출 (stdin: 프롬프트)
+      5. `codex exec --model ... -` 호출 (stdin: 프롬프트, 모델 실패 시 fallback 순서대로 재시도)
       6. JSON 파싱 → POST /pulls/{n}/reviews
 ```
 
@@ -93,7 +93,8 @@ REPO_FULL_NAME=owner/repo PR_NUMBER=1 INSTALLATION_ID=1234567 \
 | `GITHUB_APP_PRIVATE_KEY_PATH` | — | PEM 경로 (또는 `GITHUB_APP_PRIVATE_KEY` inline) |
 | `GITHUB_WEBHOOK_SECRET` | — | HMAC 서명 검증용 비밀 (필수) |
 | `CODEX_BIN` | `codex` | Codex CLI 실행 파일 |
-| `CODEX_MODEL` | `gpt-5.5` | 모델 (`gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.3-codex`, `gpt-5.2`, `codex-auto-review`) |
+| `CODEX_MODEL` | `codex-5.3-spark` | 1순위 리뷰 모델 |
+| `CODEX_MODEL_FALLBACKS` | `gpt-5.5` | 쉼표로 구분한 fallback 모델 목록. 비우면 fallback 없이 `CODEX_MODEL`만 사용 |
 | `CODEX_REASONING_EFFORT` | `high` | `low`/`medium`/`high`/`xhigh` |
 | `CODEX_MAX_INPUT_TOKENS` | `258400` | Codex CLI에 전달할 입력 프롬프트 토큰 예산 |
 | `CODEX_TIMEOUT_SEC` | `600` | 호출 타임아웃 |

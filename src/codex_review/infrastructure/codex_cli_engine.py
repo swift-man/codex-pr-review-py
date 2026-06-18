@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from collections.abc import Sequence
 
 from codex_review.domain import FileDump, PullRequest, ReviewHistory, ReviewResult
 from codex_review.interfaces import ReviewEngineError
@@ -26,12 +27,14 @@ class CodexCliEngine:
     def __init__(
         self,
         binary: str = "codex",
-        model: str = "codex-auto-review",
+        model: str = "codex-5.3-spark",
+        fallback_models: Sequence[str] = (),
         reasoning_effort: str = "high",
         timeout_sec: int = 600,
     ) -> None:
         self._binary = binary
-        self._model = model
+        self._models = _dedupe_models((model, *fallback_models))
+        self._model = self._models[0]
         self._reasoning_effort = reasoning_effort
         self._timeout_sec = timeout_sec
 
@@ -84,18 +87,53 @@ class CodexCliEngine:
         history: ReviewHistory | None = None,
     ) -> ReviewResult:
         prompt = build_prompt(pr, dump, history=history)
+        last_error: ReviewEngineError | None = None
+        for idx, model in enumerate(self._models):
+            try:
+                return await self._review_with_model(prompt, dump, model=model)
+            except ReviewEngineError as exc:
+                last_error = exc
+                next_model = self._models[idx + 1] if idx + 1 < len(self._models) else None
+                if next_model is None:
+                    break
+                logger.warning(
+                    "codex model failed; trying fallback model "
+                    "(failed_model=%s next_model=%s): %s",
+                    model,
+                    next_model,
+                    exc,
+                )
+
+        if last_error is None:
+            raise ReviewEngineError("codex exec failed before any model was attempted")
+        if len(self._models) == 1:
+            raise last_error
+        attempted = " -> ".join(self._models)
+        raise ReviewEngineError(
+            f"codex exec fallback exhausted (models={attempted}); "
+            f"last error: {last_error}",
+            returncode=last_error.returncode,
+        ) from last_error
+
+    async def _review_with_model(
+        self,
+        prompt: str,
+        dump: FileDump,
+        *,
+        model: str,
+    ) -> ReviewResult:
         # "-" positional 은 codex exec 에 stdin 에서 프롬프트를 읽으라는 지시.
         # argv 로 넘기면 전체 레포 덤프가 ARG_MAX 를 초과할 수 있어 stdin 이 안전.
         logger.info(
             "invoking codex: files=%d chars=%d model=%s effort=%s",
             len(dump.entries),
             dump.total_chars,
-            self._model,
+            model,
             self._reasoning_effort,
         )
         proc = await asyncio.create_subprocess_exec(
             self._binary, "exec",
-            "--model", self._model,
+            "--model", model,
             # reasoning_effort 는 config 오버라이드로 넘긴다 — `codex exec` 가 별도 CLI 플래그로
             # 지원하지 않고 ~/.codex/config.toml 값만 읽기 때문.
             "--config", f"model_reasoning_effort={self._reasoning_effort}",
@@ -133,7 +171,7 @@ class CodexCliEngine:
             # 에 섞여 있어도 안전 (logging_utils 갱신 — codex PR #18 Major 반영).
             logger.error(
                 "codex exec failed (rc=%d, model=%s):\n%s",
-                proc.returncode, self._model, err or "(no stderr)",
+                proc.returncode, model, err or "(no stderr)",
             )
             # ReviewEngineError 로 분리 — use case 가 일반 버그(KeyError 등) 와 구분해
             # diff fallback 결정을 정확히 내릴 수 있게 (gemini PR #18 Major+Suggestion 반영).
@@ -147,7 +185,7 @@ class CodexCliEngine:
             # (codex PR #18 Critical 반영).
             summary = _summarize_stderr(err)
             raise ReviewEngineError(
-                f"codex exec failed (rc={proc.returncode}, model={self._model}): {summary}",
+                f"codex exec failed (rc={proc.returncode}, model={model}): {summary}",
                 returncode=proc.returncode,
             )
 
@@ -175,3 +213,16 @@ def _is_codex_stderr_footer_line(line: str) -> bool:
         return False
     token_count = suffix[1:].strip().replace(",", "")
     return token_count.isdecimal()
+
+
+def _dedupe_models(models: tuple[str, ...]) -> tuple[str, ...]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for model in models:
+        if model in seen:
+            continue
+        seen.add(model)
+        ordered.append(model)
+    if not ordered:
+        raise ValueError("at least one Codex model is required")
+    return tuple(ordered)

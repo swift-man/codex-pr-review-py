@@ -8,8 +8,10 @@ export GITHUB_WEBHOOK_SECRET="change-me-long-random"
 
 # --- Codex CLI ---
 # Available models (queryable via ~/.codex/models_cache.json):
-#   gpt-5.5, gpt-5.4, gpt-5.4-mini, gpt-5.3-codex, gpt-5.2, codex-auto-review
-export CODEX_MODEL="gpt-5.5"
+#   codex-5.3-spark, gpt-5.5, gpt-5.4, gpt-5.4-mini, gpt-5.3-codex, gpt-5.2,
+#   codex-auto-review
+export CODEX_MODEL="codex-5.3-spark"
+export CODEX_MODEL_FALLBACKS="gpt-5.5"
 export CODEX_REASONING_EFFORT="high"   # low | medium | high | xhigh
 # gpt-5.5 API docs list a 1,050,000-token context window, but the Codex CLI
 # ChatGPT-auth catalog currently exposes a 272,000-token input window and uses
