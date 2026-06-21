@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from collections.abc import Sequence
+from dataclasses import replace
 
 from codex_review.domain import FileDump, PullRequest, ReviewHistory, ReviewResult
 from codex_review.interfaces import ReviewEngineError
@@ -210,7 +211,7 @@ class CodexCliEngine:
                 returncode=proc.returncode,
             )
 
-        return parse_review(stdout.decode(errors="replace"))
+        return replace(parse_review(stdout.decode(errors="replace")), model_used=model)
 
 
 def _summarize_stderr(stderr: str) -> str:
