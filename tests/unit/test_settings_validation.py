@@ -57,10 +57,10 @@ def _settings(monkeypatch: pytest.MonkeyPatch, **overrides: str) -> Settings:
 
 def test_defaults_are_all_valid(monkeypatch: pytest.MonkeyPatch) -> None:
     s = _settings(monkeypatch)
-    assert s.codex_model == "codex-5.3-spark"
+    assert s.codex_model == "gpt-5.3-codex-spark"
     assert s.codex_model_fallbacks == ("gpt-5.5",)
-    assert s.codex_model_sequence == ("codex-5.3-spark", "gpt-5.5")
-    assert s.codex_model_label == "codex-5.3-spark -> gpt-5.5"
+    assert s.codex_model_sequence == ("gpt-5.3-codex-spark", "gpt-5.5")
+    assert s.codex_model_label == "gpt-5.3-codex-spark -> gpt-5.5"
     assert s.review_concurrency == 1
     assert s.codex_timeout_sec == 600
     assert s.git_timeout_sec == 120
@@ -164,12 +164,12 @@ def test_codex_model_fallbacks_are_parsed_and_deduplicated(
 ) -> None:
     s = _settings(
         monkeypatch,
-        CODEX_MODEL="codex-5.3-spark",
-        CODEX_MODEL_FALLBACKS=" gpt-5.5, codex-5.3-spark, gpt-5.4 ",
+        CODEX_MODEL="gpt-5.3-codex-spark",
+        CODEX_MODEL_FALLBACKS=" gpt-5.5, gpt-5.3-codex-spark, gpt-5.4 ",
     )
 
-    assert s.codex_model_fallbacks == ("gpt-5.5", "codex-5.3-spark", "gpt-5.4")
-    assert s.codex_model_sequence == ("codex-5.3-spark", "gpt-5.5", "gpt-5.4")
+    assert s.codex_model_fallbacks == ("gpt-5.5", "gpt-5.3-codex-spark", "gpt-5.4")
+    assert s.codex_model_sequence == ("gpt-5.3-codex-spark", "gpt-5.5", "gpt-5.4")
 
 
 def test_codex_model_fallbacks_can_be_disabled(
@@ -178,7 +178,7 @@ def test_codex_model_fallbacks_can_be_disabled(
     s = _settings(monkeypatch, CODEX_MODEL_FALLBACKS="  ")
 
     assert s.codex_model_fallbacks == ()
-    assert s.codex_model_sequence == ("codex-5.3-spark",)
+    assert s.codex_model_sequence == ("gpt-5.3-codex-spark",)
 
 
 def test_enable_diff_fallback_default_is_true(monkeypatch: pytest.MonkeyPatch) -> None:

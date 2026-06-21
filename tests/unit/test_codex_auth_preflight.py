@@ -3,7 +3,14 @@ from typing import Any
 
 import pytest
 
-from codex_review.domain import FileDump, FileEntry, PullRequest, RepoRef, ReviewResult
+from codex_review.domain import (
+    FileDump,
+    FileEntry,
+    PullRequest,
+    RepoRef,
+    ReviewEvent,
+    ReviewResult,
+)
 from codex_review.infrastructure.codex_cli_engine import CodexAuthError, CodexCliEngine
 from codex_review.interfaces import ReviewEngineError
 
@@ -231,7 +238,7 @@ async def test_review_tries_fallback_model_after_primary_failure(
     pr, dump = _sample_review_input()
     eng = CodexCliEngine(
         binary="codex",
-        model="codex-5.3-spark",
+        model="gpt-5.3-codex-spark",
         fallback_models=("gpt-5.5",),
     )
 
@@ -239,7 +246,7 @@ async def test_review_tries_fallback_model_after_primary_failure(
 
     assert result.summary == "ok"
     assert [call[call.index("--model") + 1] for call in calls] == [
-        "codex-5.3-spark",
+        "gpt-5.3-codex-spark",
         "gpt-5.5",
     ]
 
@@ -266,15 +273,15 @@ async def test_review_limits_total_timeout_across_fallbacks(
         timeout_sec: float,
     ) -> ReviewResult:
         calls.append((model, timeout_sec))
-        if model == "codex-5.3-spark":
+        if model == "gpt-5.3-codex-spark":
             fake_loop._time = 4.0
             raise ReviewEngineError("first model failed")
-        return ReviewResult(summary="ok", event="COMMENT")
+        return ReviewResult(summary="ok", event=ReviewEvent.COMMENT)
 
     pr, dump = _sample_review_input()
     eng = CodexCliEngine(
         binary="codex",
-        model="codex-5.3-spark",
+        model="gpt-5.3-codex-spark",
         fallback_models=("gpt-5.5",),
         timeout_sec=5,
     )
@@ -284,7 +291,7 @@ async def test_review_limits_total_timeout_across_fallbacks(
     result = await eng.review(pr, dump)
 
     assert result.summary == "ok"
-    assert [model for model, _ in calls] == ["codex-5.3-spark", "gpt-5.5"]
+    assert [model for model, _ in calls] == ["gpt-5.3-codex-spark", "gpt-5.5"]
     assert calls[0][1] == 5.0
     assert calls[1][1] == 1.0
 
@@ -317,7 +324,7 @@ async def test_review_raises_when_timeout_budget_is_exhausted_before_fallback(
     pr, dump = _sample_review_input()
     eng = CodexCliEngine(
         binary="codex",
-        model="codex-5.3-spark",
+        model="gpt-5.3-codex-spark",
         fallback_models=("gpt-5.5",),
         timeout_sec=5,
     )
@@ -329,8 +336,8 @@ async def test_review_raises_when_timeout_budget_is_exhausted_before_fallback(
 
     assert "timeout budget exhausted" in str(exc_info.value)
     assert exc_info.value.__cause__ is not None
-    assert "codex-5.3-spark failed" in str(exc_info.value.__cause__)
-    assert calls == [("codex-5.3-spark", 5.0)]
+    assert "gpt-5.3-codex-spark failed" in str(exc_info.value.__cause__)
+    assert calls == [("gpt-5.3-codex-spark", 5.0)]
 
 
 async def test_review_reports_attempted_models_when_fallbacks_exhausted(
@@ -349,7 +356,7 @@ async def test_review_reports_attempted_models_when_fallbacks_exhausted(
     pr, dump = _sample_review_input()
     eng = CodexCliEngine(
         binary="codex",
-        model="codex-5.3-spark",
+        model="gpt-5.3-codex-spark",
         fallback_models=("gpt-5.5",),
     )
 
@@ -357,12 +364,12 @@ async def test_review_reports_attempted_models_when_fallbacks_exhausted(
         await eng.review(pr, dump)
 
     msg = str(exc_info.value)
-    assert "codex-5.3-spark -> gpt-5.5" in msg
+    assert "gpt-5.3-codex-spark -> gpt-5.5" in msg
     assert "last error" in msg
     assert "gpt quota exhausted" in msg
     assert exc_info.value.returncode == 1
     assert [call[call.index("--model") + 1] for call in calls] == [
-        "codex-5.3-spark",
+        "gpt-5.3-codex-spark",
         "gpt-5.5",
     ]
 
