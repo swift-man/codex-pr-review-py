@@ -27,7 +27,7 @@ class CodexCliEngine:
     def __init__(
         self,
         binary: str = "codex",
-        model: str = "codex-5.3-spark",
+        model: str = "gpt-5.3-codex-spark",
         fallback_models: Sequence[str] = (),
         reasoning_effort: str = "high",
         timeout_sec: int = 600,
@@ -113,14 +113,13 @@ class CodexCliEngine:
                     model,
                     next_model,
                     exc,
-                )
+        )
 
         if last_error is None:
-            raise ReviewEngineError("codex exec timeout budget exhausted before any model was attempted")
-        if not attempted_models:
-            attempted = "(none)"
-        else:
-            attempted = " -> ".join(attempted_models)
+            raise ReviewEngineError(
+                "codex exec timeout budget exhausted before any model was attempted"
+            )
+        attempted = "(none)" if not attempted_models else " -> ".join(attempted_models)
         if asyncio.get_running_loop().time() >= deadline:
             budget_error = ReviewEngineError(
                 f"codex exec timeout budget exhausted (attempted={attempted})"

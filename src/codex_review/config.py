@@ -8,7 +8,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # HMAC 무력화·바인딩 실패 같은 조용한 설정 사고를 기동 단계에서 막을 수 있다 (codex 리뷰).
 # `strip_whitespace=True` 로 주변 공백을 제거한 뒤 `min_length=1` 을 평가한다.
 NonBlankStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
-_DEFAULT_CODEX_MODEL = "codex-5.3-spark"
+_DEFAULT_CODEX_MODEL = "gpt-5.3-codex-spark"
 _DEFAULT_CODEX_MODEL_FALLBACKS = "gpt-5.5"
 
 
