@@ -113,7 +113,7 @@ class CodexCliEngine:
                     model,
                     next_model,
                     exc,
-        )
+                )
 
         if last_error is None:
             raise ReviewEngineError(

@@ -3,7 +3,14 @@ from typing import Any
 
 import pytest
 
-from codex_review.domain import FileDump, FileEntry, PullRequest, RepoRef, ReviewResult
+from codex_review.domain import (
+    FileDump,
+    FileEntry,
+    PullRequest,
+    RepoRef,
+    ReviewEvent,
+    ReviewResult,
+)
 from codex_review.infrastructure.codex_cli_engine import CodexAuthError, CodexCliEngine
 from codex_review.interfaces import ReviewEngineError
 
@@ -269,7 +276,7 @@ async def test_review_limits_total_timeout_across_fallbacks(
         if model == "gpt-5.3-codex-spark":
             fake_loop._time = 4.0
             raise ReviewEngineError("first model failed")
-        return ReviewResult(summary="ok", event="COMMENT")
+        return ReviewResult(summary="ok", event=ReviewEvent.COMMENT)
 
     pr, dump = _sample_review_input()
     eng = CodexCliEngine(
