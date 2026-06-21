@@ -48,8 +48,8 @@ def _with_model_footer(body: str, model_label: str | None) -> str:
     return body + _MODEL_FOOTER_TEMPLATE.format(label=model_label)
 
 
-def _review_model_label(result: ReviewResult, configured_label: str | None) -> str | None:
-    return result.model_used or configured_label
+def _resolve_model_label(result: ReviewResult, configured_label: str | None) -> str | None:
+    return result.model_used if result.model_used is not None else configured_label
 
 
 class _LockRegistry:
@@ -307,7 +307,7 @@ class GitHubAppClient:
             "commit_id": pr.head_sha,
             "body": _with_model_footer(
                 result.render_body(),
-                _review_model_label(result, self._review_model_label),
+                _resolve_model_label(result, self._review_model_label),
             ),
             "event": result.event.value,
             "comments": [_finding_to_comment(f) for f in result.findings],
@@ -340,7 +340,7 @@ class GitHubAppClient:
                 )
                 payload["body"] = _with_model_footer(
                     retry_result.render_body(),
-                    _review_model_label(retry_result, self._review_model_label),
+                    _resolve_model_label(retry_result, self._review_model_label),
                 )
                 payload["comments"] = []
                 if not await self._is_current_pull_head(pr):
