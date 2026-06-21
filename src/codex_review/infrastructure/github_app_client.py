@@ -38,7 +38,7 @@ def _default_tls_context() -> ssl.SSLContext:
     return ssl.create_default_context(cafile=certifi.where())
 
 
-# 리뷰 본문 footer 포맷. 모델명은 설정된 모델 시도 순서를 표시한다.
+# 리뷰 본문 footer 포맷. 모델명은 가능하면 실제 성공한 모델을, 없으면 설정 라벨을 표시한다.
 _MODEL_FOOTER_TEMPLATE = "\n\n---\n<sub>리뷰 모델: <code>{label}</code></sub>"
 
 
@@ -46,6 +46,10 @@ def _with_model_footer(body: str, model_label: str | None) -> str:
     if not model_label:
         return body
     return body + _MODEL_FOOTER_TEMPLATE.format(label=model_label)
+
+
+def _resolve_model_label(result: ReviewResult, configured_label: str | None) -> str | None:
+    return result.model_used if result.model_used is not None else configured_label
 
 
 class _LockRegistry:
@@ -301,7 +305,10 @@ class GitHubAppClient:
         # 붙어 라인 번호 오정렬이 발생할 수 있다.
         payload: dict[str, object] = {
             "commit_id": pr.head_sha,
-            "body": _with_model_footer(result.render_body(), self._review_model_label),
+            "body": _with_model_footer(
+                result.render_body(),
+                _resolve_model_label(result, self._review_model_label),
+            ),
             "event": result.event.value,
             "comments": [_finding_to_comment(f) for f in result.findings],
         }
@@ -332,7 +339,8 @@ class GitHubAppClient:
                     dropped_findings=result.dropped_findings + result.findings,
                 )
                 payload["body"] = _with_model_footer(
-                    retry_result.render_body(), self._review_model_label
+                    retry_result.render_body(),
+                    _resolve_model_label(retry_result, self._review_model_label),
                 )
                 payload["comments"] = []
                 if not await self._is_current_pull_head(pr):

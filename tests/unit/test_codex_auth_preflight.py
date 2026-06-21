@@ -245,10 +245,30 @@ async def test_review_tries_fallback_model_after_primary_failure(
     result = await eng.review(pr, dump)
 
     assert result.summary == "ok"
+    assert result.model_used == "gpt-5.5"
     assert [call[call.index("--model") + 1] for call in calls] == [
         "gpt-5.3-codex-spark",
         "gpt-5.5",
     ]
+
+
+async def test_review_records_successful_primary_model_used(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stdout = b'{"summary":"ok","event":"COMMENT","comments":[]}\n'
+    _patch_subprocess(monkeypatch, _FakeProc(0, stdout=stdout, stderr=b""))
+
+    pr, dump = _sample_review_input()
+    eng = CodexCliEngine(
+        binary="codex",
+        model="gpt-5.3-codex-spark",
+        fallback_models=("gpt-5.5",),
+    )
+
+    result = await eng.review(pr, dump)
+
+    assert result.summary == "ok"
+    assert result.model_used == "gpt-5.3-codex-spark"
 
 
 async def test_review_limits_total_timeout_across_fallbacks(

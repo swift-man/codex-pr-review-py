@@ -27,6 +27,9 @@ class ReviewResult:
     # post 후 `reply_to_review_comment` 로 게시. 빈 튜플이면 메타리플라이 게시 단계
     # 자체를 건너뛴다 — 기존 동작 회귀 보호.
     meta_replies: tuple[MetaReply, ...] = field(default_factory=tuple)
+    # 실제 리뷰 응답을 생성한 모델. 설정된 fallback 순서가 아니라 성공한 모델만 footer 에
+    # 표시하기 위한 실행 메타데이터다. 파서 단독 사용 경로는 None 으로 유지된다.
+    model_used: str | None = None
 
     def render_body(self) -> str:
         parts: list[str] = [self.summary.strip()]
@@ -40,7 +43,10 @@ class ReviewResult:
             parts.append("\n**💡 권장 개선 사항**")
             parts.extend(f"- {i}" for i in self.improvements)
         if self.findings:
-            parts.append(f"\n_기술 단위 코멘트 {len(self.findings)}건은 각 라인에 별도 표시됩니다._")
+            parts.append(
+                f"\n_기술 단위 코멘트 {len(self.findings)}건은 "
+                "각 라인에 별도 표시됩니다._"
+            )
         if self.dropped_findings:
             parts.append(_render_dropped_findings(self.dropped_findings))
         return "\n".join(parts).strip()

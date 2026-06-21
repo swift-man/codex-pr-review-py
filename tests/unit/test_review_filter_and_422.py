@@ -236,11 +236,12 @@ async def stubbed_github(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Any]:
         yield make_client, posts
 
 
-def _review_result_with_inline() -> ReviewResult:
+def _review_result_with_inline(*, model_used: str | None = None) -> ReviewResult:
     return ReviewResult(
         summary="s",
         event=ReviewEvent.COMMENT,
         findings=(Finding(path="a.py", line=10, body="x"),),
+        model_used=model_used,
     )
 
 
@@ -578,6 +579,24 @@ async def test_post_review_appends_model_footer_from_constant_label(stubbed_gith
     assert "리뷰 모델" in body
 
 
+async def test_post_review_footer_prefers_actual_model_used(stubbed_github) -> None:
+    make_client, posts = stubbed_github
+    client = make_client(review_model_label="gpt-5.3-codex-spark -> gpt-5.5")
+
+    await client.post_review(
+        _pr(),
+        ReviewResult(
+            summary="요약",
+            event=ReviewEvent.COMMENT,
+            model_used="gpt-5.3-codex-spark",
+        ),
+    )
+
+    body = _body_of(posts[0])["body"]
+    assert body.rstrip().endswith("<code>gpt-5.3-codex-spark</code></sub>")
+    assert "gpt-5.3-codex-spark -> gpt-5.5" not in body
+
+
 async def test_post_review_omits_footer_when_label_is_none(stubbed_github) -> None:
     make_client, posts = stubbed_github
     client = make_client(review_model_label=None)
@@ -591,13 +610,20 @@ async def test_post_review_omits_footer_when_label_is_none(stubbed_github) -> No
 
 async def test_post_review_422_retry_keeps_model_footer(stubbed_github) -> None:
     make_client, posts = stubbed_github
-    client = make_client(review_model_label="gpt-5.4", responses=[422])
+    client = make_client(
+        review_model_label="gpt-5.3-codex-spark -> gpt-5.5",
+        responses=[422],
+    )
 
     await client.post_review(
         _pr(diff_right_lines={"a.py": frozenset({10})}),
-        _review_result_with_inline(),
+        _review_result_with_inline(model_used="gpt-5.3-codex-spark"),
     )
 
     assert "리뷰 모델" in _body_of(posts[0])["body"]
     assert "리뷰 모델" in _body_of(posts[1])["body"]
+    assert _body_of(posts[1])["body"].rstrip().endswith(
+        "<code>gpt-5.3-codex-spark</code></sub>"
+    )
+    assert "gpt-5.3-codex-spark -> gpt-5.5" not in _body_of(posts[1])["body"]
     assert "기술 단위 코멘트" not in _body_of(posts[1])["body"]
