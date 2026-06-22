@@ -5,6 +5,8 @@
 조용히 보정돼 운영자가 실수를 인지하지 못했다.
 """
 
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
@@ -66,6 +68,15 @@ def test_defaults_are_all_valid(monkeypatch: pytest.MonkeyPatch) -> None:
     assert s.git_timeout_sec == 120
     assert s.codex_max_input_tokens == 121_600
     assert s.review_queue_maxsize is None
+
+
+def test_local_review_env_example_uses_spark_budget() -> None:
+    example = Path(__file__).resolve().parents[2] / "scripts" / "local_review_env.example.sh"
+    text = example.read_text(encoding="utf-8")
+
+    assert 'export CODEX_MODEL="gpt-5.3-codex-spark"' in text
+    assert 'export CODEX_MAX_INPUT_TOKENS="121600"' in text
+    assert 'export CODEX_MAX_INPUT_TOKENS="258400"' not in text
 
 
 def test_review_concurrency_zero_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
