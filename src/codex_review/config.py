@@ -10,6 +10,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 NonBlankStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 _DEFAULT_CODEX_MODEL = "gpt-5.3-codex-spark"
 _DEFAULT_CODEX_MODEL_FALLBACKS = "gpt-5.5"
+# Codex CLI catalog 기준 Spark 유효 입력 윈도우. 이 값보다 크게 잡으면 1순위
+# Spark가 컨텍스트 초과로 실패하고 5.5 fallback만 실제 리뷰를 생성하기 쉽다.
+_DEFAULT_CODEX_MAX_INPUT_TOKENS = 121_600
 
 
 class Settings(BaseSettings):
@@ -45,7 +48,11 @@ class Settings(BaseSettings):
     )
     codex_reasoning_effort: str = Field(default="high", alias="CODEX_REASONING_EFFORT")
     codex_timeout_sec: int = Field(default=600, gt=0, alias="CODEX_TIMEOUT_SEC")
-    codex_max_input_tokens: int = Field(default=258_400, gt=0, alias="CODEX_MAX_INPUT_TOKENS")
+    codex_max_input_tokens: int = Field(
+        default=_DEFAULT_CODEX_MAX_INPUT_TOKENS,
+        gt=0,
+        alias="CODEX_MAX_INPUT_TOKENS",
+    )
     # 예산 초과 시 diff-only 모드 자동 fallback 활성화 여부 (기본 True).
     # False 로 내리면 기존 "리뷰 스킵 + 안내 코멘트" 경로만 남는다 — 리뷰 품질을
     # 보수적으로 보장하고 싶은 운영 환경 대비 옵트아웃. (gemini PR #17 제안)

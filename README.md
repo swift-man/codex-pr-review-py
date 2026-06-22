@@ -83,9 +83,10 @@ REPO_FULL_NAME=owner/repo PR_NUMBER=1 INSTALLATION_ID=1234567 \
 
 ## 환경 변수
 
-> 참고: `gpt-5.5` API 문서는 컨텍스트 1,050,000 / 최대 출력 128,000을 표기하지만,
-> 이 서비스가 사용하는 Codex CLI(ChatGPT auth) 카탈로그는 현재 입력 윈도우 272,000의
-> 95%인 258,400을 유효 프롬프트 예산으로 사용한다.
+> 참고: 기본 모델인 `gpt-5.3-codex-spark`는 Codex CLI(ChatGPT auth) 카탈로그 기준
+> 입력 윈도우 128,000의 95%인 121,600을 유효 프롬프트 예산으로 사용한다.
+> `gpt-5.5`를 1순위 모델로 운영할 때는 더 큰 입력 예산을 `CODEX_MAX_INPUT_TOKENS`
+> 환경 변수로 명시한다.
 
 | 변수 | 기본값 | 설명 |
 |---|---|---|
@@ -96,7 +97,7 @@ REPO_FULL_NAME=owner/repo PR_NUMBER=1 INSTALLATION_ID=1234567 \
 | `CODEX_MODEL` | `gpt-5.3-codex-spark` | 1순위 리뷰 모델 |
 | `CODEX_MODEL_FALLBACKS` | `gpt-5.5` | 쉼표로 구분한 fallback 모델 목록. 비우면 fallback 없이 `CODEX_MODEL`만 사용 |
 | `CODEX_REASONING_EFFORT` | `high` | `low`/`medium`/`high`/`xhigh` |
-| `CODEX_MAX_INPUT_TOKENS` | `258400` | Codex CLI에 전달할 입력 프롬프트 토큰 예산 |
+| `CODEX_MAX_INPUT_TOKENS` | `121600` | Codex CLI에 전달할 입력 프롬프트 토큰 예산. 기본값은 1순위 Spark 모델의 유효 컨텍스트에 맞춘 값 |
 | `CODEX_TIMEOUT_SEC` | `600` | 호출 타임아웃 |
 | `REPO_CACHE_DIR` | `~/.codex-review/repos` | clone 캐시 위치 |
 | `GIT_TIMEOUT_SEC` | `120` | git clone/fetch/checkout/ls-files 호출 타임아웃 |

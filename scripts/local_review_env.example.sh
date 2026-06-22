@@ -13,10 +13,10 @@ export GITHUB_WEBHOOK_SECRET="change-me-long-random"
 export CODEX_MODEL="gpt-5.3-codex-spark"
 export CODEX_MODEL_FALLBACKS="gpt-5.5"
 export CODEX_REASONING_EFFORT="high"   # low | medium | high | xhigh
-# gpt-5.5 API docs list a 1,050,000-token context window, but the Codex CLI
-# ChatGPT-auth catalog currently exposes a 272,000-token input window and uses
-# 95% of that as the effective prompt budget.
-export CODEX_MAX_INPUT_TOKENS="258400"
+# 기본 모델 gpt-5.3-codex-spark 는 Codex CLI ChatGPT-auth catalog 기준 입력 윈도우
+# 128,000 의 95% 인 121,600 을 유효 프롬프트 예산으로 사용한다. gpt-5.5 를
+# CODEX_MODEL 로 올려 1순위 운영할 때만 258,400 등 더 큰 예산을 명시한다.
+export CODEX_MAX_INPUT_TOKENS="121600"
 export CODEX_TIMEOUT_SEC="600"
 # Codex Desktop app bundle이 설치돼 있다면:
 #   export CODEX_BIN="/Applications/Codex.app/Contents/Resources/codex"
