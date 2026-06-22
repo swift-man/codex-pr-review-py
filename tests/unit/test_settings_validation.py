@@ -64,7 +64,7 @@ def test_defaults_are_all_valid(monkeypatch: pytest.MonkeyPatch) -> None:
     assert s.review_concurrency == 1
     assert s.codex_timeout_sec == 600
     assert s.git_timeout_sec == 120
-    assert s.codex_max_input_tokens == 258_400
+    assert s.codex_max_input_tokens == 121_600
     assert s.review_queue_maxsize is None
 
 
