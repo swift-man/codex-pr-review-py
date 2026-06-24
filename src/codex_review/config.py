@@ -8,11 +8,13 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # HMAC 무력화·바인딩 실패 같은 조용한 설정 사고를 기동 단계에서 막을 수 있다 (codex 리뷰).
 # `strip_whitespace=True` 로 주변 공백을 제거한 뒤 `min_length=1` 을 평가한다.
 NonBlankStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
-_DEFAULT_CODEX_MODEL = "gpt-5.3-codex-spark"
-_DEFAULT_CODEX_MODEL_FALLBACKS = "gpt-5.5"
-# Codex CLI catalog 기준 Spark 유효 입력 윈도우. 이 값보다 크게 잡으면 1순위
-# Spark가 컨텍스트 초과로 실패하고 5.5 fallback만 실제 리뷰를 생성하기 쉽다.
-_DEFAULT_CODEX_MAX_INPUT_TOKENS = 121_600
+_DEFAULT_CODEX_MODEL = "gpt-5.5"
+_DEFAULT_CODEX_MODEL_FALLBACKS = "gpt-5.3-codex-spark"
+# Codex CLI ChatGPT-auth catalog 기준 gpt-5.5 유효 입력 윈도우. 5.5 를
+# 1순위 리뷰 모델로 운용하므로 기본 프롬프트 예산도 5.5 에 맞춘다.
+# 이 예산은 모델 시퀀스 전체에 공통 적용된다. gpt-5.5 실패 후 Spark 로 fallback 될 때
+# 121,600 을 넘는 입력은 Spark 컨텍스트를 초과할 수 있으며, 이때는 diff fallback 이 받는다.
+_DEFAULT_CODEX_MAX_INPUT_TOKENS = 258_400
 
 
 class Settings(BaseSettings):
