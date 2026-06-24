@@ -10,13 +10,13 @@ export GITHUB_WEBHOOK_SECRET="change-me-long-random"
 # Available models (queryable via ~/.codex/models_cache.json):
 #   gpt-5.3-codex-spark, gpt-5.5, gpt-5.4, gpt-5.4-mini, gpt-5.3-codex, gpt-5.2,
 #   codex-auto-review
-export CODEX_MODEL="gpt-5.3-codex-spark"
-export CODEX_MODEL_FALLBACKS="gpt-5.5"
+export CODEX_MODEL="gpt-5.5"
+export CODEX_MODEL_FALLBACKS="gpt-5.3-codex-spark"
 export CODEX_REASONING_EFFORT="high"   # low | medium | high | xhigh
-# 기본 모델 gpt-5.3-codex-spark 는 Codex CLI ChatGPT-auth catalog 기준 입력 윈도우
-# 128,000 의 95% 인 121,600 을 유효 프롬프트 예산으로 사용한다. gpt-5.5 를
-# CODEX_MODEL 로 올려 1순위 운영할 때만 258,400 등 더 큰 예산을 명시한다.
-export CODEX_MAX_INPUT_TOKENS="121600"
+# 기본 모델 gpt-5.5 는 Codex CLI ChatGPT-auth catalog 기준 입력 윈도우
+# 272,000 의 95% 인 258,400 을 유효 프롬프트 예산으로 사용한다. Spark 를
+# CODEX_MODEL 로 올려 1순위 운영할 때는 121,600 등 더 작은 예산을 명시한다.
+export CODEX_MAX_INPUT_TOKENS="258400"
 export CODEX_TIMEOUT_SEC="600"
 # Codex Desktop app bundle이 설치돼 있다면:
 #   export CODEX_BIN="/Applications/Codex.app/Contents/Resources/codex"
