@@ -12,6 +12,8 @@ _DEFAULT_CODEX_MODEL = "gpt-5.5"
 _DEFAULT_CODEX_MODEL_FALLBACKS = "gpt-5.3-codex-spark"
 # Codex CLI ChatGPT-auth catalog 기준 gpt-5.5 유효 입력 윈도우. 5.5 를
 # 1순위 리뷰 모델로 운용하므로 기본 프롬프트 예산도 5.5 에 맞춘다.
+# 이 예산은 모델 시퀀스 전체에 공통 적용된다. gpt-5.5 실패 후 Spark 로 fallback 될 때
+# 121,600 을 넘는 입력은 Spark 컨텍스트를 초과할 수 있으며, 이때는 diff fallback 이 받는다.
 _DEFAULT_CODEX_MAX_INPUT_TOKENS = 258_400
 
 
