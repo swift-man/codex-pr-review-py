@@ -28,7 +28,7 @@ class CodexCliEngine:
     def __init__(
         self,
         binary: str = "codex",
-        model: str = "gpt-5.5",
+        model: str = "gpt-5.6-sol",
         fallback_models: Sequence[str] = (),
         reasoning_effort: str = "high",
         timeout_sec: int = 600,
