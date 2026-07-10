@@ -60,9 +60,13 @@ def _settings(monkeypatch: pytest.MonkeyPatch, **overrides: str) -> Settings:
 def test_defaults_are_all_valid(monkeypatch: pytest.MonkeyPatch) -> None:
     s = _settings(monkeypatch)
     assert s.codex_model == "gpt-5.6-sol"
-    assert s.codex_model_fallbacks == ("gpt-5.3-codex-spark",)
-    assert s.codex_model_sequence == ("gpt-5.6-sol", "gpt-5.3-codex-spark")
-    assert s.codex_model_label == "gpt-5.6-sol -> gpt-5.3-codex-spark"
+    assert s.codex_model_fallbacks == ("gpt-5.5", "gpt-5.3-codex-spark")
+    assert s.codex_model_sequence == (
+        "gpt-5.6-sol",
+        "gpt-5.5",
+        "gpt-5.3-codex-spark",
+    )
+    assert s.codex_model_label == "gpt-5.6-sol -> gpt-5.5 -> gpt-5.3-codex-spark"
     assert s.review_concurrency == 1
     assert s.codex_timeout_sec == 600
     assert s.git_timeout_sec == 120
@@ -75,7 +79,9 @@ def test_local_review_env_example_prefers_gpt_56_sol_budget() -> None:
     text = example.read_text(encoding="utf-8")
 
     assert 'export CODEX_MODEL="gpt-5.6-sol"' in text
-    assert 'export CODEX_MODEL_FALLBACKS="gpt-5.3-codex-spark"' in text
+    assert (
+        'export CODEX_MODEL_FALLBACKS="gpt-5.5,gpt-5.3-codex-spark"' in text
+    )
     assert 'export CODEX_MAX_INPUT_TOKENS="353400"' in text
 
 

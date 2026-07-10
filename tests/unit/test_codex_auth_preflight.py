@@ -252,6 +252,39 @@ async def test_review_tries_fallback_model_after_primary_failure(
     ]
 
 
+async def test_review_tries_55_then_spark_when_model_limits_are_reached(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[Any, ...]] = []
+    stdout = b'{"summary":"ok","event":"COMMENT","comments":[]}\n'
+    _patch_subprocess_sequence(
+        monkeypatch,
+        [
+            _FakeProc(1, stderr=b"Error: gpt-5.6-sol usage limit reached\n"),
+            _FakeProc(1, stderr=b"Error: gpt-5.5 usage limit reached\n"),
+            _FakeProc(0, stdout=stdout),
+        ],
+        calls,
+    )
+
+    pr, dump = _sample_review_input()
+    eng = CodexCliEngine(
+        binary="codex",
+        model="gpt-5.6-sol",
+        fallback_models=("gpt-5.5", "gpt-5.3-codex-spark"),
+    )
+
+    result = await eng.review(pr, dump)
+
+    assert result.summary == "ok"
+    assert result.model_used == "gpt-5.3-codex-spark"
+    assert [call[call.index("--model") + 1] for call in calls] == [
+        "gpt-5.6-sol",
+        "gpt-5.5",
+        "gpt-5.3-codex-spark",
+    ]
+
+
 async def test_review_records_successful_primary_model_used(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

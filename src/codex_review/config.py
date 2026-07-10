@@ -9,10 +9,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # `strip_whitespace=True` 로 주변 공백을 제거한 뒤 `min_length=1` 을 평가한다.
 NonBlankStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 _DEFAULT_CODEX_MODEL = "gpt-5.6-sol"
-_DEFAULT_CODEX_MODEL_FALLBACKS = "gpt-5.3-codex-spark"
+_DEFAULT_CODEX_MODEL_FALLBACKS = "gpt-5.5,gpt-5.3-codex-spark"
 # Codex CLI ChatGPT-auth catalog 기준 gpt-5.6-sol 유효 입력 윈도우. Sol 을
 # 1순위 리뷰 모델로 운용하므로 기본 프롬프트 예산도 372,000의 95%에 맞춘다.
-# 이 예산은 모델 시퀀스 전체에 공통 적용된다. Sol 실패 후 Spark 로 fallback 될 때
+# 이 예산은 모델 시퀀스 전체에 공통 적용된다. Sol 과 5.5 실패 후 Spark 로 fallback 될 때
 # 121,600 을 넘는 입력은 Spark 컨텍스트를 초과할 수 있으며, 이때는 diff fallback 이 받는다.
 _DEFAULT_CODEX_MAX_INPUT_TOKENS = 353_400
 
