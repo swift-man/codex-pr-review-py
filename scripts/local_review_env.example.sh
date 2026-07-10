@@ -8,20 +8,19 @@ export GITHUB_WEBHOOK_SECRET="change-me-long-random"
 
 # --- Codex CLI ---
 # Available models (queryable via ~/.codex/models_cache.json):
-#   gpt-5.3-codex-spark, gpt-5.5, gpt-5.4, gpt-5.4-mini, gpt-5.3-codex, gpt-5.2,
-#   codex-auto-review
-export CODEX_MODEL="gpt-5.5"
+#   gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, gpt-5.5, gpt-5.4,
+#   gpt-5.4-mini, gpt-5.3-codex-spark, codex-auto-review
+export CODEX_MODEL="gpt-5.6-sol"
 export CODEX_MODEL_FALLBACKS="gpt-5.3-codex-spark"
 export CODEX_REASONING_EFFORT="high"   # low | medium | high | xhigh
-# 기본 모델 gpt-5.5 는 Codex CLI ChatGPT-auth catalog 기준 입력 윈도우
-# 272,000 의 95% 인 258,400 을 유효 프롬프트 예산으로 사용한다. Spark 를
+# 기본 모델 gpt-5.6-sol 은 Codex CLI ChatGPT-auth catalog 기준 입력 윈도우
+# 372,000 의 95% 인 353,400 을 유효 프롬프트 예산으로 사용한다. Spark 를
 # CODEX_MODEL 로 올려 1순위 운영할 때는 121,600 등 더 작은 예산을 명시한다.
-export CODEX_MAX_INPUT_TOKENS="258400"
+export CODEX_MAX_INPUT_TOKENS="353400"
 export CODEX_TIMEOUT_SEC="600"
-# Codex Desktop app bundle이 설치돼 있다면:
-#   export CODEX_BIN="/Applications/Codex.app/Contents/Resources/codex"
-# Homebrew 설치 CLI를 쓴다면:
+# npm 또는 Homebrew로 설치한 CLI를 쓴다면:
 #   export CODEX_BIN="/opt/homebrew/bin/codex"
+# Codex Desktop app bundle이 설치돼 있다면 앱 번들의 최신 경로를 확인해 지정한다.
 
 # --- Repo cache / files ---
 export REPO_CACHE_DIR="$HOME/.codex-review/repos"
