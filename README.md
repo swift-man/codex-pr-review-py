@@ -81,6 +81,11 @@ REPO_FULL_NAME=owner/repo PR_NUMBER=1 INSTALLATION_ID=1234567 \
     bash scripts/send_test_webhook.sh
 ```
 
+## 릴리스 정보
+
+- 현재 버전: [`VERSION.txt`](VERSION.txt)
+- 변경 이력: [`CHANGELOG.md`](CHANGELOG.md)
+
 ## 환경 변수
 
 > 참고: 기본 모델인 `gpt-5.6-sol`은 Codex CLI(ChatGPT auth) 카탈로그 기준
