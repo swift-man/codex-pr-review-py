@@ -47,11 +47,19 @@ _ALL_ALIASES = (
 )
 
 
-def _settings(monkeypatch: pytest.MonkeyPatch, **overrides: str) -> Settings:
+def _settings(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    include_private_key: bool = True,
+    **overrides: str,
+) -> Settings:
     """실제 env 를 한 번 비운 뒤 필수값만 주입해 결정론적인 Settings 를 반환."""
     for k in _ALL_ALIASES:
         monkeypatch.delenv(k, raising=False)
-    for k, v in {**_REQUIRED_ENV, **overrides}.items():
+    values = {**_REQUIRED_ENV, **overrides}
+    if not include_private_key:
+        values.pop("GITHUB_APP_PRIVATE_KEY")
+    for k, v in values.items():
         monkeypatch.setenv(k, v)
     # 로컬 개발자의 실제 `.env` 가 테스트 결과에 영향 주지 않도록 명시적으로 무력화.
     return Settings(_env_file=None)  # type: ignore[call-arg]
@@ -169,6 +177,24 @@ def test_whitespace_only_webhook_secret_is_rejected(
 def test_whitespace_only_private_key_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(ValidationError):
         _settings(monkeypatch, GITHUB_APP_PRIVATE_KEY="   \t\n")
+
+
+def test_private_key_source_is_required(monkeypatch: pytest.MonkeyPatch) -> None:
+    with pytest.raises(ValidationError, match="GITHUB_APP_PRIVATE_KEY"):
+        _settings(monkeypatch, include_private_key=False)
+
+
+def test_private_key_path_satisfies_key_source_requirement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings(
+        monkeypatch,
+        include_private_key=False,
+        GITHUB_APP_PRIVATE_KEY_PATH="/tmp/github-app.pem",
+    )
+
+    assert settings.github_app_private_key is None
+    assert settings.github_app_private_key_path == Path("/tmp/github-app.pem")
 
 
 def test_whitespace_only_host_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:

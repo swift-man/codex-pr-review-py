@@ -1,7 +1,7 @@
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Self
 
-from pydantic import Field, StringConstraints
+from pydantic import Field, StringConstraints, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from codex_review.model_utils import dedupe_models
@@ -83,14 +83,20 @@ class Settings(BaseSettings):
     # validator 없이 "None 이거나 양수" 계약이 자동 적용된다 (gemini 리뷰).
     review_queue_maxsize: int | None = Field(default=None, gt=0, alias="REVIEW_QUEUE_MAXSIZE")
 
+    @model_validator(mode="after")
+    def require_private_key_source(self) -> Self:
+        """Require either an inline GitHub App private key or a key file path."""
+        if self.github_app_private_key is None and self.github_app_private_key_path is None:
+            raise ValueError(
+                "GITHUB_APP_PRIVATE_KEY 또는 GITHUB_APP_PRIVATE_KEY_PATH 중 하나가 필요합니다."
+            )
+        return self
+
     def load_private_key(self) -> str:
-        if self.github_app_private_key:
+        if self.github_app_private_key is not None:
             return self.github_app_private_key
-        if self.github_app_private_key_path:
-            return self.github_app_private_key_path.read_text(encoding="utf-8")
-        raise RuntimeError(
-            "GITHUB_APP_PRIVATE_KEY 또는 GITHUB_APP_PRIVATE_KEY_PATH 중 하나가 필요합니다."
-        )
+        assert self.github_app_private_key_path is not None
+        return self.github_app_private_key_path.read_text(encoding="utf-8")
 
     @property
     def codex_model_fallbacks(self) -> tuple[str, ...]:
