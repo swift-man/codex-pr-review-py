@@ -2,6 +2,12 @@
 
 이 프로젝트의 주요 변경 사항을 기록합니다. 버전은 [Semantic Versioning](https://semver.org/)을 따릅니다.
 
+## [0.1.1] - 2026-07-11
+
+### 변경
+
+- 리뷰 모델 fallback 순서를 `gpt-5.6-sol` → `gpt-5.5` → `gpt-5.3-codex-spark`로 조정
+
 ## [0.1.0] - 2026-07-10
 
 ### 추가
