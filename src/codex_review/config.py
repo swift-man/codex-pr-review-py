@@ -4,6 +4,8 @@ from typing import Annotated
 from pydantic import Field, StringConstraints
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from codex_review.model_utils import dedupe_models
+
 # 공백만으로 이뤄진 시크릿·호스트·모델명을 차단 — 빈 문자열뿐 아니라 `"   "` 도 거절해야
 # HMAC 무력화·바인딩 실패 같은 조용한 설정 사고를 기동 단계에서 막을 수 있다 (codex 리뷰).
 # `strip_whitespace=True` 로 주변 공백을 제거한 뒤 `min_length=1` 을 평가한다.
@@ -33,7 +35,9 @@ class Settings(BaseSettings):
     github_app_private_key_path: Path | None = Field(
         default=None, alias="GITHUB_APP_PRIVATE_KEY_PATH"
     )
-    github_app_private_key: str | None = Field(default=None, alias="GITHUB_APP_PRIVATE_KEY")
+    github_app_private_key: NonBlankStr | None = Field(
+        default=None, alias="GITHUB_APP_PRIVATE_KEY"
+    )
     github_webhook_secret: NonBlankStr = Field(..., alias="GITHUB_WEBHOOK_SECRET")
     github_api_base: str = Field(default="https://api.github.com", alias="GITHUB_API_BASE")
     # PR 댓글 follow-up 기능 활성화에 필요한 봇 슬러그 (예: "codex-review-bot").
@@ -94,7 +98,7 @@ class Settings(BaseSettings):
 
     @property
     def codex_model_sequence(self) -> tuple[str, ...]:
-        return _dedupe_models((self.codex_model, *self.codex_model_fallbacks))
+        return dedupe_models((self.codex_model, *self.codex_model_fallbacks))
 
     @property
     def codex_model_label(self) -> str:
@@ -103,14 +107,3 @@ class Settings(BaseSettings):
 
 def _split_model_list(raw: str) -> tuple[str, ...]:
     return tuple(part for part in (item.strip() for item in raw.split(",")) if part)
-
-
-def _dedupe_models(models: tuple[str, ...]) -> tuple[str, ...]:
-    seen: set[str] = set()
-    ordered: list[str] = []
-    for model in models:
-        if model in seen:
-            continue
-        seen.add(model)
-        ordered.append(model)
-    return tuple(ordered)

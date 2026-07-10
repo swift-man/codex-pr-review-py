@@ -166,6 +166,11 @@ def test_whitespace_only_webhook_secret_is_rejected(
         _settings(monkeypatch, GITHUB_WEBHOOK_SECRET="   ")
 
 
+def test_whitespace_only_private_key_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    with pytest.raises(ValidationError):
+        _settings(monkeypatch, GITHUB_APP_PRIVATE_KEY="   \t\n")
+
+
 def test_whitespace_only_host_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(ValidationError):
         _settings(monkeypatch, HOST="   ")
@@ -305,7 +310,7 @@ def test_create_app_wires_followup_use_case_with_normalized_login(
     #    Settings 자체를 패치한다.
     from codex_review.config import Settings
 
-    monkeypatch.setattr(Settings, "load_private_key", lambda self: b"FAKE-PEM")
+    monkeypatch.setattr(Settings, "load_private_key", lambda self: "FAKE-PEM")
 
     app = main_module.create_app()
 
