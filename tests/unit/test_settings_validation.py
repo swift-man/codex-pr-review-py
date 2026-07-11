@@ -184,6 +184,13 @@ def test_private_key_source_is_required(monkeypatch: pytest.MonkeyPatch) -> None
         _settings(monkeypatch, include_private_key=False)
 
 
+def test_private_key_sources_cannot_be_configured_together(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(ValidationError, match="동시에 설정할 수 없습니다"):
+        _settings(monkeypatch, GITHUB_APP_PRIVATE_KEY_PATH="/tmp/github-app.pem")
+
+
 def test_private_key_path_satisfies_key_source_requirement(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

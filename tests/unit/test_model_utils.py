@@ -13,3 +13,8 @@ def test_dedupe_models_preserves_first_seen_order() -> None:
 def test_dedupe_models_rejects_empty_sequence() -> None:
     with pytest.raises(ValueError, match="at least one Codex model is required"):
         dedupe_models(())
+
+
+def test_dedupe_models_rejects_single_string() -> None:
+    with pytest.raises(TypeError, match="not a single string"):
+        dedupe_models("gpt-5.6-sol")

@@ -84,11 +84,15 @@ class Settings(BaseSettings):
     review_queue_maxsize: int | None = Field(default=None, gt=0, alias="REVIEW_QUEUE_MAXSIZE")
 
     @model_validator(mode="after")
-    def require_private_key_source(self) -> Self:
-        """Require either an inline GitHub App private key or a key file path."""
+    def require_single_private_key_source(self) -> Self:
+        """Require exactly one GitHub App private key source."""
         if self.github_app_private_key is None and self.github_app_private_key_path is None:
             raise ValueError(
                 "GITHUB_APP_PRIVATE_KEY 또는 GITHUB_APP_PRIVATE_KEY_PATH 중 하나가 필요합니다."
+            )
+        if self.github_app_private_key is not None and self.github_app_private_key_path is not None:
+            raise ValueError(
+                "GITHUB_APP_PRIVATE_KEY와 GITHUB_APP_PRIVATE_KEY_PATH를 동시에 설정할 수 없습니다."
             )
         return self
 
