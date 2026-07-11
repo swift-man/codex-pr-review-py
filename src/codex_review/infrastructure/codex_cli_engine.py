@@ -6,6 +6,7 @@ from dataclasses import replace
 from codex_review.domain import FileDump, PullRequest, ReviewHistory, ReviewResult
 from codex_review.interfaces import ReviewEngineError
 from codex_review.logging_utils import redact_text
+from codex_review.model_utils import dedupe_models
 
 from ._subprocess import kill_and_reap
 from .codex_parser import parse_review
@@ -34,8 +35,7 @@ class CodexCliEngine:
         timeout_sec: int = 600,
     ) -> None:
         self._binary = binary
-        self._models = _dedupe_models((model, *fallback_models))
-        self._model = self._models[0]
+        self._models = dedupe_models((model, *fallback_models))
         self._reasoning_effort = reasoning_effort
         self._timeout_sec = timeout_sec
 
@@ -235,16 +235,3 @@ def _is_codex_stderr_footer_line(line: str) -> bool:
         return False
     token_count = suffix[1:].strip().replace(",", "")
     return token_count.isdecimal()
-
-
-def _dedupe_models(models: tuple[str, ...]) -> tuple[str, ...]:
-    seen: set[str] = set()
-    ordered: list[str] = []
-    for model in models:
-        if model in seen:
-            continue
-        seen.add(model)
-        ordered.append(model)
-    if not ordered:
-        raise ValueError("at least one Codex model is required")
-    return tuple(ordered)
