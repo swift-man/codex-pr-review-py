@@ -191,6 +191,19 @@ def test_private_key_sources_cannot_be_configured_together(
         _settings(monkeypatch, GITHUB_APP_PRIVATE_KEY_PATH="/tmp/github-app.pem")
 
 
+@pytest.mark.parametrize("path", ["", "   \t\n"])
+def test_blank_private_key_path_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+) -> None:
+    with pytest.raises(ValidationError, match="GITHUB_APP_PRIVATE_KEY_PATH"):
+        _settings(
+            monkeypatch,
+            include_private_key=False,
+            GITHUB_APP_PRIVATE_KEY_PATH=path,
+        )
+
+
 def test_private_key_path_satisfies_key_source_requirement(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

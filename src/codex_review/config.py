@@ -1,7 +1,7 @@
 from pathlib import Path
 from typing import Annotated, Self
 
-from pydantic import Field, StringConstraints, model_validator
+from pydantic import Field, StringConstraints, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from codex_review.model_utils import dedupe_models
@@ -82,6 +82,14 @@ class Settings(BaseSettings):
     # pydantic V2 는 `int | None` 타입에 `gt=0` 을 걸어도 None 은 검증을 건너뛰므로 별도
     # validator 없이 "None 이거나 양수" 계약이 자동 적용된다 (gemini 리뷰).
     review_queue_maxsize: int | None = Field(default=None, gt=0, alias="REVIEW_QUEUE_MAXSIZE")
+
+    @field_validator("github_app_private_key_path", mode="before")
+    @classmethod
+    def reject_blank_private_key_path(cls, value: object) -> object:
+        """Reject empty or whitespace-only private key paths before Path conversion."""
+        if isinstance(value, (str, Path)) and not str(value).strip():
+            raise ValueError("GITHUB_APP_PRIVATE_KEY_PATH는 공백일 수 없습니다.")
+        return value
 
     @model_validator(mode="after")
     def require_single_private_key_source(self) -> Self:

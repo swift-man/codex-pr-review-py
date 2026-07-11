@@ -36,7 +36,6 @@ class CodexCliEngine:
     ) -> None:
         self._binary = binary
         self._models = dedupe_models((model, *fallback_models))
-        self._model = self._models[0]
         self._reasoning_effort = reasoning_effort
         self._timeout_sec = timeout_sec
 
