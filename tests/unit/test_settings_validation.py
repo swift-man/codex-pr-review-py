@@ -236,6 +236,50 @@ def test_whitespace_only_codex_reasoning_effort_is_rejected(
         _settings(monkeypatch, CODEX_REASONING_EFFORT="\t\n ")
 
 
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (" LOW ", "low"),
+        ("Medium", "medium"),
+        ("HIGH", "high"),
+        (" XHiGh ", "xhigh"),
+        ("MAX", "max"),
+        (" ultra ", "ultra"),
+    ],
+)
+def test_codex_reasoning_effort_is_normalized_and_validated(
+    monkeypatch: pytest.MonkeyPatch,
+    raw: str,
+    expected: str,
+) -> None:
+    settings = _settings(
+        monkeypatch,
+        CODEX_MODEL_FALLBACKS="",
+        CODEX_REASONING_EFFORT=raw,
+    )
+
+    assert settings.codex_reasoning_effort == expected
+
+
+def test_unknown_codex_reasoning_effort_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(ValidationError, match="CODEX_REASONING_EFFORT"):
+        _settings(monkeypatch, CODEX_REASONING_EFFORT="extreme")
+
+
+@pytest.mark.parametrize("effort", ["max", "ultra"])
+def test_extended_reasoning_effort_rejects_incompatible_default_fallbacks(
+    monkeypatch: pytest.MonkeyPatch,
+    effort: str,
+) -> None:
+    with pytest.raises(
+        ValidationError,
+        match="gpt-5.5, gpt-5.3-codex-spark",
+    ):
+        _settings(monkeypatch, CODEX_REASONING_EFFORT=effort)
+
+
 def test_codex_model_fallbacks_are_parsed_and_deduplicated(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

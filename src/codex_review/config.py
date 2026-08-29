@@ -4,7 +4,12 @@ from typing import Annotated, Self
 from pydantic import Field, StringConstraints, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from codex_review.model_utils import dedupe_models
+from codex_review.model_utils import (
+    DEFAULT_CODEX_REASONING_EFFORT,
+    ReasoningEffort,
+    dedupe_models,
+    incompatible_reasoning_effort_models,
+)
 
 # 공백만으로 이뤄진 시크릿·호스트·모델명을 차단 — 빈 문자열뿐 아니라 `"   "` 도 거절해야
 # HMAC 무력화·바인딩 실패 같은 조용한 설정 사고를 기동 단계에서 막을 수 있다 (codex 리뷰).
@@ -52,8 +57,9 @@ class Settings(BaseSettings):
     codex_fallback_models: str = Field(
         default=_DEFAULT_CODEX_MODEL_FALLBACKS, alias="CODEX_MODEL_FALLBACKS"
     )
-    codex_reasoning_effort: NonBlankStr = Field(
-        default="xhigh", alias="CODEX_REASONING_EFFORT"
+    codex_reasoning_effort: ReasoningEffort = Field(
+        default=DEFAULT_CODEX_REASONING_EFFORT,
+        alias="CODEX_REASONING_EFFORT",
     )
     codex_timeout_sec: int = Field(default=600, gt=0, alias="CODEX_TIMEOUT_SEC")
     codex_max_input_tokens: int = Field(
@@ -92,6 +98,28 @@ class Settings(BaseSettings):
         if isinstance(value, (str, Path)) and not str(value).strip():
             raise ValueError("GITHUB_APP_PRIVATE_KEY_PATH는 공백일 수 없습니다.")
         return value
+
+    @field_validator("codex_reasoning_effort", mode="before")
+    @classmethod
+    def normalize_codex_reasoning_effort(cls, value: object) -> object:
+        """Normalize env input before the Literal contract validates it."""
+        return value.strip().lower() if isinstance(value, str) else value
+
+    @model_validator(mode="after")
+    def require_compatible_model_reasoning_effort(self) -> Self:
+        """Reject known model sequences that cannot preserve fallback behavior."""
+        incompatible = incompatible_reasoning_effort_models(
+            self.codex_model_sequence,
+            self.codex_reasoning_effort,
+        )
+        if incompatible:
+            models = ", ".join(incompatible)
+            raise ValueError(
+                f"CODEX_REASONING_EFFORT='{self.codex_reasoning_effort}'은 다음 모델에서 "
+                f"지원되지 않습니다: {models}. 모든 모델이 지원하는 값을 사용하거나 "
+                "CODEX_MODEL_FALLBACKS를 조정하세요."
+            )
+        return self
 
     @model_validator(mode="after")
     def require_single_private_key_source(self) -> Self:

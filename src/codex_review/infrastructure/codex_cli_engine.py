@@ -6,7 +6,11 @@ from dataclasses import replace
 from codex_review.domain import FileDump, PullRequest, ReviewHistory, ReviewResult
 from codex_review.interfaces import ReviewEngineError
 from codex_review.logging_utils import redact_text
-from codex_review.model_utils import dedupe_models
+from codex_review.model_utils import (
+    DEFAULT_CODEX_REASONING_EFFORT,
+    ReasoningEffort,
+    dedupe_models,
+)
 
 from ._subprocess import kill_and_reap
 from .codex_parser import parse_review
@@ -31,7 +35,7 @@ class CodexCliEngine:
         binary: str = "codex",
         model: str = "gpt-5.6-sol",
         fallback_models: Sequence[str] = (),
-        reasoning_effort: str = "xhigh",
+        reasoning_effort: ReasoningEffort = DEFAULT_CODEX_REASONING_EFFORT,
         timeout_sec: int = 600,
     ) -> None:
         self._binary = binary
