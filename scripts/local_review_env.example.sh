@@ -12,7 +12,7 @@ export GITHUB_WEBHOOK_SECRET="change-me-long-random"
 #   gpt-5.4-mini, gpt-5.3-codex-spark, codex-auto-review
 export CODEX_MODEL="gpt-5.6-sol"
 export CODEX_MODEL_FALLBACKS="gpt-5.5,gpt-5.3-codex-spark"
-export CODEX_REASONING_EFFORT="xhigh"  # low | medium | high | xhigh
+export CODEX_REASONING_EFFORT="xhigh"  # low | medium | high | xhigh | max | ultra (모델별 지원)
 # 기본 모델 gpt-5.6-sol 은 Codex CLI ChatGPT-auth catalog 기준 입력 윈도우
 # 372,000 의 95% 인 353,400 을 유효 프롬프트 예산으로 사용한다. Spark 를
 # CODEX_MODEL 로 올려 1순위 운영할 때는 121,600 등 더 작은 예산을 명시한다.

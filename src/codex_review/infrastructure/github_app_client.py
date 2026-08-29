@@ -51,6 +51,8 @@ _REASONING_EFFORT_DISPLAY_NAMES = {
     "medium": "Medium",
     "high": "High",
     "xhigh": "Extra High",
+    "max": "Max",
+    "ultra": "Ultra",
 }
 
 

@@ -30,6 +30,7 @@ from codex_review.domain.finding import (
 from codex_review.infrastructure.github_app_client import (
     GitHubAppClient,
     _finding_to_comment,
+    _with_review_footer,
 )
 
 
@@ -67,6 +68,16 @@ def test_finding_to_comment_prefixes_suggestion_with_bracket_label() -> None:
 def test_finding_defaults_to_suggestion_when_severity_omitted() -> None:
     body = _finding_to_comment(Finding(path="a.py", line=1, body="힌트"))
     assert body["body"] == "[Suggestion] 힌트"
+
+
+@pytest.mark.parametrize(("effort", "label"), [("max", "Max"), ("ultra", "Ultra")])
+def test_review_footer_formats_extended_reasoning_effort(
+    effort: str,
+    label: str,
+) -> None:
+    body = _with_review_footer("요약", "gpt-5.6-sol", effort)
+
+    assert body.endswith(f"리뷰 모델: <code>gpt-5.6 Sol {label}</code></sub>")
 
 
 def _pr() -> PullRequest:
