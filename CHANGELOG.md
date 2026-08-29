@@ -6,7 +6,7 @@
 
 ### 추가
 
-- GitHub 리뷰 footer에 실제 사용 모델과 Codex 추론 강도를 함께 표시
+- GitHub 리뷰 footer에 실제 사용 모델과 Codex 추론 강도를 사람이 읽기 쉬운 단일 라벨로 함께 표시
 
 ### 변경
 

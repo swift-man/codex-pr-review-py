@@ -583,10 +583,10 @@ async def test_post_review_appends_model_footer_from_constant_label(stubbed_gith
 
     body = _body_of(posts[0])["body"]
     assert body.rstrip().endswith(
-        "리뷰 모델: <code>gpt-5.4</code> · 추론 강도: <code>high</code></sub>"
+        "리뷰 모델: <code>gpt-5.4 High</code></sub>"
     )
     assert "리뷰 모델" in body
-    assert "추론 강도" in body
+    assert "High" in body
 
 
 async def test_post_review_footer_prefers_actual_model_used(stubbed_github) -> None:
@@ -608,8 +608,7 @@ async def test_post_review_footer_prefers_actual_model_used(stubbed_github) -> N
 
     body = _body_of(posts[0])["body"]
     assert body.rstrip().endswith(
-        "리뷰 모델: <code>gpt-5.3-codex-spark</code> "
-        "· 추론 강도: <code>xhigh</code></sub>"
+        "리뷰 모델: <code>gpt-5.3 Codex Spark Extra High</code></sub>"
     )
     assert "gpt-5.3-codex-spark -> gpt-5.5" not in body
 
@@ -641,8 +640,7 @@ async def test_post_review_422_retry_keeps_model_footer(stubbed_github) -> None:
     assert "리뷰 모델" in _body_of(posts[0])["body"]
     assert "리뷰 모델" in _body_of(posts[1])["body"]
     assert _body_of(posts[1])["body"].rstrip().endswith(
-        "리뷰 모델: <code>gpt-5.3-codex-spark</code> "
-        "· 추론 강도: <code>high</code></sub>"
+        "리뷰 모델: <code>gpt-5.3 Codex Spark High</code></sub>"
     )
     assert "gpt-5.3-codex-spark -> gpt-5.5" not in _body_of(posts[1])["body"]
     assert "기술 단위 코멘트" not in _body_of(posts[1])["body"]

@@ -39,7 +39,19 @@ def _default_tls_context() -> ssl.SSLContext:
 
 
 # 리뷰 본문 footer 포맷. 모델명과 추론 강도는 가능하면 실제 실행값을 표시한다.
-_REVIEW_FOOTER_TEMPLATE = "\n\n---\n<sub>{metadata}</sub>"
+_REVIEW_FOOTER_TEMPLATE = "\n\n---\n<sub>리뷰 모델: <code>{label}</code></sub>"
+_MODEL_DISPLAY_NAMES = {
+    "gpt-5.6-sol": "gpt-5.6 Sol",
+    "gpt-5.6-terra": "gpt-5.6 Terra",
+    "gpt-5.6-luna": "gpt-5.6 Luna",
+    "gpt-5.3-codex-spark": "gpt-5.3 Codex Spark",
+}
+_REASONING_EFFORT_DISPLAY_NAMES = {
+    "low": "Low",
+    "medium": "Medium",
+    "high": "High",
+    "xhigh": "Extra High",
+}
 
 
 def _with_review_footer(
@@ -49,10 +61,14 @@ def _with_review_footer(
 ) -> str:
     if not model_label:
         return body
-    metadata = f"리뷰 모델: <code>{model_label}</code>"
+    display_label = " -> ".join(
+        _MODEL_DISPLAY_NAMES.get(model, model) for model in model_label.split(" -> ")
+    )
     if reasoning_effort:
-        metadata += f" · 추론 강도: <code>{reasoning_effort}</code>"
-    return body + _REVIEW_FOOTER_TEMPLATE.format(metadata=metadata)
+        display_label += " " + _REASONING_EFFORT_DISPLAY_NAMES.get(
+            reasoning_effort, reasoning_effort
+        )
+    return body + _REVIEW_FOOTER_TEMPLATE.format(label=display_label)
 
 
 def _resolve_model_label(result: ReviewResult, configured_label: str | None) -> str | None:
