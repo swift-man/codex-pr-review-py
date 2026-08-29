@@ -198,7 +198,10 @@ async def stubbed_github(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Any]:
     async with AsyncExitStack() as stack:
 
         def make_client(
-            *, responses: list[Any] | None = None, review_model_label: str | None = None
+            *,
+            responses: list[Any] | None = None,
+            review_model_label: str | None = None,
+            review_reasoning_effort: str | None = None,
         ) -> GitHubAppClient:
             response_queue = list(responses or [])
 
@@ -231,6 +234,7 @@ async def stubbed_github(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Any]:
                 private_key_pem="-",
                 http_client=http_client,
                 review_model_label=review_model_label,
+                review_reasoning_effort=review_reasoning_effort,
             )
 
         yield make_client, posts
@@ -563,7 +567,10 @@ async def test_post_review_does_not_retry_when_no_comments(stubbed_github) -> No
 
 async def test_post_review_appends_model_footer_from_constant_label(stubbed_github) -> None:
     make_client, posts = stubbed_github
-    client = make_client(review_model_label="gpt-5.4")
+    client = make_client(
+        review_model_label="gpt-5.4",
+        review_reasoning_effort="high",
+    )
 
     await client.post_review(
         _pr(diff_right_lines={"a.py": frozenset({10})}),
@@ -575,13 +582,19 @@ async def test_post_review_appends_model_footer_from_constant_label(stubbed_gith
     )
 
     body = _body_of(posts[0])["body"]
-    assert body.rstrip().endswith("<code>gpt-5.4</code></sub>")
+    assert body.rstrip().endswith(
+        "리뷰 모델: <code>gpt-5.4</code> · 추론 강도: <code>high</code></sub>"
+    )
     assert "리뷰 모델" in body
+    assert "추론 강도" in body
 
 
 async def test_post_review_footer_prefers_actual_model_used(stubbed_github) -> None:
     make_client, posts = stubbed_github
-    client = make_client(review_model_label="gpt-5.3-codex-spark -> gpt-5.5")
+    client = make_client(
+        review_model_label="gpt-5.3-codex-spark -> gpt-5.5",
+        review_reasoning_effort="high",
+    )
 
     await client.post_review(
         _pr(),
@@ -589,17 +602,21 @@ async def test_post_review_footer_prefers_actual_model_used(stubbed_github) -> N
             summary="요약",
             event=ReviewEvent.COMMENT,
             model_used="gpt-5.3-codex-spark",
+            reasoning_effort_used="xhigh",
         ),
     )
 
     body = _body_of(posts[0])["body"]
-    assert body.rstrip().endswith("<code>gpt-5.3-codex-spark</code></sub>")
+    assert body.rstrip().endswith(
+        "리뷰 모델: <code>gpt-5.3-codex-spark</code> "
+        "· 추론 강도: <code>xhigh</code></sub>"
+    )
     assert "gpt-5.3-codex-spark -> gpt-5.5" not in body
 
 
 async def test_post_review_omits_footer_when_label_is_none(stubbed_github) -> None:
     make_client, posts = stubbed_github
-    client = make_client(review_model_label=None)
+    client = make_client(review_model_label=None, review_reasoning_effort="high")
 
     await client.post_review(_pr(), ReviewResult(summary="요약", event=ReviewEvent.COMMENT))
 
@@ -612,6 +629,7 @@ async def test_post_review_422_retry_keeps_model_footer(stubbed_github) -> None:
     make_client, posts = stubbed_github
     client = make_client(
         review_model_label="gpt-5.3-codex-spark -> gpt-5.5",
+        review_reasoning_effort="high",
         responses=[422],
     )
 
@@ -623,7 +641,8 @@ async def test_post_review_422_retry_keeps_model_footer(stubbed_github) -> None:
     assert "리뷰 모델" in _body_of(posts[0])["body"]
     assert "리뷰 모델" in _body_of(posts[1])["body"]
     assert _body_of(posts[1])["body"].rstrip().endswith(
-        "<code>gpt-5.3-codex-spark</code></sub>"
+        "리뷰 모델: <code>gpt-5.3-codex-spark</code> "
+        "· 추론 강도: <code>high</code></sub>"
     )
     assert "gpt-5.3-codex-spark -> gpt-5.5" not in _body_of(posts[1])["body"]
     assert "기술 단위 코멘트" not in _body_of(posts[1])["body"]

@@ -246,6 +246,7 @@ async def test_review_tries_fallback_model_after_primary_failure(
 
     assert result.summary == "ok"
     assert result.model_used == "gpt-5.5"
+    assert result.reasoning_effort_used == "xhigh"
     assert [call[call.index("--model") + 1] for call in calls] == [
         "gpt-5.3-codex-spark",
         "gpt-5.5",
@@ -278,6 +279,7 @@ async def test_review_tries_55_then_spark_when_model_limits_are_reached(
 
     assert result.summary == "ok"
     assert result.model_used == "gpt-5.3-codex-spark"
+    assert result.reasoning_effort_used == "xhigh"
     assert [call[call.index("--model") + 1] for call in calls] == [
         "gpt-5.6-sol",
         "gpt-5.5",
@@ -296,12 +298,14 @@ async def test_review_records_successful_primary_model_used(
         binary="codex",
         model="gpt-5.3-codex-spark",
         fallback_models=("gpt-5.5",),
+        reasoning_effort="xhigh",
     )
 
     result = await eng.review(pr, dump)
 
     assert result.summary == "ok"
     assert result.model_used == "gpt-5.3-codex-spark"
+    assert result.reasoning_effort_used == "xhigh"
 
 
 async def test_review_limits_total_timeout_across_fallbacks(

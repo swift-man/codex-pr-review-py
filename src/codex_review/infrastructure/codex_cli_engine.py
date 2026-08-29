@@ -31,7 +31,7 @@ class CodexCliEngine:
         binary: str = "codex",
         model: str = "gpt-5.6-sol",
         fallback_models: Sequence[str] = (),
-        reasoning_effort: str = "high",
+        reasoning_effort: str = "xhigh",
         timeout_sec: int = 600,
     ) -> None:
         self._binary = binary
@@ -211,7 +211,11 @@ class CodexCliEngine:
                 returncode=proc.returncode,
             )
 
-        return replace(parse_review(stdout.decode(errors="replace")), model_used=model)
+        return replace(
+            parse_review(stdout.decode(errors="replace")),
+            model_used=model,
+            reasoning_effort_used=self._reasoning_effort,
+        )
 
 
 def _summarize_stderr(stderr: str) -> str:

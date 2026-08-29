@@ -101,7 +101,7 @@ REPO_FULL_NAME=owner/repo PR_NUMBER=1 INSTALLATION_ID=1234567 \
 | `CODEX_BIN` | `codex` | Codex CLI 실행 파일 |
 | `CODEX_MODEL` | `gpt-5.6-sol` | 1순위 리뷰 모델 |
 | `CODEX_MODEL_FALLBACKS` | `gpt-5.5,gpt-5.3-codex-spark` | 쉼표로 구분한 fallback 모델 목록. 비우면 fallback 없이 `CODEX_MODEL`만 사용 |
-| `CODEX_REASONING_EFFORT` | `high` | `low`/`medium`/`high`/`xhigh` |
+| `CODEX_REASONING_EFFORT` | `xhigh` | `low`/`medium`/`high`/`xhigh` |
 | `CODEX_MAX_INPUT_TOKENS` | `353400` | Codex CLI에 전달할 입력 프롬프트 토큰 예산. 기본값은 1순위 Sol 모델의 유효 컨텍스트에 맞춘 값 |
 | `CODEX_TIMEOUT_SEC` | `600` | 호출 타임아웃 |
 | `REPO_CACHE_DIR` | `~/.codex-review/repos` | clone 캐시 위치 |

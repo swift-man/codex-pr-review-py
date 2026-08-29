@@ -75,6 +75,7 @@ def test_defaults_are_all_valid(monkeypatch: pytest.MonkeyPatch) -> None:
         "gpt-5.3-codex-spark",
     )
     assert s.codex_model_label == "gpt-5.6-sol -> gpt-5.5 -> gpt-5.3-codex-spark"
+    assert s.codex_reasoning_effort == "xhigh"
     assert s.review_concurrency == 1
     assert s.codex_timeout_sec == 600
     assert s.git_timeout_sec == 120
@@ -90,6 +91,7 @@ def test_local_review_env_example_prefers_gpt_56_sol_budget() -> None:
     assert (
         'export CODEX_MODEL_FALLBACKS="gpt-5.5,gpt-5.3-codex-spark"' in text
     )
+    assert 'export CODEX_REASONING_EFFORT="xhigh"' in text
     assert 'export CODEX_MAX_INPUT_TOKENS="353400"' in text
 
 

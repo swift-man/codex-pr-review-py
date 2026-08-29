@@ -30,6 +30,8 @@ class ReviewResult:
     # 실제 리뷰 응답을 생성한 모델. 설정된 fallback 순서가 아니라 성공한 모델만 footer 에
     # 표시하기 위한 실행 메타데이터다. 파서 단독 사용 경로는 None 으로 유지된다.
     model_used: str | None = None
+    # 실제 Codex CLI 호출에 적용된 추론 강도. 모델명과 함께 footer 에 표시한다.
+    reasoning_effort_used: str | None = None
 
     def render_body(self) -> str:
         parts: list[str] = [self.summary.strip()]
