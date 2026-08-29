@@ -229,6 +229,13 @@ def test_whitespace_only_codex_model_is_rejected(monkeypatch: pytest.MonkeyPatch
         _settings(monkeypatch, CODEX_MODEL="\t\n ")
 
 
+def test_whitespace_only_codex_reasoning_effort_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(ValidationError):
+        _settings(monkeypatch, CODEX_REASONING_EFFORT="\t\n ")
+
+
 def test_codex_model_fallbacks_are_parsed_and_deduplicated(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -290,8 +290,13 @@ async def test_review_tries_55_then_spark_when_model_limits_are_reached(
 async def test_review_records_successful_primary_model_used(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    calls: list[tuple[Any, ...]] = []
     stdout = b'{"summary":"ok","event":"COMMENT","comments":[]}\n'
-    _patch_subprocess(monkeypatch, _FakeProc(0, stdout=stdout, stderr=b""))
+    _patch_subprocess_sequence(
+        monkeypatch,
+        [_FakeProc(0, stdout=stdout, stderr=b"")],
+        calls,
+    )
 
     pr, dump = _sample_review_input()
     eng = CodexCliEngine(
@@ -306,6 +311,8 @@ async def test_review_records_successful_primary_model_used(
     assert result.summary == "ok"
     assert result.model_used == "gpt-5.3-codex-spark"
     assert result.reasoning_effort_used == "xhigh"
+    config_index = calls[0].index("--config")
+    assert calls[0][config_index + 1] == "model_reasoning_effort=xhigh"
 
 
 async def test_review_limits_total_timeout_across_fallbacks(
