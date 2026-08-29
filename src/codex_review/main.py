@@ -44,6 +44,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 http_client=http_client,
                 dry_run=settings.dry_run,
                 review_model_label=settings.codex_model_label,
+                review_reasoning_effort=settings.codex_reasoning_effort,
             )
             repo_fetcher = GitRepoFetcher(
                 cache_dir=settings.repo_cache_dir,

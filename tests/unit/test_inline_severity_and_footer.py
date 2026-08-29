@@ -117,7 +117,8 @@ async def capturing_client(
             app_id=1,
             private_key_pem="-",
             http_client=http_client,
-            review_model_label="gpt-5.4",
+            review_model_label="gpt-5.6-sol",
+            review_reasoning_effort="xhigh",
         )
         yield client, posts
 
@@ -150,7 +151,9 @@ async def test_post_review_sends_severity_prefixed_comments_and_model_footer(
 
     # (1) 본문 섹션: 반드시 수정 + footer 는 그대로 유지.
     assert "**🔴 반드시 수정할 사항**" in posted["body"]
-    assert posted["body"].rstrip().endswith("<code>gpt-5.4</code></sub>")
+    assert posted["body"].rstrip().endswith(
+        "리뷰 모델: <code>gpt-5.6 Sol Extra High</code></sub>"
+    )
 
     # (2) 인라인 코멘트: 등급별 대괄호 접두 — 모든 항목에 일관되게.
     assert len(posted["comments"]) == 2

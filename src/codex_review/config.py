@@ -52,7 +52,9 @@ class Settings(BaseSettings):
     codex_fallback_models: str = Field(
         default=_DEFAULT_CODEX_MODEL_FALLBACKS, alias="CODEX_MODEL_FALLBACKS"
     )
-    codex_reasoning_effort: str = Field(default="high", alias="CODEX_REASONING_EFFORT")
+    codex_reasoning_effort: NonBlankStr = Field(
+        default="xhigh", alias="CODEX_REASONING_EFFORT"
+    )
     codex_timeout_sec: int = Field(default=600, gt=0, alias="CODEX_TIMEOUT_SEC")
     codex_max_input_tokens: int = Field(
         default=_DEFAULT_CODEX_MAX_INPUT_TOKENS,

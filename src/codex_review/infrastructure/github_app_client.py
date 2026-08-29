@@ -38,18 +38,51 @@ def _default_tls_context() -> ssl.SSLContext:
     return ssl.create_default_context(cafile=certifi.where())
 
 
-# 리뷰 본문 footer 포맷. 모델명은 가능하면 실제 성공한 모델을, 없으면 설정 라벨을 표시한다.
-_MODEL_FOOTER_TEMPLATE = "\n\n---\n<sub>리뷰 모델: <code>{label}</code></sub>"
+# 리뷰 본문 footer 포맷. 모델명과 추론 강도는 가능하면 실제 실행값을 표시한다.
+_REVIEW_FOOTER_TEMPLATE = "\n\n---\n<sub>리뷰 모델: <code>{label}</code></sub>"
+_MODEL_DISPLAY_NAMES = {
+    "gpt-5.6-sol": "gpt-5.6 Sol",
+    "gpt-5.6-terra": "gpt-5.6 Terra",
+    "gpt-5.6-luna": "gpt-5.6 Luna",
+    "gpt-5.3-codex-spark": "gpt-5.3 Codex Spark",
+}
+_REASONING_EFFORT_DISPLAY_NAMES = {
+    "low": "Low",
+    "medium": "Medium",
+    "high": "High",
+    "xhigh": "Extra High",
+}
 
 
-def _with_model_footer(body: str, model_label: str | None) -> str:
+def _with_review_footer(
+    body: str,
+    model_label: str | None,
+    reasoning_effort: str | None,
+) -> str:
     if not model_label:
         return body
-    return body + _MODEL_FOOTER_TEMPLATE.format(label=model_label)
+    display_label = " -> ".join(
+        _MODEL_DISPLAY_NAMES.get(model, model) for model in model_label.split(" -> ")
+    )
+    if reasoning_effort:
+        display_label += " " + _REASONING_EFFORT_DISPLAY_NAMES.get(
+            reasoning_effort, reasoning_effort
+        )
+    return body + _REVIEW_FOOTER_TEMPLATE.format(label=display_label)
 
 
 def _resolve_model_label(result: ReviewResult, configured_label: str | None) -> str | None:
     return result.model_used if result.model_used is not None else configured_label
+
+
+def _resolve_reasoning_effort(
+    result: ReviewResult, configured_effort: str | None
+) -> str | None:
+    return (
+        result.reasoning_effort_used
+        if result.reasoning_effort_used is not None
+        else configured_effort
+    )
 
 
 class _LockRegistry:
@@ -98,6 +131,7 @@ class GitHubAppClient:
         http_client: httpx.AsyncClient,
         dry_run: bool = False,
         review_model_label: str | None = None,
+        review_reasoning_effort: str | None = None,
     ) -> None:
         self._app_id = app_id
         self._private_key = private_key_pem
@@ -105,6 +139,7 @@ class GitHubAppClient:
         self._dry_run = dry_run
         # 본문 footer 에 표시할 모델 라벨. None 이면 footer 생략.
         self._review_model_label = review_model_label
+        self._review_reasoning_effort = review_reasoning_effort
         self._token_cache: dict[int, _CachedToken] = {}
         # installation_id 별 개별 락. 단일 전역 락은 서로 다른 installation 의 동시 재발급까지
         # 직렬화해 병목을 만든다. LRU 상한이 있는 레지스트리를 써 무한히 쌓이지 않게 한다.
@@ -305,9 +340,10 @@ class GitHubAppClient:
         # 붙어 라인 번호 오정렬이 발생할 수 있다.
         payload: dict[str, object] = {
             "commit_id": pr.head_sha,
-            "body": _with_model_footer(
+            "body": _with_review_footer(
                 result.render_body(),
                 _resolve_model_label(result, self._review_model_label),
+                _resolve_reasoning_effort(result, self._review_reasoning_effort),
             ),
             "event": result.event.value,
             "comments": [_finding_to_comment(f) for f in result.findings],
@@ -338,9 +374,12 @@ class GitHubAppClient:
                     findings=(),
                     dropped_findings=result.dropped_findings + result.findings,
                 )
-                payload["body"] = _with_model_footer(
+                payload["body"] = _with_review_footer(
                     retry_result.render_body(),
                     _resolve_model_label(retry_result, self._review_model_label),
+                    _resolve_reasoning_effort(
+                        retry_result, self._review_reasoning_effort
+                    ),
                 )
                 payload["comments"] = []
                 if not await self._is_current_pull_head(pr):
