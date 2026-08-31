@@ -32,6 +32,7 @@ _ALL_ALIASES = (
     "CODEX_MODEL",
     "CODEX_MODEL_FALLBACKS",
     "CODEX_REASONING_EFFORT",
+    "CODEX_MODEL_CONTEXT_WINDOW",
     "CODEX_TIMEOUT_SEC",
     "CODEX_MAX_INPUT_TOKENS",
     "REPO_CACHE_DIR",
@@ -76,10 +77,11 @@ def test_defaults_are_all_valid(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     assert s.codex_model_label == "gpt-5.6-sol -> gpt-5.5 -> gpt-5.3-codex-spark"
     assert s.codex_reasoning_effort == "xhigh"
+    assert s.effective_codex_model_context_window == 872_000
     assert s.review_concurrency == 1
     assert s.codex_timeout_sec == 600
     assert s.git_timeout_sec == 120
-    assert s.codex_max_input_tokens == 353_400
+    assert s.codex_max_input_tokens == 828_400
     assert s.review_queue_maxsize is None
 
 
@@ -92,7 +94,8 @@ def test_local_review_env_example_prefers_gpt_56_sol_budget() -> None:
         'export CODEX_MODEL_FALLBACKS="gpt-5.5,gpt-5.3-codex-spark"' in text
     )
     assert 'export CODEX_REASONING_EFFORT="xhigh"' in text
-    assert 'export CODEX_MAX_INPUT_TOKENS="353400"' in text
+    assert 'export CODEX_MODEL_CONTEXT_WINDOW="872000"' in text
+    assert 'export CODEX_MAX_INPUT_TOKENS="828400"' in text
 
 
 def test_review_concurrency_zero_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -140,6 +143,37 @@ def test_git_timeout_zero_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_codex_max_input_tokens_zero_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(ValidationError):
         _settings(monkeypatch, CODEX_MAX_INPUT_TOKENS="0")
+
+
+def test_codex_model_context_window_zero_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(ValidationError):
+        _settings(monkeypatch, CODEX_MODEL_CONTEXT_WINDOW="0")
+
+
+def test_codex_input_budget_cannot_exceed_primary_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(ValidationError, match="유효 입력 한도 121600"):
+        _settings(
+            monkeypatch,
+            CODEX_MODEL="gpt-5.3-codex-spark",
+            CODEX_MODEL_FALLBACKS="",
+        )
+
+
+def test_custom_primary_context_window_controls_input_budget_validation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings(
+        monkeypatch,
+        CODEX_MODEL="custom-review-model",
+        CODEX_MODEL_FALLBACKS="",
+        CODEX_MODEL_CONTEXT_WINDOW="900000",
+    )
+
+    assert settings.effective_codex_model_context_window == 900_000
 
 
 def test_file_max_bytes_negative_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -287,6 +321,7 @@ def test_codex_model_fallbacks_are_parsed_and_deduplicated(
         monkeypatch,
         CODEX_MODEL="gpt-5.3-codex-spark",
         CODEX_MODEL_FALLBACKS=" gpt-5.5, gpt-5.3-codex-spark, gpt-5.4 ",
+        CODEX_MAX_INPUT_TOKENS="121600",
     )
 
     assert s.codex_model_fallbacks == ("gpt-5.5", "gpt-5.3-codex-spark", "gpt-5.4")

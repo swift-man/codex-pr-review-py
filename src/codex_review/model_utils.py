@@ -4,6 +4,14 @@ from typing import Literal, TypeAlias
 ReasoningEffort: TypeAlias = Literal["low", "medium", "high", "xhigh", "max", "ultra"]
 DEFAULT_CODEX_REASONING_EFFORT: ReasoningEffort = "xhigh"
 
+# Codex CLI 0.144.1 ChatGPT-auth catalog 기준 실제 사용 가능한 입력 윈도우.
+# Sol 은 기본 272K보다 큰 확장 윈도우를 지원하므로 max_context_window 값을 사용한다.
+_KNOWN_MODEL_CONTEXT_WINDOWS: dict[str, int] = {
+    "gpt-5.6-sol": 872_000,
+    "gpt-5.5": 272_000,
+    "gpt-5.3-codex-spark": 128_000,
+}
+
 _STANDARD_REASONING_EFFORTS: frozenset[ReasoningEffort] = frozenset(
     {"low", "medium", "high", "xhigh"}
 )
@@ -47,3 +55,8 @@ def dedupe_models(models: Iterable[str]) -> tuple[str, ...]:
     if not ordered:
         raise ValueError("at least one Codex model is required")
     return ordered
+
+
+def known_model_context_window(model: str) -> int | None:
+    """Return the Codex CLI context window known for ``model``, if catalogued."""
+    return _KNOWN_MODEL_CONTEXT_WINDOWS.get(model)

@@ -88,10 +88,11 @@ REPO_FULL_NAME=owner/repo PR_NUMBER=1 INSTALLATION_ID=1234567 \
 
 ## 환경 변수
 
-> 참고: 기본 모델인 `gpt-5.6-sol`은 Codex CLI(ChatGPT auth) 카탈로그 기준
-> 입력 윈도우 372,000의 95%인 353,400을 유효 프롬프트 예산으로 사용한다.
+> 참고: 기본 모델인 `gpt-5.6-sol`은 Codex CLI(ChatGPT auth) 카탈로그의 확장
+> 입력 윈도우 872,000을 명시하고, 그 95%인 828,400을 유효 프롬프트 예산으로 사용한다.
 > Spark를 1순위 모델로 운영할 때는 더 작은 입력 예산 `121600`을
-> `CODEX_MAX_INPUT_TOKENS` 환경 변수로 명시한다.
+> `CODEX_MAX_INPUT_TOKENS` 환경 변수로 명시한다. `CODEX_MODEL_CONTEXT_WINDOW`은
+> 1순위 모델에만 전달되며 fallback 모델에는 적용되지 않는다.
 > 추론 강도는 1순위와 모든 fallback 모델이 함께 지원해야 한다. 기본 모델인
 > `gpt-5.6-sol`에서 `max`나 `ultra`를 사용하려면 호환되는 fallback만 지정하거나
 > `CODEX_MODEL_FALLBACKS`를 비워야 한다. 알려진 비호환 조합은 서버 기동 시 거부된다.
@@ -105,7 +106,8 @@ REPO_FULL_NAME=owner/repo PR_NUMBER=1 INSTALLATION_ID=1234567 \
 | `CODEX_MODEL` | `gpt-5.6-sol` | 1순위 리뷰 모델 |
 | `CODEX_MODEL_FALLBACKS` | `gpt-5.5,gpt-5.3-codex-spark` | 쉼표로 구분한 fallback 모델 목록. 비우면 fallback 없이 `CODEX_MODEL`만 사용 |
 | `CODEX_REASONING_EFFORT` | `xhigh` | `low`/`medium`/`high`/`xhigh`/`max`/`ultra`. 대소문자와 주변 공백을 정규화하고 알려진 모델 시퀀스의 호환성을 검증 |
-| `CODEX_MAX_INPUT_TOKENS` | `353400` | Codex CLI에 전달할 입력 프롬프트 토큰 예산. 기본값은 1순위 Sol 모델의 유효 컨텍스트에 맞춘 값 |
+| `CODEX_MODEL_CONTEXT_WINDOW` | `(모델별 자동)` | 1순위 모델에 전달할 Codex CLI `model_context_window`. 기본 Sol은 `872000`; fallback 모델은 각자 CLI 기본값 사용 |
+| `CODEX_MAX_INPUT_TOKENS` | `828400` | Codex CLI에 전달할 입력 프롬프트 토큰 예산. 1순위 Sol 확장 컨텍스트의 95% |
 | `CODEX_TIMEOUT_SEC` | `600` | 호출 타임아웃 |
 | `REPO_CACHE_DIR` | `~/.codex-review/repos` | clone 캐시 위치 |
 | `GIT_TIMEOUT_SEC` | `120` | git clone/fetch/checkout/ls-files 호출 타임아웃 |

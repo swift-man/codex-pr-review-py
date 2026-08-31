@@ -273,6 +273,7 @@ async def test_review_tries_55_then_spark_when_model_limits_are_reached(
         binary="codex",
         model="gpt-5.6-sol",
         fallback_models=("gpt-5.5", "gpt-5.3-codex-spark"),
+        primary_context_window=872_000,
     )
 
     result = await eng.review(pr, dump)
@@ -285,6 +286,8 @@ async def test_review_tries_55_then_spark_when_model_limits_are_reached(
         "gpt-5.5",
         "gpt-5.3-codex-spark",
     ]
+    assert "model_context_window=872000" in calls[0]
+    assert all("model_context_window=872000" not in call for call in calls[1:])
 
 
 async def test_review_records_successful_primary_model_used(

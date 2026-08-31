@@ -36,11 +36,15 @@ class CodexCliEngine:
         model: str = "gpt-5.6-sol",
         fallback_models: Sequence[str] = (),
         reasoning_effort: ReasoningEffort = DEFAULT_CODEX_REASONING_EFFORT,
+        primary_context_window: int | None = None,
         timeout_sec: int = 600,
     ) -> None:
+        if primary_context_window is not None and primary_context_window <= 0:
+            raise ValueError("primary_context_window must be positive")
         self._binary = binary
         self._models = dedupe_models((model, *fallback_models))
         self._reasoning_effort = reasoning_effort
+        self._primary_context_window = primary_context_window
         self._timeout_sec = timeout_sec
 
     async def verify_auth(self) -> str:
@@ -151,19 +155,28 @@ class CodexCliEngine:
         # "-" positional 은 codex exec 에 stdin 에서 프롬프트를 읽으라는 지시.
         # argv 로 넘기면 전체 레포 덤프가 ARG_MAX 를 초과할 수 있어 stdin 이 안전.
         logger.info(
-            "invoking codex: files=%d chars=%d model=%s effort=%s",
+            "invoking codex: files=%d chars=%d model=%s effort=%s context_window=%s",
             len(dump.entries),
             dump.total_chars,
             model,
             self._reasoning_effort,
+            self._context_window_for(model) or "default",
         )
+        command = [
+            self._binary,
+            "exec",
+            "--model",
+            model,
+            # reasoning_effort 는 config 오버라이드로 넘긴다 — `codex exec` 가 별도 CLI
+            # 플래그로 지원하지 않고 ~/.codex/config.toml 값만 읽기 때문.
+            "--config",
+            f"model_reasoning_effort={self._reasoning_effort}",
+        ]
+        if (context_window := self._context_window_for(model)) is not None:
+            command.extend(("--config", f"model_context_window={context_window}"))
+        command.append("-")
         proc = await asyncio.create_subprocess_exec(
-            self._binary, "exec",
-            "--model", model,
-            # reasoning_effort 는 config 오버라이드로 넘긴다 — `codex exec` 가 별도 CLI 플래그로
-            # 지원하지 않고 ~/.codex/config.toml 값만 읽기 때문.
-            "--config", f"model_reasoning_effort={self._reasoning_effort}",
-            "-",
+            *command,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -220,6 +233,16 @@ class CodexCliEngine:
             model_used=model,
             reasoning_effort_used=self._reasoning_effort,
         )
+
+    def _context_window_for(self, model: str) -> int | None:
+        """Apply the expanded context only to the primary model.
+
+        Fallback models have smaller catalog windows. Passing the primary override to them would
+        hide that constraint from Codex CLI and defer failure to the API.
+        """
+        if model != self._models[0]:
+            return None
+        return self._primary_context_window
 
 
 def _summarize_stderr(stderr: str) -> str:
