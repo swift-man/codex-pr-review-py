@@ -152,7 +152,19 @@ def test_codex_model_context_window_zero_is_rejected(
         _settings(monkeypatch, CODEX_MODEL_CONTEXT_WINDOW="0")
 
 
-def test_codex_input_budget_cannot_exceed_primary_context(
+def test_codex_input_budget_defaults_to_primary_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings(
+        monkeypatch,
+        CODEX_MODEL="gpt-5.3-codex-spark",
+        CODEX_MODEL_FALLBACKS="",
+    )
+
+    assert settings.codex_max_input_tokens == 121_600
+
+
+def test_explicit_codex_input_budget_cannot_exceed_primary_context(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     with pytest.raises(ValidationError, match="유효 입력 한도 121600"):
@@ -160,6 +172,32 @@ def test_codex_input_budget_cannot_exceed_primary_context(
             monkeypatch,
             CODEX_MODEL="gpt-5.3-codex-spark",
             CODEX_MODEL_FALLBACKS="",
+            CODEX_MAX_INPUT_TOKENS="121601",
+        )
+
+
+def test_legacy_55_primary_gets_compatible_dynamic_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings(
+        monkeypatch,
+        CODEX_MODEL="gpt-5.5",
+        CODEX_MODEL_FALLBACKS="",
+    )
+
+    assert settings.effective_codex_model_context_window == 272_000
+    assert settings.codex_max_input_tokens == 258_400
+
+
+def test_known_model_context_window_cannot_exceed_catalog_max(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(ValidationError, match="최대 컨텍스트 272000"):
+        _settings(
+            monkeypatch,
+            CODEX_MODEL="gpt-5.5",
+            CODEX_MODEL_FALLBACKS="",
+            CODEX_MODEL_CONTEXT_WINDOW="872000",
         )
 
 
@@ -174,6 +212,7 @@ def test_custom_primary_context_window_controls_input_budget_validation(
     )
 
     assert settings.effective_codex_model_context_window == 900_000
+    assert settings.codex_max_input_tokens == 855_000
 
 
 def test_file_max_bytes_negative_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:

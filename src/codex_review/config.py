@@ -22,6 +22,20 @@ _DEFAULT_CODEX_MAX_INPUT_TOKENS = 828_400
 _CONTEXT_WINDOW_BUDGET_PERCENT = 95
 
 
+def _default_codex_max_input_tokens(validated_data: dict[str, object]) -> int:
+    """Derive an omitted input budget from the selected primary model window."""
+    model = validated_data.get("codex_model", _DEFAULT_CODEX_MODEL)
+    configured_window = validated_data.get("codex_model_context_window")
+    context_window = (
+        configured_window
+        if isinstance(configured_window, int)
+        else known_model_context_window(str(model))
+    )
+    if context_window is None:
+        return _DEFAULT_CODEX_MAX_INPUT_TOKENS
+    return context_window * _CONTEXT_WINDOW_BUDGET_PERCENT // 100
+
+
 class Settings(BaseSettings):
     """환경 변수 기반 서버 설정.
 
@@ -68,7 +82,7 @@ class Settings(BaseSettings):
     )
     codex_timeout_sec: int = Field(default=600, gt=0, alias="CODEX_TIMEOUT_SEC")
     codex_max_input_tokens: int = Field(
-        default=_DEFAULT_CODEX_MAX_INPUT_TOKENS,
+        default_factory=_default_codex_max_input_tokens,
         gt=0,
         alias="CODEX_MAX_INPUT_TOKENS",
     )
@@ -123,6 +137,22 @@ class Settings(BaseSettings):
                 f"CODEX_REASONING_EFFORT='{self.codex_reasoning_effort}'은 다음 모델에서 "
                 f"지원되지 않습니다: {models}. 모든 모델이 지원하는 값을 사용하거나 "
                 "CODEX_MODEL_FALLBACKS를 조정하세요."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def require_context_window_within_known_model_max(self) -> Self:
+        """Reject overrides that claim more context than a known model exposes."""
+        configured_window = self.codex_model_context_window
+        known_max = known_model_context_window(self.codex_model)
+        if (
+            configured_window is not None
+            and known_max is not None
+            and configured_window > known_max
+        ):
+            raise ValueError(
+                f"CODEX_MODEL_CONTEXT_WINDOW={configured_window}은 "
+                f"{self.codex_model}의 최대 컨텍스트 {known_max}을 초과합니다."
             )
         return self
 
