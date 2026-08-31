@@ -304,10 +304,13 @@ def normalize_bot_user_login(github_app_slug: str) -> str:
     잘못된 login 이 만들어진다. `removesuffix("[bot]")` 로 한 번 벗긴 뒤 다시 붙여
     어떤 입력 형식이든 단일 표준형으로 수렴 (coderabbitai PR #19 Minor 반영).
 
-    공백 트림 + 소문자화는 하지 않는다 — GitHub login 은 대소문자 보존이지만 비교
-    시 소문자화는 호출자에서 책임 (현 시점 비교는 정확히 일치 형태로만 사용).
+    주변 공백은 제거하지만 소문자화는 하지 않는다 — GitHub login 은 대소문자 보존이지만
+    비교 시 소문자화는 호출자에서 책임 (현 시점 비교는 정확히 일치 형태로만 사용).
     """
-    return f"{github_app_slug.strip().removesuffix('[bot]')}[bot]"
+    normalized_slug = github_app_slug.strip().removesuffix("[bot]")
+    if not normalized_slug:
+        raise ValueError("github_app_slug must not be blank")
+    return f"{normalized_slug}[bot]"
 
 
 def _wrap_with_marker(body: str) -> str:

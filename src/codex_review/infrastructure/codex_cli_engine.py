@@ -256,7 +256,7 @@ def _summarize_stderr(stderr: str) -> str:
 
 def _is_codex_stderr_footer_line(line: str) -> bool:
     lowered = line.lower()
-    if lowered == _STDERR_TOKENS_USED_MARKER or lowered.isdecimal():
+    if lowered == _STDERR_TOKENS_USED_MARKER or lowered.replace(",", "").isdecimal():
         return True
     if not lowered.startswith(_STDERR_TOKENS_USED_MARKER):
         return False

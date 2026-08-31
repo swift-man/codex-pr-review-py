@@ -496,6 +496,12 @@ async def test_review_masks_credentials_in_review_engine_error_message(
             b"Start a new thread or clear earlier history before retrying.\n"
             b"tokens used / 0\n"
         ),
+        (
+            b"ERROR: Codex ran out of room in the model's context window. "
+            b"Start a new thread or clear earlier history before retrying.\n"
+            b"tokens used\n"
+            b"1,234\n"
+        ),
     ],
 )
 async def test_review_uses_context_error_before_tokens_used_footer(

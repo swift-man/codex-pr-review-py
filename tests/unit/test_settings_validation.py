@@ -362,6 +362,13 @@ def test_github_app_slug_can_be_set_via_env(monkeypatch: pytest.MonkeyPatch) -> 
     assert s.github_app_slug == "codex-review-bot"
 
 
+def test_whitespace_only_github_app_slug_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(ValidationError, match="GITHUB_APP_SLUG"):
+        _settings(monkeypatch, GITHUB_APP_SLUG="   \t")
+
+
 def test_webhook_secret_whitespace_is_stripped_when_valid(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -389,9 +396,9 @@ def test_normalize_bot_user_login_handles_all_input_shapes() -> None:
     assert (
         normalize_bot_user_login("  codex-review-bot[bot]  ") == "codex-review-bot[bot]"
     )
-    # 공백만 있는 입력은 빈 slug 가 되어 `[bot]` 만 남는다 — 운영자 설정 오류 신호로
-    # 그대로 통과시켜 후속 GitHub 비교에서 미스매치가 즉시 드러나도록 한다.
-    assert normalize_bot_user_login("   ") == "[bot]"
+    # 설정 계층을 우회한 호출도 빈 slug 로 self-exclusion 을 활성화할 수 없어야 한다.
+    with pytest.raises(ValueError, match="must not be blank"):
+        normalize_bot_user_login("   ")
 
 
 def test_create_app_wires_followup_use_case_with_normalized_login(
