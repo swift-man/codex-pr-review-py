@@ -9,6 +9,8 @@ from codex_review.model_utils import (
     ReasoningEffort,
     dedupe_models,
     incompatible_reasoning_effort_models,
+    known_model_default_context_window,
+    known_model_max_context_window,
 )
 
 # 공백만으로 이뤄진 시크릿·호스트·모델명을 차단 — 빈 문자열뿐 아니라 `"   "` 도 거절해야
@@ -17,11 +19,22 @@ from codex_review.model_utils import (
 NonBlankStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 _DEFAULT_CODEX_MODEL = "gpt-5.6-sol"
 _DEFAULT_CODEX_MODEL_FALLBACKS = "gpt-5.5,gpt-5.3-codex-spark"
-# Codex CLI ChatGPT-auth catalog 기준 gpt-5.6-sol 유효 입력 윈도우. Sol 을
-# 1순위 리뷰 모델로 운용하므로 기본 프롬프트 예산도 372,000의 95%에 맞춘다.
-# 이 예산은 모델 시퀀스 전체에 공통 적용된다. Sol 과 5.5 실패 후 Spark 로 fallback 될 때
-# 121,600 을 넘는 입력은 Spark 컨텍스트를 초과할 수 있으며, 이때는 diff fallback 이 받는다.
-_DEFAULT_CODEX_MAX_INPUT_TOKENS = 353_400
+_DEFAULT_CODEX_MAX_INPUT_TOKENS = 828_400
+_CONTEXT_WINDOW_BUDGET_PERCENT = 95
+
+
+def _default_codex_max_input_tokens(validated_data: dict[str, object]) -> int:
+    """Derive an omitted input budget from the selected primary model window."""
+    model = validated_data.get("codex_model", _DEFAULT_CODEX_MODEL)
+    configured_window = validated_data.get("codex_model_context_window")
+    context_window = (
+        configured_window
+        if isinstance(configured_window, int)
+        else known_model_default_context_window(str(model))
+    )
+    if context_window is None:
+        return _DEFAULT_CODEX_MAX_INPUT_TOKENS
+    return context_window * _CONTEXT_WINDOW_BUDGET_PERCENT // 100
 
 
 class Settings(BaseSettings):
@@ -49,7 +62,7 @@ class Settings(BaseSettings):
     # GitHub 가 게시한 본인 댓글의 `user.login` 은 `f"{slug}[bot]"` 형태이므로, 이 값으로
     # 우리 봇이 단 코멘트만 골라 follow-up 한다. 미설정 (None) 이면 follow-up 기능 자체
     # 비활성화 — 운영자가 슬러그를 알고 명시적으로 옵트인 해야 작동한다.
-    github_app_slug: str | None = Field(default=None, alias="GITHUB_APP_SLUG")
+    github_app_slug: NonBlankStr | None = Field(default=None, alias="GITHUB_APP_SLUG")
 
     # Codex CLI — 음수/0 타임아웃이나 토큰 한도는 리뷰를 즉시 실패시키므로 `gt=0` 로 고정.
     codex_bin: str = Field(default="codex", alias="CODEX_BIN")
@@ -61,9 +74,16 @@ class Settings(BaseSettings):
         default=DEFAULT_CODEX_REASONING_EFFORT,
         alias="CODEX_REASONING_EFFORT",
     )
+    # 1순위 모델에만 전달할 Codex CLI `model_context_window` 오버라이드. 미설정 시
+    # 알려진 모델은 로컬 CLI 카탈로그 값을 사용하고, 사용자 정의 모델은 CLI 기본값을 따른다.
+    codex_model_context_window: int | None = Field(
+        default=None,
+        gt=0,
+        alias="CODEX_MODEL_CONTEXT_WINDOW",
+    )
     codex_timeout_sec: int = Field(default=600, gt=0, alias="CODEX_TIMEOUT_SEC")
     codex_max_input_tokens: int = Field(
-        default=_DEFAULT_CODEX_MAX_INPUT_TOKENS,
+        default_factory=_default_codex_max_input_tokens,
         gt=0,
         alias="CODEX_MAX_INPUT_TOKENS",
     )
@@ -122,6 +142,38 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
+    def require_context_window_within_known_model_max(self) -> Self:
+        """Reject overrides that claim more context than a known model exposes."""
+        configured_window = self.codex_model_context_window
+        known_max = known_model_max_context_window(self.codex_model)
+        if (
+            configured_window is not None
+            and known_max is not None
+            and configured_window > known_max
+        ):
+            raise ValueError(
+                f"CODEX_MODEL_CONTEXT_WINDOW={configured_window}은 "
+                f"{self.codex_model}의 최대 컨텍스트 {known_max}을 초과합니다."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def require_input_budget_within_primary_context(self) -> Self:
+        """Keep the collector budget inside the primary model's usable context."""
+        context_window = self.effective_codex_model_context_window
+        if context_window is None:
+            return self
+        max_safe_tokens = context_window * _CONTEXT_WINDOW_BUDGET_PERCENT // 100
+        if self.codex_max_input_tokens > max_safe_tokens:
+            raise ValueError(
+                f"CODEX_MAX_INPUT_TOKENS={self.codex_max_input_tokens}은 "
+                f"{self.codex_model}의 유효 입력 한도 {max_safe_tokens}을 초과합니다. "
+                "CODEX_MAX_INPUT_TOKENS를 낮추거나 CODEX_MODEL_CONTEXT_WINDOW를 "
+                "실제 모델 한도에 맞게 조정하세요."
+            )
+        return self
+
+    @model_validator(mode="after")
     def require_single_private_key_source(self) -> Self:
         """Require exactly one GitHub App private key source."""
         if self.github_app_private_key is None and self.github_app_private_key_path is None:
@@ -151,6 +203,12 @@ class Settings(BaseSettings):
     @property
     def codex_model_label(self) -> str:
         return " -> ".join(self.codex_model_sequence)
+
+    @property
+    def effective_codex_model_context_window(self) -> int | None:
+        if self.codex_model_context_window is not None:
+            return self.codex_model_context_window
+        return known_model_default_context_window(self.codex_model)
 
 
 def _split_model_list(raw: str) -> tuple[str, ...]:

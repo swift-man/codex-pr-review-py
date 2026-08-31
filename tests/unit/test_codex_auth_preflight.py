@@ -273,6 +273,7 @@ async def test_review_tries_55_then_spark_when_model_limits_are_reached(
         binary="codex",
         model="gpt-5.6-sol",
         fallback_models=("gpt-5.5", "gpt-5.3-codex-spark"),
+        primary_context_window=872_000,
     )
 
     result = await eng.review(pr, dump)
@@ -285,6 +286,8 @@ async def test_review_tries_55_then_spark_when_model_limits_are_reached(
         "gpt-5.5",
         "gpt-5.3-codex-spark",
     ]
+    assert "model_context_window=872000" in calls[0]
+    assert all("model_context_window=872000" not in call for call in calls[1:])
 
 
 async def test_review_records_successful_primary_model_used(
@@ -492,6 +495,12 @@ async def test_review_masks_credentials_in_review_engine_error_message(
             b"ERROR: Codex ran out of room in the model's context window. "
             b"Start a new thread or clear earlier history before retrying.\n"
             b"tokens used / 0\n"
+        ),
+        (
+            b"ERROR: Codex ran out of room in the model's context window. "
+            b"Start a new thread or clear earlier history before retrying.\n"
+            b"tokens used\n"
+            b"1,234\n"
         ),
     ],
 )

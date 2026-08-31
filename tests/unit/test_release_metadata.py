@@ -21,3 +21,9 @@ def test_changelog_contains_current_version() -> None:
     changelog = (_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
 
     assert f"## [{version}]" in changelog
+
+
+def test_pydantic_minimum_supports_data_aware_default_factory() -> None:
+    project = tomllib.loads((_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+
+    assert "pydantic>=2.10" in project["project"]["dependencies"]

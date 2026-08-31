@@ -13,10 +13,10 @@ export GITHUB_WEBHOOK_SECRET="change-me-long-random"
 export CODEX_MODEL="gpt-5.6-sol"
 export CODEX_MODEL_FALLBACKS="gpt-5.5,gpt-5.3-codex-spark"
 export CODEX_REASONING_EFFORT="xhigh"  # low | medium | high | xhigh | max | ultra (모델별 지원)
-# 기본 모델 gpt-5.6-sol 은 Codex CLI ChatGPT-auth catalog 기준 입력 윈도우
-# 372,000 의 95% 인 353,400 을 유효 프롬프트 예산으로 사용한다. Spark 를
-# CODEX_MODEL 로 올려 1순위 운영할 때는 121,600 등 더 작은 예산을 명시한다.
-export CODEX_MAX_INPUT_TOKENS="353400"
+# 1순위 Sol 에만 Codex CLI 확장 컨텍스트를 적용한다. fallback 모델은 각자 CLI
+# 카탈로그 기본 윈도우를 유지하며, 큰 입력을 못 받으면 diff-only 로 재시도한다.
+export CODEX_MODEL_CONTEXT_WINDOW="872000"
+export CODEX_MAX_INPUT_TOKENS="828400"
 export CODEX_TIMEOUT_SEC="600"
 # npm 또는 Homebrew로 설치한 CLI를 쓴다면:
 #   export CODEX_BIN="/opt/homebrew/bin/codex"
