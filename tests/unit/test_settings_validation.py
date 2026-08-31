@@ -189,6 +189,33 @@ def test_legacy_55_primary_gets_compatible_dynamic_budget(
     assert settings.codex_max_input_tokens == 258_400
 
 
+@pytest.mark.parametrize(
+    ("model", "expected_context", "expected_budget"),
+    [
+        ("gpt-5.6-terra", 272_000, 258_400),
+        ("gpt-5.6-luna", 272_000, 258_400),
+        ("gpt-5.4", 272_000, 258_400),
+        ("gpt-5.4-mini", 272_000, 258_400),
+        ("gpt-5.3-codex-spark", 128_000, 121_600),
+        ("codex-auto-review", 272_000, 258_400),
+    ],
+)
+def test_documented_built_in_models_get_catalogued_dynamic_budget(
+    monkeypatch: pytest.MonkeyPatch,
+    model: str,
+    expected_context: int,
+    expected_budget: int,
+) -> None:
+    settings = _settings(
+        monkeypatch,
+        CODEX_MODEL=model,
+        CODEX_MODEL_FALLBACKS="",
+    )
+
+    assert settings.effective_codex_model_context_window == expected_context
+    assert settings.codex_max_input_tokens == expected_budget
+
+
 def test_known_model_context_window_cannot_exceed_catalog_max(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -199,6 +226,32 @@ def test_known_model_context_window_cannot_exceed_catalog_max(
             CODEX_MODEL_FALLBACKS="",
             CODEX_MODEL_CONTEXT_WINDOW="872000",
         )
+
+
+def test_documented_mini_context_window_cannot_exceed_catalog_max(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(ValidationError, match="최대 컨텍스트 272000"):
+        _settings(
+            monkeypatch,
+            CODEX_MODEL="gpt-5.4-mini",
+            CODEX_MODEL_FALLBACKS="",
+            CODEX_MODEL_CONTEXT_WINDOW="872000",
+        )
+
+
+def test_54_explicit_extended_context_uses_catalog_max(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings(
+        monkeypatch,
+        CODEX_MODEL="gpt-5.4",
+        CODEX_MODEL_FALLBACKS="",
+        CODEX_MODEL_CONTEXT_WINDOW="1000000",
+    )
+
+    assert settings.effective_codex_model_context_window == 1_000_000
+    assert settings.codex_max_input_tokens == 950_000
 
 
 def test_custom_primary_context_window_controls_input_budget_validation(

@@ -9,7 +9,8 @@ from codex_review.model_utils import (
     ReasoningEffort,
     dedupe_models,
     incompatible_reasoning_effort_models,
-    known_model_context_window,
+    known_model_default_context_window,
+    known_model_max_context_window,
 )
 
 # 공백만으로 이뤄진 시크릿·호스트·모델명을 차단 — 빈 문자열뿐 아니라 `"   "` 도 거절해야
@@ -29,7 +30,7 @@ def _default_codex_max_input_tokens(validated_data: dict[str, object]) -> int:
     context_window = (
         configured_window
         if isinstance(configured_window, int)
-        else known_model_context_window(str(model))
+        else known_model_default_context_window(str(model))
     )
     if context_window is None:
         return _DEFAULT_CODEX_MAX_INPUT_TOKENS
@@ -144,7 +145,7 @@ class Settings(BaseSettings):
     def require_context_window_within_known_model_max(self) -> Self:
         """Reject overrides that claim more context than a known model exposes."""
         configured_window = self.codex_model_context_window
-        known_max = known_model_context_window(self.codex_model)
+        known_max = known_model_max_context_window(self.codex_model)
         if (
             configured_window is not None
             and known_max is not None
@@ -207,7 +208,7 @@ class Settings(BaseSettings):
     def effective_codex_model_context_window(self) -> int | None:
         if self.codex_model_context_window is not None:
             return self.codex_model_context_window
-        return known_model_context_window(self.codex_model)
+        return known_model_default_context_window(self.codex_model)
 
 
 def _split_model_list(raw: str) -> tuple[str, ...]:
