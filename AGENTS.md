@@ -140,6 +140,8 @@ class InMemoryUserRepository:
 3. 불필요한 추상화는 피한다 (YAGNI). 단, 계층 경계는 유지한다.
 4. 변경 범위를 최소화한다. 요청되지 않은 리팩터링은 하지 않는다.
 5. 새 파일 생성보다 기존 파일 수정을 우선한다.
+6. 코드리뷰는 파일 단위로 수행되므로, 한 파일에 코드가 과도하게 집중되면 책임과
+   계층 경계에 따라 여러 파일로 분리하여 정리한다.
 
 <!-- BEGIN GSTACK-CODEX MANAGED BLOCK -->
 ## gstack — AI Engineering Workflow
