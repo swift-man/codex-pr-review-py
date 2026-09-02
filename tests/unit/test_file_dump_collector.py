@@ -18,6 +18,14 @@ def _git(cwd: Path, *args: str) -> None:
     subprocess.run(["git", "-C", str(cwd), *args], check=True, capture_output=True)
 
 
+def test_token_budget_honors_explicit_character_cap() -> None:
+    budget = TokenBudget(max_tokens=828_400, max_chars_limit=1_000_000)
+
+    assert budget.max_chars() == 1_000_000
+    assert budget.fits(1_000_000)
+    assert not budget.fits(1_000_001)
+
+
 @pytest.fixture()
 def repo(tmp_path: Path) -> Path:
     tmp_path.mkdir(parents=True, exist_ok=True)

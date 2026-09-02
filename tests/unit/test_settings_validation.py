@@ -494,14 +494,10 @@ def test_normalize_bot_user_login_handles_all_input_shapes() -> None:
         normalize_bot_user_login("   ")
 
 
-def test_create_app_wires_followup_use_case_with_normalized_login(
+def test_create_app_wires_runtime_review_dependencies(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """회귀 (coderabbitai PR #19 Minor 후속): 정규화 로직이 헬퍼로 분리됐다고 해서
-    main.py 가 그 헬퍼를 실제로 호출하는지는 별개 — wiring 분기가 잘못 바뀌면
-    헬퍼 단위 테스트만으론 회귀를 못 잡는다. 본 테스트는 `create_app()` 의 lifespan
-    이 시작되기 직전까지 따라가, `FollowUpReviewUseCase` 가 정규화된 login 으로
-    구성되는지 직접 검증.
+    """`create_app()`이 정규화된 bot login과 CLI 문자 상한을 실제 주입하는지 검증.
 
     구현 노트: lifespan 안에서 외부 I/O (`codex auth preflight`, `httpx.AsyncClient`,
     `GitHubAppClient`) 를 다 만나기 전에 검증해야 한다. `FollowUpReviewUseCase.__init__`
@@ -513,6 +509,7 @@ def test_create_app_wires_followup_use_case_with_normalized_login(
 
     from codex_review import main as main_module
     from codex_review.application import follow_up_use_case as fu_module
+    from codex_review.application import review_pr_use_case as review_module
     from codex_review.infrastructure import codex_cli_engine
 
     # `[bot]` suffix 가 이미 붙은 입력. 정상 wiring 이라면 헬퍼를 통과해 단일 `[bot]`
@@ -539,6 +536,19 @@ def test_create_app_wires_followup_use_case_with_normalized_login(
 
     monkeypatch.setattr(fu_module.FollowUpReviewUseCase, "__init__", spy_init)
 
+    review_captured: dict[str, object] = {}
+    original_review_init = review_module.ReviewPullRequestUseCase.__init__
+
+    def spy_review_init(self, **kwargs):  # type: ignore[no-untyped-def]
+        review_captured.update(kwargs)
+        original_review_init(self, **kwargs)
+
+    monkeypatch.setattr(
+        review_module.ReviewPullRequestUseCase,
+        "__init__",
+        spy_review_init,
+    )
+
     # 3) GitHubAppClient 가 private key 형식 검증을 안 하도록 PEM 로딩을 가짜로.
     #    `load_private_key()` 는 `Settings.load_private_key` 인스턴스 메서드라
     #    Settings 자체를 패치한다.
@@ -562,4 +572,7 @@ def test_create_app_wires_followup_use_case_with_normalized_login(
     assert captured.get("bot_user_login") == "codex-review-bot[bot]", (
         f"main wiring 이 정규화된 bot login 으로 use case 를 만들지 않음: "
         f"{captured.get('bot_user_login')!r}"
+    )
+    assert review_captured.get("max_input_chars") == (
+        codex_cli_engine.CODEX_CLI_COLLECTOR_MAX_CHARS
     )

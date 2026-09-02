@@ -18,6 +18,11 @@ from .codex_prompt import build_prompt
 
 logger = logging.getLogger(__name__)
 
+# Codex CLI 0.144.1의 turn/start 입력 하드 제한. 리뷰 이력과 prompt 헤더가 수집
+# 결과 뒤에 추가되므로 collector에는 여유를 둔 별도 상한을 주입한다.
+CODEX_CLI_MAX_INPUT_CHARS = 1_048_576
+CODEX_CLI_COLLECTOR_MAX_CHARS = 1_000_000
+
 _STDERR_TOKENS_USED_MARKER = "tokens used"
 _STDERR_EMPTY_SUMMARY = "(no stderr)"
 _STDERR_TOKEN_COUNT_SEPARATORS = ("/", ":")
@@ -96,6 +101,12 @@ class CodexCliEngine:
         history: ReviewHistory | None = None,
     ) -> ReviewResult:
         prompt = build_prompt(pr, dump, history=history)
+        prompt_chars = len(prompt)
+        if prompt_chars > CODEX_CLI_MAX_INPUT_CHARS:
+            raise ReviewEngineError(
+                "codex turn/start input is too long "
+                f"(max_chars={CODEX_CLI_MAX_INPUT_CHARS}, actual_chars={prompt_chars})"
+            )
         last_error: ReviewEngineError | None = None
         attempted_models: list[str] = []
         deadline = asyncio.get_running_loop().time() + self._timeout_sec

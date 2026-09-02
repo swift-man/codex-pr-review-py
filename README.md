@@ -94,6 +94,8 @@ REPO_FULL_NAME=owner/repo PR_NUMBER=1 INSTALLATION_ID=1234567 \
 > 자동으로 선택한다. 명시한 `CODEX_MAX_INPUT_TOKENS`는 그대로 검증한다.
 > `CODEX_MODEL_CONTEXT_WINDOW`은
 > 1순위 모델에만 전달되며 fallback 모델에는 적용되지 않는다.
+> 모델 토큰 예산과 별개로 Codex CLI `turn/start` 입력은 1,048,576자 제한이 있으므로,
+> 수집기는 리뷰 이력 공간을 남긴 1,000,000자에서 제한하고 큰 저장소는 diff-only로 전환한다.
 > 추론 강도는 1순위와 모든 fallback 모델이 함께 지원해야 한다. 기본 모델인
 > `gpt-5.6-sol`에서 `max`나 `ultra`를 사용하려면 호환되는 fallback만 지정하거나
 > `CODEX_MODEL_FALLBACKS`를 비워야 한다. 알려진 비호환 조합은 서버 기동 시 거부된다.
@@ -108,7 +110,7 @@ REPO_FULL_NAME=owner/repo PR_NUMBER=1 INSTALLATION_ID=1234567 \
 | `CODEX_MODEL_FALLBACKS` | `gpt-5.5,gpt-5.3-codex-spark` | 쉼표로 구분한 fallback 모델 목록. 비우면 fallback 없이 `CODEX_MODEL`만 사용 |
 | `CODEX_REASONING_EFFORT` | `xhigh` | `low`/`medium`/`high`/`xhigh`/`max`/`ultra`. 대소문자와 주변 공백을 정규화하고 알려진 모델 시퀀스의 호환성을 검증 |
 | `CODEX_MODEL_CONTEXT_WINDOW` | `(모델별 자동)` | 1순위 모델에 전달할 Codex CLI `model_context_window`. 기본 Sol은 확장 `872000`; 다른 내장 모델은 CLI 기본값. 명시값은 모델별 카탈로그 최대값 이하로 제한 |
-| `CODEX_MAX_INPUT_TOKENS` | `(모델 윈도우의 95%)` | Codex CLI에 전달할 입력 프롬프트 토큰 예산. Sol은 `828400`, 일반 272K 모델은 `258400`, Spark는 `121600` |
+| `CODEX_MAX_INPUT_TOKENS` | `(모델 윈도우의 95%)` | 모델 입력 프롬프트 토큰 예산. Sol은 `828400`, 일반 272K 모델은 `258400`, Spark는 `121600`. 실제 수집 입력은 Codex CLI 제한에 맞춰 최대 1,000,000자로 제한 |
 | `CODEX_TIMEOUT_SEC` | `600` | 호출 타임아웃 |
 | `REPO_CACHE_DIR` | `~/.codex-review/repos` | clone 캐시 위치 |
 | `GIT_TIMEOUT_SEC` | `120` | git clone/fetch/checkout/ls-files 호출 타임아웃 |

@@ -42,6 +42,7 @@ class ReviewPullRequestUseCase:
         file_collector: FileCollector,
         engine: ReviewEngine,
         max_input_tokens: int,
+        max_input_chars: int | None = None,
         diff_context_collector: DiffContextCollector | None = None,
         bot_login: str | None = None,
     ) -> None:
@@ -49,7 +50,10 @@ class ReviewPullRequestUseCase:
         self._repo_fetcher = repo_fetcher
         self._file_collector = file_collector
         self._engine = engine
-        self._budget = TokenBudget(max_tokens=max_input_tokens)
+        self._budget = TokenBudget(
+            max_tokens=max_input_tokens,
+            max_chars_limit=max_input_chars,
+        )
         # None 이면 fallback 을 비활성화한다 (기존 동작: 예산 초과 시 리뷰 스킵).
         # 운영자가 명시적으로 옵트인 할 수 있도록 DI 경계에서 결정.
         self._diff_collector = diff_context_collector
