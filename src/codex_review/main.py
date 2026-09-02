@@ -13,7 +13,11 @@ from codex_review.application.follow_up_use_case import (
 from codex_review.application.review_pr_use_case import ReviewPullRequestUseCase
 from codex_review.application.webhook_handler import WebhookHandler
 from codex_review.config import Settings
-from codex_review.infrastructure.codex_cli_engine import CodexAuthError, CodexCliEngine
+from codex_review.infrastructure.codex_cli_engine import (
+    CODEX_CLI_COLLECTOR_MAX_CHARS,
+    CodexAuthError,
+    CodexCliEngine,
+)
 from codex_review.infrastructure.diff_context_collector import DiffContextCollector
 from codex_review.infrastructure.file_dump_collector import FileDumpCollector
 from codex_review.infrastructure.git_repo_fetcher import GitRepoFetcher
@@ -94,6 +98,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 file_collector=collector,
                 engine=engine,
                 max_input_tokens=settings.codex_max_input_tokens,
+                max_input_chars=CODEX_CLI_COLLECTOR_MAX_CHARS,
                 diff_context_collector=diff_collector,
                 bot_login=bot_login,
             )

@@ -11,7 +11,11 @@ from codex_review.domain import (
     ReviewEvent,
     ReviewResult,
 )
-from codex_review.infrastructure.codex_cli_engine import CodexAuthError, CodexCliEngine
+from codex_review.infrastructure.codex_cli_engine import (
+    CODEX_CLI_MAX_INPUT_CHARS,
+    CodexAuthError,
+    CodexCliEngine,
+)
 from codex_review.interfaces import ReviewEngineError
 
 
@@ -85,6 +89,21 @@ def _sample_review_input() -> tuple[PullRequest, FileDump]:
         total_chars=3,
     )
     return pr, dump
+
+
+async def test_review_rejects_prompt_over_cli_limit_before_starting_subprocess(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pr, dump = _sample_review_input()
+    oversized_prompt = "x" * (CODEX_CLI_MAX_INPUT_CHARS + 1)
+    monkeypatch.setattr(
+        "codex_review.infrastructure.codex_cli_engine.build_prompt",
+        lambda *_args, **_kwargs: oversized_prompt,
+    )
+    _patch_subprocess(monkeypatch, AssertionError("subprocess must not start"))
+
+    with pytest.raises(ReviewEngineError, match=r"actual_chars=1048577"):
+        await _engine().review(pr, dump)
 
 
 async def test_verify_auth_passes_when_logged_in_on_stdout(monkeypatch: pytest.MonkeyPatch) -> None:

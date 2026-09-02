@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "codex-review"
-version = "0.1.5"
+version = "0.1.6"
 description = "GitHub PR code review bot backed by Codex OAuth (ChatGPT CLI)."
 requires-python = ">=3.11"
 dependencies = [

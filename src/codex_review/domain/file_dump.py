@@ -1,6 +1,5 @@
 from dataclasses import dataclass, field
 
-
 # `FileDump.mode` 가 가질 수 있는 값. 공개 상수로 고정해 infra/application 계층이
 # 리터럴에 의존하지 않도록 한다.
 DUMP_MODE_FULL = "full"      # 전체 코드베이스 덤프 (기본)
@@ -10,16 +9,20 @@ DUMP_MODE_DIFF = "diff"      # 컨텍스트 예산 초과 시 자동 fallback �
 @dataclass(frozen=True)
 class TokenBudget:
     max_tokens: int
+    max_chars_limit: int | None = None
 
     @staticmethod
     def chars_per_token() -> int:
         return 4
 
     def fits(self, char_count: int) -> bool:
-        return char_count <= self.max_tokens * self.chars_per_token()
+        return char_count <= self.max_chars()
 
     def max_chars(self) -> int:
-        return self.max_tokens * self.chars_per_token()
+        estimated_chars = self.max_tokens * self.chars_per_token()
+        if self.max_chars_limit is None:
+            return estimated_chars
+        return min(estimated_chars, self.max_chars_limit)
 
 
 @dataclass(frozen=True)
@@ -41,7 +44,8 @@ class FileDump:
       - `filter_excluded` — 바이너리/미디어/크기 한도 등 **정책상** 뺀 파일.
         예산과 무관하게 해당 PR 이 그 파일만 바꿨어도 리뷰는 불가하므로
         fallback 을 트리거하면 안 된다.
-      - `patch_missing` (diff 모드) — GitHub 가 patch 를 안 준 파일 (rename/delete/binary/거대 diff).
+      - `patch_missing` (diff 모드) — GitHub 가 patch 를 안 준 파일
+        (rename/delete/binary/거대 diff).
       - `budget_trimmed` (property) — 순수하게 **예산 때문에** 잘린 파일 (`excluded -
         filter_excluded - patch_missing`). 이것만이 "리뷰가 얕아진" 실제 원인.
 

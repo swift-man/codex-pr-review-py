@@ -137,10 +137,9 @@ _LOCK_FILENAMES = {
 
 _PRIORITY_DIRS = ("src", "app", "lib", "pkg", "internal", "packages", "apps")
 
-# `CODEX_MAX_INPUT_TOKENS * 4 chars` 는 raw text 에 대한 대략치다. 실제 full prompt 는
-# Codex CLI 의 system/developer 컨텍스트, 리뷰 규칙, PR 메타데이터, line-number prefix 를
-# 함께 싣는다. full-code dump 는 reactive fallback 전에 실패하기 쉬워 보수적인 예산만
-# 파일 본문에 배정한다.
+# `TokenBudget.max_chars()` 는 토큰 추정치와 주입된 전송 상한 중 작은 값이다. 실제 full
+# prompt 는 리뷰 규칙, PR 메타데이터, line-number prefix 를 함께 싣는다. full-code dump 는
+# reactive fallback 전에 실패하기 쉬워 보수적인 예산만 파일 본문에 배정한다.
 _FULL_DUMP_FILE_BUDGET_RATIO = 0.60
 _FULL_DUMP_OVERHEAD_RATIO = 0.10
 _FULL_DUMP_OVERHEAD_CAP_CHARS = 32_000
