@@ -18,7 +18,7 @@ from codex_review.model_utils import (
 # `strip_whitespace=True` 로 주변 공백을 제거한 뒤 `min_length=1` 을 평가한다.
 NonBlankStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 _DEFAULT_CODEX_MODEL = "gpt-5.6-sol"
-_DEFAULT_CODEX_MODEL_FALLBACKS = "gpt-5.5,gpt-5.3-codex-spark"
+_DEFAULT_CODEX_MODEL_FALLBACKS = "gpt-reserve,gpt-5.3-codex-spark"
 _DEFAULT_CODEX_MAX_INPUT_TOKENS = 828_400
 _CONTEXT_WINDOW_BUDGET_PERCENT = 95
 
