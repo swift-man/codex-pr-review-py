@@ -25,6 +25,7 @@ from codex_review.domain import (
     ReviewResult,
     ReviewThread,
 )
+from codex_review.interfaces.github_client import ReviewPublisherUnavailableError
 
 from .diff_parser import parse_right_lines
 
@@ -250,6 +251,13 @@ class GitHubAppClient:
             logger.info("resolved authenticated GitHub App login: %s", self._bot_login)
             return True
 
+    async def ensure_bot_login(self) -> None:
+        """Fail loudly when marker ownership cannot be established for a webhook."""
+        if not await self._ensure_bot_login():
+            raise ReviewPublisherUnavailableError(
+                "could not resolve authenticated GitHub App login"
+            )
+
     async def _with_installation_token_retry(
         self,
         installation_id: int,
@@ -397,8 +405,7 @@ class GitHubAppClient:
         if self._dry_run:
             logger.info("DRY_RUN — review not posted: %s#%d", pr.repo.full_name, pr.number)
             return False
-        if not await self._ensure_bot_login():
-            return False
+        await self.ensure_bot_login()
 
         lock = await self._review_post_lock(pr)
         async with lock:
@@ -518,9 +525,9 @@ class GitHubAppClient:
             # transport/timeout은 GitHub가 리뷰를 저장했는지 알 수 없다. 최신 상태가
             # 종료·머지로 바뀌었고 같은 head라면 marker를 확인한 뒤에만 보존한다.
             current_state = await self._fetch_current_pull_request_state(pr)
+            if not self._is_expected_pull_head(pr, current_state):
+                return False
             if current_state.is_closed:
-                if not self._is_expected_pull_head(pr, current_state):
-                    return False
                 return await self._post_review_as_issue_comment(
                     pr, result, current_state.is_merged
                 )

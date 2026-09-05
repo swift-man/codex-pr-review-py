@@ -17,6 +17,7 @@ from codex_review.domain import (
     ReviewResult,
     TokenBudget,
 )
+from codex_review.interfaces import ReviewPublisherUnavailableError
 
 SECRET = "top-secret"
 
@@ -26,6 +27,11 @@ class FakeGitHub:
     posted_reviews: list[tuple[PullRequest, ReviewResult]] = field(default_factory=list)
     posted_comments: list[tuple[PullRequest, str]] = field(default_factory=list)
     pr_to_return: PullRequest | None = None
+    publisher_available: bool = True
+
+    async def ensure_bot_login(self) -> None:
+        if not self.publisher_available:
+            raise ReviewPublisherUnavailableError("identity unavailable")
 
     async def fetch_pull_request(
         self, repo: RepoRef, number: int, installation_id: int
@@ -251,6 +257,30 @@ async def test_accept_accepts_numeric_string_pr_number(tmp_path: Path) -> None:
     }
     code, reason = await handler.accept("pull_request", "ok-str", payload)
     assert (code, reason) == (202, "queued")
+
+
+async def test_accept_returns_503_when_review_publisher_is_unavailable(
+    tmp_path: Path,
+) -> None:
+    """백그라운드 작업 전 identity 실패는 GitHub webhook 재시도로 노출한다."""
+    github = FakeGitHub(publisher_available=False)
+    handler = _build_handler(
+        github,
+        FileDump(entries=(), total_chars=0),
+        ReviewResult(summary="ok", event=ReviewEvent.COMMENT),
+        tmp_path,
+    )
+    payload: dict[str, Any] = {
+        "action": "opened",
+        "pull_request": {"draft": False, "number": 42},
+        "repository": {"full_name": "o/r"},
+        "installation": {"id": 7},
+    }
+
+    code, reason = await handler.accept("pull_request", "identity-down", payload)
+
+    assert (code, reason) == (503, "review-publisher-unavailable")
+    assert handler._queue.empty()  # type: ignore[attr-defined]
 
 
 async def test_accept_ignores_unsupported_action(tmp_path: Path) -> None:

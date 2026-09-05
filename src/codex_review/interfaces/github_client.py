@@ -9,7 +9,14 @@ from codex_review.domain import (
 )
 
 
+class ReviewPublisherUnavailableError(RuntimeError):
+    """Raised when a webhook cannot safely identify its review publisher."""
+
+
 class GitHubClient(Protocol):
+    async def ensure_bot_login(self) -> None:
+        """Verify that review marker writes can be attributed to this GitHub App."""
+
     async def fetch_pull_request(
         self, repo: RepoRef, number: int, installation_id: int
     ) -> PullRequest: ...

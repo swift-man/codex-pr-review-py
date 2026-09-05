@@ -6,7 +6,7 @@ import logging
 from dataclasses import dataclass
 
 from codex_review.domain import RepoRef
-from codex_review.interfaces import GitHubClient
+from codex_review.interfaces import GitHubClient, ReviewPublisherUnavailableError
 from codex_review.logging_utils import get_delivery_logger
 
 from .follow_up_use_case import FollowUpReviewUseCase
@@ -259,6 +259,19 @@ class WebhookHandler:
                 pr.get("number"), raw_installation_id,
             )
             return 400, "invalid-payload"
+
+        # accept() returns before the background worker runs, so a publisher identity
+        # failure must be surfaced here as 503 for GitHub to retry the webhook.
+        try:
+            await self._github.ensure_bot_login()
+        except ReviewPublisherUnavailableError:
+            dlog.warning(
+                "review publisher identity unavailable for %s#%d; requesting webhook retry",
+                repo_full,
+                number,
+                exc_info=True,
+            )
+            return 503, "review-publisher-unavailable"
 
         job = WebhookJob(
             delivery_id=delivery_id,
