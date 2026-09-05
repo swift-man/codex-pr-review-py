@@ -379,6 +379,8 @@ class GitHubAppClient:
             # 상태 코드도 발생하므로 최신 상태를 다시 확인해 일반 댓글로 보존한다.
             current_state = await self._fetch_current_pull_request_state(pr)
             if current_state.is_closed:
+                if not self._is_expected_pull_head(pr, current_state):
+                    return False
                 await self._post_review_as_issue_comment(pr, result, current_state.is_merged)
                 return True
 
@@ -934,18 +936,17 @@ def _render_post_merge_review_body(
         result.render_body(),
     ]
     if result.findings:
-        parts.extend(
-            [
-                "",
-                "**기술 단위 코멘트 (일반 댓글 보존)**",
-                *(
-                    f"- [{finding.label}] "
-                    f"[`{finding.path}:{finding.line}`]({_github_blob_line_url(pr, finding)}) "
-                    f"{finding.body}"
-                    for finding in result.findings
-                ),
-            ]
-        )
+        parts.extend(["", "**기술 단위 코멘트 (일반 댓글 보존)**"])
+        for finding in result.findings:
+            parts.extend(
+                [
+                    "",
+                    f"### [{finding.label}] "
+                    f"[`{finding.path}:{finding.line}`]({_github_blob_line_url(pr, finding)})",
+                    "",
+                    finding.body.strip(),
+                ]
+            )
     return _with_review_footer(
         "\n".join(parts).strip(),
         model_label,

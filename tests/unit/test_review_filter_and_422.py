@@ -448,7 +448,7 @@ async def test_post_review_preserves_merged_review_as_issue_comment(
                     Finding(
                         path="src/a file.py",
                         line=10,
-                        body="실제 수정 필요",
+                        body="실제 수정 필요\n추가 설명",
                         severity="major",
                     ),
                 ),
@@ -462,7 +462,8 @@ async def test_post_review_preserves_merged_review_as_issue_comment(
         assert "<!-- codex-review:post-merge-fallback:abc -->" in body
         assert "## Codex 리뷰 (PR 종료 후 보존)" in body
         assert "PR이 이미 머지되어" in body
-        assert "[Major]" in body
+        assert "### [Major]" in body
+        assert "실제 수정 필요\n추가 설명" in body
         assert "https://github.com/o/r/blob/abc/src/a%20file.py#L10" in body
         assert "리뷰 모델: <code>gpt-5.6 Sol Extra High</code>" in body
 
@@ -517,6 +518,48 @@ async def test_post_review_falls_back_when_pr_closes_after_native_post_fails(
     assert len(review_posts) == 1
     assert len(issue_comment_posts) == 1
     assert "PR이 이미 종료되어" in _body_of(issue_comment_posts[0])["body"]
+
+
+async def test_post_review_skips_stale_fallback_when_head_changes_before_pr_closes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PR이 닫히더라도 리뷰 대상 head가 바뀌었으면 과거 결과를 게시하지 않는다."""
+    monkeypatch.setattr(jwt, "encode", lambda *a, **k: "fake.jwt")
+    pull_reads = 0
+    issue_comment_posts: list[httpx.Request] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        nonlocal pull_reads
+        if req.url.path.endswith("/access_tokens"):
+            return httpx.Response(
+                200, json={"token": "ITOK", "expires_at": "2099-01-01T00:00:00Z"}
+            )
+        if req.url.path.endswith("/pulls/1") and req.method == "GET":
+            pull_reads += 1
+            if pull_reads == 1:
+                return httpx.Response(
+                    200, json={"head": {"sha": "abc"}, "state": "open"}
+                )
+            return httpx.Response(
+                200, json={"head": {"sha": "def"}, "state": "closed", "merged": True}
+            )
+        if req.url.path.endswith("/pulls/1/reviews") and req.method == "POST":
+            return httpx.Response(500, json={"message": "PR changed while posting"})
+        if req.url.path.endswith("/issues/1/comments") and req.method == "POST":
+            issue_comment_posts.append(req)
+            return httpx.Response(201, json={})
+        return httpx.Response(404)
+
+    async with httpx.AsyncClient(
+        base_url="https://api.github.com",
+        transport=httpx.MockTransport(handler),
+    ) as http_client:
+        client = GitHubAppClient(app_id=1, private_key_pem="-", http_client=http_client)
+        posted = await client.post_review(_pr(), _review_result_with_inline())
+
+    assert posted is False
+    assert pull_reads == 2
+    assert issue_comment_posts == []
 
 
 async def test_post_review_422_fallback_skips_when_head_changes_before_retry(
