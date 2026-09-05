@@ -20,6 +20,36 @@ GitHub App 웹훅으로 PR 이벤트를 받아, 레포를 체크아웃하고 전
 
 ## 아키텍처
 
+### Admin 모델 저장 후 안전한 재기동
+
+`admin.gorani.me` 연동 시 봇의 비공개 `scripts/local_review_env.sh`에
+`CODEX_CONTROL_SHARED_SECRET`을 설정합니다. `openssl rand -hex 32`로 생성한 별도
+난수이며 admin `.env`의 `ADMIN_CODEX_CONTROL_SHARED_SECRET`과 같아야 합니다.
+GitHub webhook, 프록시, Claude control secret과 재사용하지 마세요. 처음 적용할 때는
+리뷰가 없는 시점에 기존 `scripts/run_webhook_server.sh`로 한 번 재시동해야 합니다.
+
+- `/internal/control/status`, `/drain`, `/resume`은 실제 loopback peer와
+  `X-Gorani-Bot-Control-Secret`이 모두 맞아야 접근할 수 있습니다. Secret 미설정은
+  접근 거부이며 `--no-proxy-headers`로 전달 헤더의 loopback 위장을 차단합니다.
+- Drain은 작업 ID별 배타 lease로 신규 리뷰를 차단하고 이미 받은 큐와 실행 작업을
+  최대 60초 기다립니다. 타임아웃은 intake를 재개하며, 고아 lease도 자동 만료됩니다.
+  이 구간의 새 delivery는 `503`이므로 GitHub에서 실패 delivery를 확인·재전송하세요.
+- 관리 전용 `scripts/restart_webhook_server.sh --no-tail`은 인증된 drain 후에만
+  호출합니다. 임의 PID/포트/명령 인자를 받지 않으며, `8022`의 단일 소유 프로세스와
+  빈 큐를 확인한 뒤 TERM을 보냅니다. 다른 listener를 강제 종료하지 않습니다.
+- 고정 `.venv/bin/python -m uvicorn`을 `0.0.0.0:8022`로 시작하고 새 instance/PID를
+  확인합니다. 기존 `HOST`, `PORT`, `VENV_DIR` 설정은 관리 재기동 경로를 바꾸지 않습니다.
+  기존 `.runtime`과 별개인 owner-only `.admin-runtime/`에 잠금과 로그를 저장합니다.
+- Admin은 새 instance의 primary 모델·추론 강도·fallback 목록까지 검증합니다.
+  실패하면 저장값은 보존하고 재시도를 표시합니다. 시작 실패 시 봇이 중지된 상태일 수
+  있으므로 private 로그를 확인하고 수동으로 복구한 후 재시도하세요.
+
+Control API나 `8022` 포트를 admin 공개 경로로 프록시하지 마세요. 여러 Uvicorn worker,
+외부 supervisor 자동 재시작과의 혼용은 지원하지 않습니다. 기존 리뷰 댓글의 모델
+표시는 해당 리뷰 당시 기록이므로 설정 변경이나 재기동으로 수정되지 않습니다.
+
+### 리뷰 처리 흐름
+
 ```
 GitHub PR event
   → FastAPI /github/webhook (HMAC 검증, 게시자 확인, 정상 시 202 즉시 응답)

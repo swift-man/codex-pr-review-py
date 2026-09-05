@@ -2,6 +2,17 @@
 
 이 프로젝트의 주요 변경 사항을 기록합니다. 버전은 [Semantic Versioning](https://semver.org/)을 따릅니다.
 
+## [Unreleased]
+
+### 추가
+
+- Admin의 모델 저장 후 재기동을 위한 loopback 전용 인증 status/drain/resume API.
+  이미 수락한 리뷰의 완료를 기다리며 타임아웃·취소·lease 만료 시 intake를 재개합니다.
+- 포트 8022의 인증된 단일 drain 프로세스만 종료하는 고정 macOS 재기동 스크립트와
+  새 instance 검증, owner-only `.admin-runtime` 잠금·로그를 추가했습니다.
+- 신규 요청의 전달 헤더로 loopback peer를 위장하지 못하도록 Uvicorn proxy headers를
+  비활성화하고, 전용 secret 설정·초기 수동 재기동·실패 delivery 재전송 절차를 문서화했습니다.
+
 ## [0.1.7] - 2026-09-05
 
 ### 변경
