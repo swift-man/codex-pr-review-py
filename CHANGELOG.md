@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+### 수정
+
+- macOS Bash 3.2에서 종료 대기 후 listener 목록이 비면 수동 시작 스크립트가
+  중단되던 오류를 수정하고, 종료된 listener의 잔여 자식 정리는 유지했습니다.
+- 서명이 유효하지만 UTF-8이 손상된 webhook 요청은 500 대신 400으로 거절합니다.
+
 ### 추가
 
 - Admin의 모델 저장 후 재기동을 위한 loopback 전용 인증 status/drain/resume API.

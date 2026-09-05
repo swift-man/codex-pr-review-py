@@ -153,7 +153,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         try:
             payload = json.loads(body.decode("utf-8") or "{}")
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, UnicodeDecodeError):
             return Response(status_code=400, content="invalid json")
 
         event = request.headers.get("X-GitHub-Event", "")
