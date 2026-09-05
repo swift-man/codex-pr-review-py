@@ -132,6 +132,7 @@ async def capturing_client(
             app_id=1,
             private_key_pem="-",
             http_client=http_client,
+            bot_login="codex-review-bot[bot]",
             review_model_label="gpt-5.6-sol",
             review_reasoning_effort="xhigh",
         )

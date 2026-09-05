@@ -129,6 +129,8 @@ class _PullRequestState:
 
 _REVIEW_MARKER_PREFIX = "<!-- codex-review:review:"
 _POST_MERGE_FALLBACK_MARKER_PREFIX = "<!-- codex-review:post-merge-fallback:"
+_UNKNOWN_REVIEW_STATUSES = frozenset({408, 425, 429})
+_AUTH_FAILURE_STATUSES = frozenset({401, 403})
 
 
 class GitHubAppClient:
@@ -146,6 +148,7 @@ class GitHubAppClient:
         dry_run: bool = False,
         review_model_label: str | None = None,
         review_reasoning_effort: str | None = None,
+        bot_login: str | None = None,
     ) -> None:
         self._app_id = app_id
         self._private_key = private_key_pem
@@ -154,6 +157,7 @@ class GitHubAppClient:
         # 본문 footer 에 표시할 모델 라벨. None 이면 footer 생략.
         self._review_model_label = review_model_label
         self._review_reasoning_effort = review_reasoning_effort
+        self._bot_login = bot_login.strip() if bot_login and bot_login.strip() else None
         self._token_cache: dict[int, _CachedToken] = {}
         # installation_id 별 개별 락. 단일 전역 락은 서로 다른 installation 의 동시 재발급까지
         # 직렬화해 병목을 만든다. LRU 상한이 있는 레지스트리를 써 무한히 쌓이지 않게 한다.
@@ -164,6 +168,7 @@ class GitHubAppClient:
             tuple[str, int, str], asyncio.Lock
         ] = weakref.WeakValueDictionary()
         self._review_post_locks_guard = asyncio.Lock()
+        self._bot_login_lock = asyncio.Lock()
 
     # --- Auth ---------------------------------------------------------------
 
@@ -203,6 +208,47 @@ class GitHubAppClient:
                     expires_at = datetime.fromisoformat(expires).timestamp()
             self._token_cache[installation_id] = _CachedToken(token, expires_at)
             return token
+
+    async def _ensure_bot_login(self) -> bool:
+        """Resolve the authenticated GitHub App login before trusting markers."""
+        if self._bot_login is not None:
+            return True
+
+        async with self._bot_login_lock:
+            if self._bot_login is not None:
+                return True
+            try:
+                data = await self._request(
+                    "GET",
+                    "/app",
+                    auth=f"Bearer {self._app_jwt()}",
+                )
+            except (httpx.HTTPError, ValueError):
+                logger.warning(
+                    "could not resolve authenticated GitHub App login; "
+                    "review publication will be deferred",
+                    exc_info=True,
+                )
+                return False
+            if not isinstance(data, dict):
+                logger.warning(
+                    "GitHub App identity response was not an object; "
+                    "review publication will be deferred"
+                )
+                return False
+            raw_login = data.get("login") or data.get("slug")
+            if not isinstance(raw_login, str) or not raw_login.strip():
+                logger.warning(
+                    "GitHub App identity response had no login or slug; "
+                    "review publication will be deferred"
+                )
+                return False
+            login = raw_login.strip()
+            self._bot_login = (
+                login if login.casefold().endswith("[bot]") else f"{login}[bot]"
+            )
+            logger.info("resolved authenticated GitHub App login: %s", self._bot_login)
+            return True
 
     async def _with_installation_token_retry(
         self,
@@ -351,6 +397,8 @@ class GitHubAppClient:
         if self._dry_run:
             logger.info("DRY_RUN — review not posted: %s#%d", pr.repo.full_name, pr.number)
             return False
+        if not await self._ensure_bot_login():
+            return False
 
         lock = await self._review_post_lock(pr)
         async with lock:
@@ -410,6 +458,9 @@ class GitHubAppClient:
             )
             return True
         except httpx.HTTPStatusError as exc:
+            status_code = exc.response.status_code
+            if not _is_review_fallback_status(status_code):
+                raise
             # PR 이 native review POST 직전에 닫히거나 머지될 수 있다. 이 경우 422 외
             # 상태 코드도 발생하므로 최신 상태를 다시 확인해 일반 댓글로 보존한다.
             current_state = await self._fetch_current_pull_request_state(pr)
@@ -425,7 +476,7 @@ class GitHubAppClient:
             # 제거한 findings 는 **조용히 삭제하지 않고** `dropped_findings` 로 옮겨
             # 본문 접이식 섹션으로 보존. 그래야 리뷰어가 "모델이 뭘 지적했었는지" 를
             # 나중에라도 확인할 수 있다 (codex/gemini PR #17 지적 반영).
-            if exc.response.status_code == 422 and payload["comments"]:
+            if status_code == 422 and payload["comments"]:
                 logger.warning(
                     "422 on review POST for %s#%d; retrying without inline comments "
                     "(%d finding(s) preserved in body)",
@@ -447,17 +498,10 @@ class GitHubAppClient:
                     pr,
                 )
                 payload["comments"] = []
-                if not await self._is_current_pull_head(pr):
-                    return False
-                await self._request_with_installation_token_retry(
-                    pr.installation_id,
-                    f"post_review fallback {pr.repo.full_name}#{pr.number}",
-                    "POST",
-                    path,
-                    body=payload,
+                return await self._post_review_body_only_retry(
+                    pr, result, path, payload, current_state
                 )
-                return True
-            if 400 <= exc.response.status_code < 500:
+            if _is_explicit_review_rejection(status_code):
                 if not self._is_expected_pull_head(pr, current_state):
                     return False
                 return await self._post_review_as_issue_comment(
@@ -481,6 +525,41 @@ class GitHubAppClient:
                     pr, result, current_state.is_merged
                 )
             raise
+
+    async def _post_review_body_only_retry(
+        self,
+        pr: PullRequest,
+        result: ReviewResult,
+        path: str,
+        payload: dict[str, object],
+        current_state: _PullRequestState,
+    ) -> bool:
+        """Retry a rejected inline review while preserving lifecycle races."""
+        if not self._is_expected_pull_head(pr, current_state):
+            return False
+        if current_state.is_closed:
+            return await self._post_review_as_issue_comment(
+                pr, result, current_state.is_merged
+            )
+
+        try:
+            await self._request_with_installation_token_retry(
+                pr.installation_id,
+                f"post_review fallback {pr.repo.full_name}#{pr.number}",
+                "POST",
+                path,
+                body=payload,
+            )
+        except (httpx.HTTPStatusError, httpx.TransportError, TimeoutError, OSError):
+            current_state = await self._fetch_current_pull_request_state(pr)
+            if not self._is_expected_pull_head(pr, current_state):
+                return False
+            if current_state.is_closed:
+                return await self._post_review_as_issue_comment(
+                    pr, result, current_state.is_merged
+                )
+            raise
+        return True
 
     async def _is_current_pull_head(self, pr: PullRequest) -> bool:
         current_state = await self._fetch_current_pull_request_state(pr)
@@ -569,8 +648,13 @@ class GitHubAppClient:
 
         marker = _review_marker(pr)
         legacy_marker = _post_merge_fallback_marker(pr)
+        bot_login = self._bot_login.casefold() if self._bot_login is not None else None
+        if bot_login is None:
+            return None
         return any(
             isinstance(item, dict)
+            and isinstance(item.get("user"), dict)
+            and str(item["user"].get("login") or "").casefold() == bot_login
             and any(
                 candidate in str(item.get("body") or "")
                 for candidate in (marker, legacy_marker)
@@ -602,6 +686,10 @@ class GitHubAppClient:
                 pr.number,
                 pr.head_sha,
             )
+            return False
+
+        current_state = await self._fetch_current_pull_request_state(pr)
+        if not self._is_expected_pull_head(pr, current_state):
             return False
 
         status = "머지" if is_merged else "종료"
@@ -1023,6 +1111,27 @@ class GitHubAppClient:
 
 def _contains_bad_credentials_401(exc: BaseException) -> bool:
     return any(_is_bad_credentials_401(error) for error in _http_status_errors(exc))
+
+
+def _is_unknown_review_status(status_code: int) -> bool:
+    """Return whether a failed review request may have been stored by GitHub."""
+    return status_code in _UNKNOWN_REVIEW_STATUSES or status_code >= 500
+
+
+def _is_explicit_review_rejection(status_code: int) -> bool:
+    """Return whether GitHub definitively rejected the native review request."""
+    return (
+        400 <= status_code < 500
+        and status_code not in _UNKNOWN_REVIEW_STATUSES
+        and status_code not in _AUTH_FAILURE_STATUSES
+    )
+
+
+def _is_review_fallback_status(status_code: int) -> bool:
+    """Return whether status inspection may safely lead to a review fallback."""
+    return _is_unknown_review_status(status_code) or _is_explicit_review_rejection(
+        status_code
+    )
 
 
 def _http_status_errors(exc: BaseException) -> Iterator[httpx.HTTPStatusError]:
