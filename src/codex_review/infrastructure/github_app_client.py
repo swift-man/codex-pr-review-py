@@ -8,6 +8,7 @@ from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any, TypeVar
+from urllib.parse import quote
 
 import certifi
 import httpx
@@ -119,6 +120,19 @@ class _CachedToken:
         return time.time() < self.expires_at - 60
 
 
+@dataclass(frozen=True)
+class _PullRequestState:
+    head_sha: str
+    is_closed: bool
+    is_merged: bool
+
+
+_REVIEW_MARKER_PREFIX = "<!-- codex-review:review:"
+_POST_MERGE_FALLBACK_MARKER_PREFIX = "<!-- codex-review:post-merge-fallback:"
+_UNKNOWN_REVIEW_STATUSES = frozenset({408, 425, 429})
+_AUTH_FAILURE_STATUSES = frozenset({401, 403})
+
+
 class GitHubAppClient:
     """Async GitHub REST client authenticating as a GitHub App installation.
 
@@ -134,6 +148,7 @@ class GitHubAppClient:
         dry_run: bool = False,
         review_model_label: str | None = None,
         review_reasoning_effort: str | None = None,
+        bot_login: str | None = None,
     ) -> None:
         self._app_id = app_id
         self._private_key = private_key_pem
@@ -142,10 +157,18 @@ class GitHubAppClient:
         # 본문 footer 에 표시할 모델 라벨. None 이면 footer 생략.
         self._review_model_label = review_model_label
         self._review_reasoning_effort = review_reasoning_effort
+        self._bot_login = bot_login.strip() if bot_login and bot_login.strip() else None
         self._token_cache: dict[int, _CachedToken] = {}
         # installation_id 별 개별 락. 단일 전역 락은 서로 다른 installation 의 동시 재발급까지
         # 직렬화해 병목을 만든다. LRU 상한이 있는 레지스트리를 써 무한히 쌓이지 않게 한다.
         self._token_locks = _LockRegistry()
+        # 같은 PR/head에 대한 webhook 재전달이 한 프로세스에서 겹치면 marker 조회와
+        # 게시를 하나의 임계구역으로 묶어 native review/comment 중복을 줄인다.
+        self._review_post_locks: weakref.WeakValueDictionary[
+            tuple[str, int, str], asyncio.Lock
+        ] = weakref.WeakValueDictionary()
+        self._review_post_locks_guard = asyncio.Lock()
+        self._bot_login_lock = asyncio.Lock()
 
     # --- Auth ---------------------------------------------------------------
 
@@ -185,6 +208,47 @@ class GitHubAppClient:
                     expires_at = datetime.fromisoformat(expires).timestamp()
             self._token_cache[installation_id] = _CachedToken(token, expires_at)
             return token
+
+    async def _ensure_bot_login(self) -> bool:
+        """Resolve the authenticated GitHub App login before trusting markers."""
+        if self._bot_login is not None:
+            return True
+
+        async with self._bot_login_lock:
+            if self._bot_login is not None:
+                return True
+            try:
+                data = await self._request(
+                    "GET",
+                    "/app",
+                    auth=f"Bearer {self._app_jwt()}",
+                )
+            except (httpx.HTTPError, ValueError):
+                logger.warning(
+                    "could not resolve authenticated GitHub App login; "
+                    "review publication will be deferred",
+                    exc_info=True,
+                )
+                return False
+            if not isinstance(data, dict):
+                logger.warning(
+                    "GitHub App identity response was not an object; "
+                    "review publication will be deferred"
+                )
+                return False
+            raw_login = data.get("login") or data.get("slug")
+            if not isinstance(raw_login, str) or not raw_login.strip():
+                logger.warning(
+                    "GitHub App identity response had no login or slug; "
+                    "review publication will be deferred"
+                )
+                return False
+            login = raw_login.strip()
+            self._bot_login = (
+                login if login.casefold().endswith("[bot]") else f"{login}[bot]"
+            )
+            logger.info("resolved authenticated GitHub App login: %s", self._bot_login)
+            return True
 
     async def _with_installation_token_retry(
         self,
@@ -333,19 +397,53 @@ class GitHubAppClient:
         if self._dry_run:
             logger.info("DRY_RUN — review not posted: %s#%d", pr.repo.full_name, pr.number)
             return False
+        if not await self._ensure_bot_login():
+            return False
+
+        lock = await self._review_post_lock(pr)
+        async with lock:
+            return await self._post_review_unlocked(pr, result)
+
+    async def _post_review_unlocked(self, pr: PullRequest, result: ReviewResult) -> bool:
+        """Serialize marker verification and review publication for one PR head."""
 
         path = f"/repos/{pr.repo.full_name}/pulls/{pr.number}/reviews"
-        if not await self._is_current_pull_head(pr):
+        published = await self._has_published_review(pr)
+        if published is None:
+            logger.warning(
+                "skipping review post for %s#%d — could not verify existing review marker",
+                pr.repo.full_name,
+                pr.number,
+            )
             return False
+        if published:
+            logger.info(
+                "skipping duplicate review post for %s#%d head=%s",
+                pr.repo.full_name,
+                pr.number,
+                pr.head_sha,
+            )
+            return False
+
+        current_state = await self._fetch_current_pull_request_state(pr)
+        if not self._is_expected_pull_head(pr, current_state):
+            return False
+        if current_state.is_closed:
+            return await self._post_review_as_issue_comment(
+                pr, result, current_state.is_merged
+            )
 
         # commit_id 를 명시해야 리뷰가 "이 head SHA 시점"에 고정된다. 생략하면 최신 SHA 기준으로
         # 붙어 라인 번호 오정렬이 발생할 수 있다.
         payload: dict[str, object] = {
             "commit_id": pr.head_sha,
-            "body": _with_review_footer(
-                result.render_body(),
-                _resolve_model_label(result, self._review_model_label),
-                _resolve_reasoning_effort(result, self._review_reasoning_effort),
+            "body": _with_review_marker(
+                _with_review_footer(
+                    result.render_body(),
+                    _resolve_model_label(result, self._review_model_label),
+                    _resolve_reasoning_effort(result, self._review_reasoning_effort),
+                ),
+                pr,
             ),
             "event": result.event.value,
             "comments": [_finding_to_comment(f) for f in result.findings],
@@ -360,12 +458,25 @@ class GitHubAppClient:
             )
             return True
         except httpx.HTTPStatusError as exc:
+            status_code = exc.response.status_code
+            if not _is_review_fallback_status(status_code):
+                raise
+            # PR 이 native review POST 직전에 닫히거나 머지될 수 있다. 이 경우 422 외
+            # 상태 코드도 발생하므로 최신 상태를 다시 확인해 일반 댓글로 보존한다.
+            current_state = await self._fetch_current_pull_request_state(pr)
+            if current_state.is_closed:
+                if not self._is_expected_pull_head(pr, current_state):
+                    return False
+                return await self._post_review_as_issue_comment(
+                    pr, result, current_state.is_merged
+                )
+
             # 방어선: use-case 단계의 diff 필터가 있음에도 422 가 나면 인라인 코멘트를 포기하고
             # 본문만 재게시한다. 리뷰 전체를 포기하는 것보다 낫다.
             # 제거한 findings 는 **조용히 삭제하지 않고** `dropped_findings` 로 옮겨
             # 본문 접이식 섹션으로 보존. 그래야 리뷰어가 "모델이 뭘 지적했었는지" 를
             # 나중에라도 확인할 수 있다 (codex/gemini PR #17 지적 반영).
-            if exc.response.status_code == 422 and payload["comments"]:
+            if status_code == 422 and payload["comments"]:
                 logger.warning(
                     "422 on review POST for %s#%d; retrying without inline comments "
                     "(%d finding(s) preserved in body)",
@@ -376,41 +487,130 @@ class GitHubAppClient:
                     findings=(),
                     dropped_findings=result.dropped_findings + result.findings,
                 )
-                payload["body"] = _with_review_footer(
-                    retry_result.render_body(),
-                    _resolve_model_label(retry_result, self._review_model_label),
-                    _resolve_reasoning_effort(
-                        retry_result, self._review_reasoning_effort
+                payload["body"] = _with_review_marker(
+                    _with_review_footer(
+                        retry_result.render_body(),
+                        _resolve_model_label(retry_result, self._review_model_label),
+                        _resolve_reasoning_effort(
+                            retry_result, self._review_reasoning_effort
+                        ),
                     ),
+                    pr,
                 )
                 payload["comments"] = []
-                if not await self._is_current_pull_head(pr):
-                    return False
-                await self._request_with_installation_token_retry(
-                    pr.installation_id,
-                    f"post_review fallback {pr.repo.full_name}#{pr.number}",
-                    "POST",
-                    path,
-                    body=payload,
+                return await self._post_review_body_only_retry(
+                    pr, result, path, payload, current_state
                 )
-                return True
-            else:
-                raise
+            if _is_explicit_review_rejection(status_code):
+                if not self._is_expected_pull_head(pr, current_state):
+                    return False
+                return await self._post_review_as_issue_comment(
+                    pr,
+                    result,
+                    is_merged=False,
+                    reason=(
+                        "GitHub 네이티브 리뷰 API가 "
+                        f"HTTP {exc.response.status_code}로 거부해 일반 댓글로 보존합니다."
+                    ),
+                )
+            raise
+        except (httpx.TransportError, TimeoutError, OSError):
+            # transport/timeout은 GitHub가 리뷰를 저장했는지 알 수 없다. 최신 상태가
+            # 종료·머지로 바뀌었고 같은 head라면 marker를 확인한 뒤에만 보존한다.
+            current_state = await self._fetch_current_pull_request_state(pr)
+            if current_state.is_closed:
+                if not self._is_expected_pull_head(pr, current_state):
+                    return False
+                return await self._post_review_as_issue_comment(
+                    pr, result, current_state.is_merged
+                )
+            raise
+
+    async def _post_review_body_only_retry(
+        self,
+        pr: PullRequest,
+        result: ReviewResult,
+        path: str,
+        payload: dict[str, object],
+        current_state: _PullRequestState,
+    ) -> bool:
+        """Retry a rejected inline review while preserving lifecycle races."""
+        if not self._is_expected_pull_head(pr, current_state):
+            return False
+        if current_state.is_closed:
+            return await self._post_review_as_issue_comment(
+                pr, result, current_state.is_merged
+            )
+
+        try:
+            await self._request_with_installation_token_retry(
+                pr.installation_id,
+                f"post_review fallback {pr.repo.full_name}#{pr.number}",
+                "POST",
+                path,
+                body=payload,
+            )
+        except httpx.HTTPStatusError as exc:
+            current_state = await self._fetch_current_pull_request_state(pr)
+            if not self._is_expected_pull_head(pr, current_state):
+                return False
+            if current_state.is_closed:
+                return await self._post_review_as_issue_comment(
+                    pr, result, current_state.is_merged
+                )
+            if _is_explicit_review_rejection(exc.response.status_code):
+                return await self._post_review_as_issue_comment(
+                    pr,
+                    result,
+                    is_merged=False,
+                    reason=(
+                        "GitHub 네이티브 리뷰 본문 재시도가 "
+                        f"HTTP {exc.response.status_code}로 거부되어 일반 댓글로 보존합니다."
+                    ),
+                )
+            raise
+        except (httpx.TransportError, TimeoutError, OSError):
+            current_state = await self._fetch_current_pull_request_state(pr)
+            if not self._is_expected_pull_head(pr, current_state):
+                return False
+            if current_state.is_closed:
+                return await self._post_review_as_issue_comment(
+                    pr, result, current_state.is_merged
+                )
+            raise
+        return True
 
     async def _is_current_pull_head(self, pr: PullRequest) -> bool:
-        current_head_sha = await self._fetch_current_pull_head_sha(pr)
-        if current_head_sha == pr.head_sha:
+        current_state = await self._fetch_current_pull_request_state(pr)
+        return self._is_expected_pull_head(pr, current_state)
+
+    async def _review_post_lock(self, pr: PullRequest) -> asyncio.Lock:
+        key = (pr.repo.full_name, pr.number, pr.head_sha)
+        async with self._review_post_locks_guard:
+            lock = self._review_post_locks.get(key)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._review_post_locks[key] = lock
+            return lock
+
+    def _is_expected_pull_head(
+        self, pr: PullRequest, current_state: _PullRequestState
+    ) -> bool:
+        if current_state.head_sha == pr.head_sha:
             return True
         logger.info(
             "skipping review post for %s#%d — PR head changed from %s to %s",
             pr.repo.full_name,
             pr.number,
             pr.head_sha,
-            current_head_sha,
+            current_state.head_sha,
         )
         return False
 
     async def _fetch_current_pull_head_sha(self, pr: PullRequest) -> str:
+        return (await self._fetch_current_pull_request_state(pr)).head_sha
+
+    async def _fetch_current_pull_request_state(self, pr: PullRequest) -> _PullRequestState:
         data = await self._request_with_installation_token_retry(
             pr.installation_id,
             f"verify_pull_head_before_review_post {pr.repo.full_name}#{pr.number}",
@@ -428,7 +628,102 @@ class GitHubAppClient:
                 f"GitHub pull request response did not include head.sha for "
                 f"{pr.repo.full_name}#{pr.number}"
             )
-        return str(head["sha"])
+        state = str(data.get("state") or "open").lower()
+        is_merged = bool(data.get("merged", False))
+        return _PullRequestState(
+            head_sha=str(head["sha"]),
+            is_closed=state != "open" or is_merged,
+            is_merged=is_merged,
+        )
+
+    async def _has_published_review(self, pr: PullRequest) -> bool | None:
+        """Check native and issue comments without treating a partial read as empty."""
+        results = await asyncio.gather(
+            self._collect_pages_strict_with_installation_token_retry(
+                pr.installation_id,
+                f"find review marker issues/comments {pr.repo.full_name}#{pr.number}",
+                f"/repos/{pr.repo.full_name}/issues/{pr.number}/comments?per_page=100",
+            ),
+            self._collect_pages_strict_with_installation_token_retry(
+                pr.installation_id,
+                f"find review marker pulls/reviews {pr.repo.full_name}#{pr.number}",
+                f"/repos/{pr.repo.full_name}/pulls/{pr.number}/reviews?per_page=100",
+            ),
+            return_exceptions=True,
+        )
+        pages: list[list[Any]] = []
+        for result in results:
+            if not isinstance(result, list):
+                if isinstance(result, asyncio.CancelledError):
+                    raise result
+                logger.warning(
+                    "could not verify review marker for %s#%d",
+                    pr.repo.full_name,
+                    pr.number,
+                    exc_info=result,
+                )
+                return None
+            pages.append(result)
+
+        marker = _review_marker(pr)
+        legacy_marker = _post_merge_fallback_marker(pr)
+        bot_login = self._bot_login.casefold() if self._bot_login is not None else None
+        if bot_login is None:
+            return None
+        return any(
+            isinstance(item, dict)
+            and isinstance(item.get("user"), dict)
+            and str(item["user"].get("login") or "").casefold() == bot_login
+            and any(
+                candidate in str(item.get("body") or "")
+                for candidate in (marker, legacy_marker)
+            )
+            for page in pages
+            for item in page
+        )
+
+    async def _post_review_as_issue_comment(
+        self,
+        pr: PullRequest,
+        result: ReviewResult,
+        is_merged: bool,
+        *,
+        reason: str | None = None,
+    ) -> bool:
+        published = await self._has_published_review(pr)
+        if published is None:
+            logger.warning(
+                "skipping fallback review comment for %s#%d — marker verification failed",
+                pr.repo.full_name,
+                pr.number,
+            )
+            return False
+        if published:
+            logger.info(
+                "skipping duplicate post-merge review comment for %s#%d head=%s",
+                pr.repo.full_name,
+                pr.number,
+                pr.head_sha,
+            )
+            return False
+
+        current_state = await self._fetch_current_pull_request_state(pr)
+        if not self._is_expected_pull_head(pr, current_state):
+            return False
+
+        status = "머지" if is_merged else "종료"
+        body = _render_post_merge_review_body(
+            pr,
+            result,
+            status=status,
+            reason=reason,
+            model_label=_resolve_model_label(result, self._review_model_label),
+            reasoning_effort=_resolve_reasoning_effort(
+                result, self._review_reasoning_effort
+            ),
+        )
+        await self.post_comment(pr, body)
+        return True
 
     async def post_comment(self, pr: PullRequest, body: str) -> None:
         if self._dry_run:
@@ -624,6 +919,32 @@ class GitHubAppClient:
             lambda token: self._collect_pages(url_or_path, auth=f"token {token}"),
         )
 
+    async def _collect_pages_strict_with_installation_token_retry(
+        self, installation_id: int, operation: str, url_or_path: str
+    ) -> list[Any]:
+        return await self._with_installation_token_retry(
+            installation_id,
+            operation,
+            lambda token: self._collect_pages_strict(url_or_path, auth=f"token {token}"),
+        )
+
+    async def _collect_pages_strict(
+        self, url_or_path: str, *, auth: str
+    ) -> list[Any]:
+        """Collect every page and propagate errors for idempotency checks."""
+        out: list[Any] = []
+        next_url: str | None = url_or_path
+        for _ in range(100):
+            if not next_url:
+                return out
+            page, next_url = await self._get_page_with_next(next_url, auth=auth)
+            if not isinstance(page, list):
+                raise RuntimeError(
+                    f"GitHub pagination response was not a list for {url_or_path}"
+                )
+            out.extend(page)
+        raise RuntimeError(f"GitHub pagination exceeded safety cap for {url_or_path}")
+
     async def _collect_pages(self, url_or_path: str, *, auth: str) -> list[Any]:
         """`Link rel=next` 따라 끝까지 순회하며 모든 페이지 항목을 평탄화해 반환.
 
@@ -811,6 +1132,27 @@ def _contains_bad_credentials_401(exc: BaseException) -> bool:
     return any(_is_bad_credentials_401(error) for error in _http_status_errors(exc))
 
 
+def _is_unknown_review_status(status_code: int) -> bool:
+    """Return whether a failed review request may have been stored by GitHub."""
+    return status_code in _UNKNOWN_REVIEW_STATUSES or status_code >= 500
+
+
+def _is_explicit_review_rejection(status_code: int) -> bool:
+    """Return whether GitHub definitively rejected the native review request."""
+    return (
+        400 <= status_code < 500
+        and status_code not in _UNKNOWN_REVIEW_STATUSES
+        and status_code not in _AUTH_FAILURE_STATUSES
+    )
+
+
+def _is_review_fallback_status(status_code: int) -> bool:
+    """Return whether status inspection may safely lead to a review fallback."""
+    return _is_unknown_review_status(status_code) or _is_explicit_review_rejection(
+        status_code
+    )
+
+
 def _http_status_errors(exc: BaseException) -> Iterator[httpx.HTTPStatusError]:
     if isinstance(exc, httpx.HTTPStatusError):
         yield exc
@@ -841,6 +1183,65 @@ def _finding_to_comment(f: Finding) -> dict[str, object]:
     # 를 추론할 필요 없이 즉시 읽을 수 있도록 한다.
     body = f"[{f.label}] {f.body}"
     return {"path": f.path, "line": f.line, "side": "RIGHT", "body": body}
+
+
+def _post_merge_fallback_marker(pr: PullRequest) -> str:
+    return f"{_POST_MERGE_FALLBACK_MARKER_PREFIX}{pr.head_sha} -->"
+
+
+def _review_marker(pr: PullRequest) -> str:
+    return f"{_REVIEW_MARKER_PREFIX}{pr.head_sha} -->"
+
+
+def _with_review_marker(body: str, pr: PullRequest) -> str:
+    marker = _review_marker(pr)
+    return body if marker in body else f"{marker}\n{body}"
+
+
+def _render_post_merge_review_body(
+    pr: PullRequest,
+    result: ReviewResult,
+    *,
+    status: str,
+    reason: str | None = None,
+    model_label: str | None,
+    reasoning_effort: str | None,
+) -> str:
+    """Native review 대신 남기는 일반 댓글에 인라인 지적까지 보존한다."""
+    title = "## Codex 리뷰 (일반 댓글 보존)" if reason else "## Codex 리뷰 (PR 종료 후 보존)"
+    explanation = reason or (
+        f"PR이 이미 {status}되어 native review를 등록할 수 없어 일반 댓글로 보존합니다."
+    )
+    parts = [
+        _review_marker(pr),
+        _post_merge_fallback_marker(pr),
+        title,
+        explanation,
+        "",
+        result.render_body(),
+    ]
+    if result.findings:
+        parts.extend(["", "**기술 단위 코멘트 (일반 댓글 보존)**"])
+        for finding in result.findings:
+            parts.extend(
+                [
+                    "",
+                    f"### [{finding.label}] "
+                    f"[`{finding.path}:{finding.line}`]({_github_blob_line_url(pr, finding)})",
+                    "",
+                    finding.body.strip(),
+                ]
+            )
+    return _with_review_footer(
+        "\n".join(parts).strip(),
+        model_label,
+        reasoning_effort,
+    )
+
+
+def _github_blob_line_url(pr: PullRequest, finding: Finding) -> str:
+    path = quote(finding.path, safe="/")
+    return f"https://github.com/{pr.repo.full_name}/blob/{pr.head_sha}/{path}#L{finding.line}"
 
 
 # `FOLLOWUP_MARKER` 는 도메인 모듈로 이동했고 위쪽 import 로 재사용한다 (coderabbitai

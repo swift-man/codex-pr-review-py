@@ -42,6 +42,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             timeout=30.0,
             verify=_default_tls_context(),
         ) as http_client:
+            # 봇 본인 식별용 GitHub login (예: `codex-review-bot[bot]`). 설정이 없으면
+            # GitHub App `/app` 응답을 통해 client가 인증된 login을 한 번 조회한다.
+            bot_login: str | None = None
+            if settings.github_app_slug:
+                bot_login = normalize_bot_user_login(settings.github_app_slug)
+
             github = GitHubAppClient(
                 app_id=settings.github_app_id,
                 private_key_pem=settings.load_private_key(),
@@ -49,6 +55,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 dry_run=settings.dry_run,
                 review_model_label=settings.codex_model_label,
                 review_reasoning_effort=settings.codex_reasoning_effort,
+                bot_login=bot_login,
             )
             repo_fetcher = GitRepoFetcher(
                 cache_dir=settings.repo_cache_dir,
@@ -83,14 +90,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             diff_collector = (
                 DiffContextCollector() if settings.enable_diff_fallback else None
             )
-
-            # 봇 본인 식별용 GitHub login (예: `codex-review-bot[bot]`).
-            # follow-up + 메타리플라이 self-exclusion 양쪽에 공유. `GITHUB_APP_SLUG`
-            # 미설정 시 None — self-exclusion 미적용 (단순 [bot] suffix 검사만).
-            bot_login: str | None = None
-            if settings.github_app_slug:
-                # `[bot]` suffix 중복 / 공백 정규화. 순수 함수라 단위 테스트 직접 가능.
-                bot_login = normalize_bot_user_login(settings.github_app_slug)
 
             use_case = ReviewPullRequestUseCase(
                 github=github,
