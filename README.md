@@ -24,7 +24,9 @@ GitHub App 웹훅으로 PR 이벤트를 받아, 레포를 체크아웃하고 전
 
 `admin.gorani.me` 연동 시 봇의 비공개 `scripts/local_review_env.sh`에
 `CODEX_CONTROL_SHARED_SECRET`을 설정합니다. `openssl rand -hex 32`로 생성한 별도
-난수이며 admin `.env`의 `ADMIN_CODEX_CONTROL_SHARED_SECRET`과 같아야 합니다.
+난수이며 admin의 `ADMIN_CODEX_CONTROL_SHARED_SECRET`과 같아야 합니다. admin 로컬
+개발에서는 `.env`, 운영에서는 비공개 LaunchAgent `EnvironmentVariables`에 설정합니다.
+운영 LaunchAgent는 `.env`를 읽지 않습니다.
 GitHub webhook, 프록시, Claude control secret과 재사용하지 마세요. 처음 적용할 때는
 리뷰가 없는 시점에 기존 `scripts/run_webhook_server.sh`로 한 번 재시동해야 합니다.
 
