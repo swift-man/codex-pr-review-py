@@ -550,7 +550,26 @@ class GitHubAppClient:
                 path,
                 body=payload,
             )
-        except (httpx.HTTPStatusError, httpx.TransportError, TimeoutError, OSError):
+        except httpx.HTTPStatusError as exc:
+            current_state = await self._fetch_current_pull_request_state(pr)
+            if not self._is_expected_pull_head(pr, current_state):
+                return False
+            if current_state.is_closed:
+                return await self._post_review_as_issue_comment(
+                    pr, result, current_state.is_merged
+                )
+            if _is_explicit_review_rejection(exc.response.status_code):
+                return await self._post_review_as_issue_comment(
+                    pr,
+                    result,
+                    is_merged=False,
+                    reason=(
+                        "GitHub 네이티브 리뷰 본문 재시도가 "
+                        f"HTTP {exc.response.status_code}로 거부되어 일반 댓글로 보존합니다."
+                    ),
+                )
+            raise
+        except (httpx.TransportError, TimeoutError, OSError):
             current_state = await self._fetch_current_pull_request_state(pr)
             if not self._is_expected_pull_head(pr, current_state):
                 return False

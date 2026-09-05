@@ -883,6 +883,55 @@ async def test_post_review_422_fallback_refreshes_stale_token(
     assert _body_of(posts[2])["comments"] == []
 
 
+async def test_post_review_422_body_retry_falls_back_when_rejected_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """본문-only 재시도도 명시적 거부가 반복되면 일반 댓글로 보존한다."""
+    monkeypatch.setattr(jwt, "encode", lambda *a, **k: "fake.jwt")
+    native_posts: list[httpx.Request] = []
+    issue_comment_posts: list[httpx.Request] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path.endswith("/access_tokens"):
+            return httpx.Response(
+                200, json={"token": "ITOK", "expires_at": "2099-01-01T00:00:00Z"}
+            )
+        if req.url.path.endswith("/pulls/1") and req.method == "GET":
+            return httpx.Response(200, json={"head": {"sha": "abc"}, "state": "open"})
+        if req.method == "GET" and req.url.path.endswith(
+            ("/issues/1/comments", "/pulls/1/reviews")
+        ):
+            return httpx.Response(200, json=[])
+        if req.url.path.endswith("/pulls/1/reviews") and req.method == "POST":
+            native_posts.append(req)
+            return httpx.Response(422, json={"message": "Validation Failed"})
+        if req.url.path.endswith("/issues/1/comments") and req.method == "POST":
+            issue_comment_posts.append(req)
+            return httpx.Response(201, json={})
+        return httpx.Response(404)
+
+    async with httpx.AsyncClient(
+        base_url="https://api.github.com",
+        transport=httpx.MockTransport(handler),
+    ) as http_client:
+        client = GitHubAppClient(
+            app_id=1,
+            private_key_pem="-",
+            http_client=http_client,
+            bot_login="codex-review-bot[bot]",
+        )
+        posted = await client.post_review(
+            _pr(diff_right_lines={"a.py": frozenset({10})}),
+            _review_result_with_inline(),
+        )
+
+    assert posted is True
+    assert len(native_posts) == 2
+    assert len(issue_comment_posts) == 1
+    body = _body_of(issue_comment_posts[0])["body"]
+    assert "본문 재시도가 HTTP 422로 거부되어" in body
+
+
 async def test_post_review_422_retry_also_rerenders_body_without_findings_notice(
     stubbed_github,
 ) -> None:
