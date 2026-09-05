@@ -8,6 +8,7 @@ from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any, TypeVar
+from urllib.parse import quote
 
 import certifi
 import httpx
@@ -117,6 +118,16 @@ class _CachedToken:
 
     def is_valid(self) -> bool:
         return time.time() < self.expires_at - 60
+
+
+@dataclass(frozen=True)
+class _PullRequestState:
+    head_sha: str
+    is_closed: bool
+    is_merged: bool
+
+
+_POST_MERGE_FALLBACK_MARKER_PREFIX = "<!-- codex-review:post-merge-fallback:"
 
 
 class GitHubAppClient:
@@ -335,8 +346,12 @@ class GitHubAppClient:
             return False
 
         path = f"/repos/{pr.repo.full_name}/pulls/{pr.number}/reviews"
-        if not await self._is_current_pull_head(pr):
+        current_state = await self._fetch_current_pull_request_state(pr)
+        if not self._is_expected_pull_head(pr, current_state):
             return False
+        if current_state.is_closed:
+            await self._post_review_as_issue_comment(pr, result, current_state.is_merged)
+            return True
 
         # commit_id 를 명시해야 리뷰가 "이 head SHA 시점"에 고정된다. 생략하면 최신 SHA 기준으로
         # 붙어 라인 번호 오정렬이 발생할 수 있다.
@@ -360,6 +375,13 @@ class GitHubAppClient:
             )
             return True
         except httpx.HTTPStatusError as exc:
+            # PR 이 native review POST 직전에 닫히거나 머지될 수 있다. 이 경우 422 외
+            # 상태 코드도 발생하므로 최신 상태를 다시 확인해 일반 댓글로 보존한다.
+            current_state = await self._fetch_current_pull_request_state(pr)
+            if current_state.is_closed:
+                await self._post_review_as_issue_comment(pr, result, current_state.is_merged)
+                return True
+
             # 방어선: use-case 단계의 diff 필터가 있음에도 422 가 나면 인라인 코멘트를 포기하고
             # 본문만 재게시한다. 리뷰 전체를 포기하는 것보다 낫다.
             # 제거한 findings 는 **조용히 삭제하지 않고** `dropped_findings` 로 옮겨
@@ -398,19 +420,27 @@ class GitHubAppClient:
                 raise
 
     async def _is_current_pull_head(self, pr: PullRequest) -> bool:
-        current_head_sha = await self._fetch_current_pull_head_sha(pr)
-        if current_head_sha == pr.head_sha:
+        current_state = await self._fetch_current_pull_request_state(pr)
+        return self._is_expected_pull_head(pr, current_state)
+
+    def _is_expected_pull_head(
+        self, pr: PullRequest, current_state: _PullRequestState
+    ) -> bool:
+        if current_state.head_sha == pr.head_sha:
             return True
         logger.info(
             "skipping review post for %s#%d — PR head changed from %s to %s",
             pr.repo.full_name,
             pr.number,
             pr.head_sha,
-            current_head_sha,
+            current_state.head_sha,
         )
         return False
 
     async def _fetch_current_pull_head_sha(self, pr: PullRequest) -> str:
+        return (await self._fetch_current_pull_request_state(pr)).head_sha
+
+    async def _fetch_current_pull_request_state(self, pr: PullRequest) -> _PullRequestState:
         data = await self._request_with_installation_token_retry(
             pr.installation_id,
             f"verify_pull_head_before_review_post {pr.repo.full_name}#{pr.number}",
@@ -428,7 +458,47 @@ class GitHubAppClient:
                 f"GitHub pull request response did not include head.sha for "
                 f"{pr.repo.full_name}#{pr.number}"
             )
-        return str(head["sha"])
+        state = str(data.get("state") or "open").lower()
+        is_merged = bool(data.get("merged", False))
+        return _PullRequestState(
+            head_sha=str(head["sha"]),
+            is_closed=state != "open" or is_merged,
+            is_merged=is_merged,
+        )
+
+    async def _post_review_as_issue_comment(
+        self, pr: PullRequest, result: ReviewResult, is_merged: bool
+    ) -> None:
+        marker = _post_merge_fallback_marker(pr)
+        existing_comments = await self._collect_pages_with_installation_token_retry(
+            pr.installation_id,
+            f"find post-merge review fallback {pr.repo.full_name}#{pr.number}",
+            f"/repos/{pr.repo.full_name}/issues/{pr.number}/comments?per_page=100",
+        )
+        if any(
+            isinstance(comment, dict)
+            and marker in str(comment.get("body") or "")
+            for comment in existing_comments
+        ):
+            logger.info(
+                "skipping duplicate post-merge review comment for %s#%d head=%s",
+                pr.repo.full_name,
+                pr.number,
+                pr.head_sha,
+            )
+            return
+
+        status = "머지" if is_merged else "종료"
+        body = _render_post_merge_review_body(
+            pr,
+            result,
+            status=status,
+            model_label=_resolve_model_label(result, self._review_model_label),
+            reasoning_effort=_resolve_reasoning_effort(
+                result, self._review_reasoning_effort
+            ),
+        )
+        await self.post_comment(pr, body)
 
     async def post_comment(self, pr: PullRequest, body: str) -> None:
         if self._dry_run:
@@ -841,6 +911,51 @@ def _finding_to_comment(f: Finding) -> dict[str, object]:
     # 를 추론할 필요 없이 즉시 읽을 수 있도록 한다.
     body = f"[{f.label}] {f.body}"
     return {"path": f.path, "line": f.line, "side": "RIGHT", "body": body}
+
+
+def _post_merge_fallback_marker(pr: PullRequest) -> str:
+    return f"{_POST_MERGE_FALLBACK_MARKER_PREFIX}{pr.head_sha} -->"
+
+
+def _render_post_merge_review_body(
+    pr: PullRequest,
+    result: ReviewResult,
+    *,
+    status: str,
+    model_label: str | None,
+    reasoning_effort: str | None,
+) -> str:
+    """Native review 대신 남기는 일반 댓글에 인라인 지적까지 보존한다."""
+    parts = [
+        _post_merge_fallback_marker(pr),
+        "## Codex 리뷰 (PR 종료 후 보존)",
+        f"PR이 이미 {status}되어 native review를 등록할 수 없어 일반 댓글로 보존합니다.",
+        "",
+        result.render_body(),
+    ]
+    if result.findings:
+        parts.extend(
+            [
+                "",
+                "**기술 단위 코멘트 (일반 댓글 보존)**",
+                *(
+                    f"- [{finding.label}] "
+                    f"[`{finding.path}:{finding.line}`]({_github_blob_line_url(pr, finding)}) "
+                    f"{finding.body}"
+                    for finding in result.findings
+                ),
+            ]
+        )
+    return _with_review_footer(
+        "\n".join(parts).strip(),
+        model_label,
+        reasoning_effort,
+    )
+
+
+def _github_blob_line_url(pr: PullRequest, finding: Finding) -> str:
+    path = quote(finding.path, safe="/")
+    return f"https://github.com/{pr.repo.full_name}/blob/{pr.head_sha}/{path}#L{finding.line}"
 
 
 # `FOLLOWUP_MARKER` 는 도메인 모듈로 이동했고 위쪽 import 로 재사용한다 (coderabbitai
