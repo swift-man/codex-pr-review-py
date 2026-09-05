@@ -1,7 +1,7 @@
 from pathlib import Path
 from typing import Annotated, Self
 
-from pydantic import Field, StringConstraints, field_validator, model_validator
+from pydantic import Field, SecretStr, StringConstraints, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from codex_review.model_utils import (
@@ -53,10 +53,30 @@ class Settings(BaseSettings):
     github_app_private_key_path: Path | None = Field(
         default=None, alias="GITHUB_APP_PRIVATE_KEY_PATH"
     )
-    github_app_private_key: NonBlankStr | None = Field(
-        default=None, alias="GITHUB_APP_PRIVATE_KEY"
-    )
+    github_app_private_key: NonBlankStr | None = Field(default=None, alias="GITHUB_APP_PRIVATE_KEY")
     github_webhook_secret: NonBlankStr = Field(..., alias="GITHUB_WEBHOOK_SECRET")
+    control_shared_secret: SecretStr | None = Field(
+        default=None, alias="CODEX_CONTROL_SHARED_SECRET"
+    )
+
+    @field_validator("control_shared_secret")
+    @classmethod
+    def validate_control_secret(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is not None:
+            raw = value.get_secret_value()
+            if len(raw) != 64 or any(char not in "0123456789abcdef" for char in raw):
+                raise ValueError("control secret must be 64 lowercase hexadecimal characters")
+        return value
+
+    @model_validator(mode="after")
+    def require_independent_control_secret(self) -> Self:
+        if (
+            self.control_shared_secret is not None
+            and self.control_shared_secret.get_secret_value() == self.github_webhook_secret
+        ):
+            raise ValueError("control secret must differ from the GitHub webhook secret")
+        return self
+
     github_api_base: str = Field(default="https://api.github.com", alias="GITHUB_API_BASE")
     # PR 댓글 follow-up 기능 활성화에 필요한 봇 슬러그 (예: "codex-review-bot").
     # GitHub 가 게시한 본인 댓글의 `user.login` 은 `f"{slug}[bot]"` 형태이므로, 이 값으로

@@ -190,6 +190,7 @@ stop_existing_server
 
 exec uvicorn codex_review.main:app_factory \
     --factory \
+    --no-proxy-headers \
     --host "$HOST" \
     --port "$PORT" \
     --log-level info

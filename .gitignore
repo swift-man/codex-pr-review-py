@@ -28,5 +28,6 @@ id_ed25519
 
 # runtime caches
 .runtime/
+.admin-runtime/
 repos_cache/
 .codex-review/
