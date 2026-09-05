@@ -135,6 +135,8 @@ class FollowUpReviewUseCase:
         # 원인을 추적하려면 어떤 thread 가 어떤 예외로 실패했는지 알아야 한다.
         failures = 0
         for thread_id, result in zip(thread_ids, results, strict=True):
+            if isinstance(result, asyncio.CancelledError):
+                raise result
             if isinstance(result, BaseException):
                 failures += 1
                 logger.warning(

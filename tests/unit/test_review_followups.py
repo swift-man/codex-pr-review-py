@@ -371,6 +371,9 @@ class _InstrumentedGitHub:
         self.posted: list[PullRequest] = []
         self.pr = _sample_pr()
 
+    async def ensure_bot_login(self) -> None:
+        return None
+
     async def fetch_pull_request(self, repo: RepoRef, number: int, installation_id: int):
         return self.pr
 

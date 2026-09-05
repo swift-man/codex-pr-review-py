@@ -9,6 +9,7 @@
   - dry_run 모드에서는 mutation·POST 가 발사되지 않는다.
 """
 
+import asyncio
 import json
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack
@@ -310,6 +311,18 @@ async def test_reply_skips_in_dry_run(make_client) -> None:
     client = make_client(handler, dry_run=True)
     await client.reply_to_review_comment(_pr(), 1001, "ignored")
     assert posts == []  # 게시 안 됨
+
+
+async def test_ensure_bot_login_skips_in_dry_run(make_client) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        requests.append(req)
+        raise AssertionError("dry-run identity preflight must not call GitHub")
+
+    client = make_client(handler, dry_run=True)
+    await client.ensure_bot_login()
+    assert requests == []
 
 
 # ---------------------------------------------------------------------------
@@ -851,6 +864,16 @@ async def test_fetch_review_history_returns_empty_when_all_endpoints_fail(
     history = await client.fetch_review_history(_pr(), 7)
 
     assert history.is_empty
+
+
+async def test_fetch_review_history_reraises_cancelled_endpoint(make_client) -> None:
+    """gather 결과의 CancelledError는 부분 실패로 강등하지 않고 전파한다."""
+    client = make_client(lambda req: httpx.Response(200, json=[]))
+
+    with pytest.raises(asyncio.CancelledError):
+        client._extract_history_page(  # type: ignore[attr-defined]
+            "reviews", asyncio.CancelledError(), _pr()
+        )
 
 
 async def test_collect_pages_preserves_partial_data_on_mid_page_failure(

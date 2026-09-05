@@ -26,6 +26,7 @@ from codex_review.domain import (
     TokenBudget,
 )
 from codex_review.infrastructure.github_app_client import GitHubAppClient
+from codex_review.interfaces import ReviewPublisherUnavailableError
 
 
 def _pr(diff_right_lines: dict[str, frozenset[int]] | None = None) -> PullRequest:
@@ -326,6 +327,26 @@ async def test_post_review_refreshes_cached_token_after_bad_credentials(
     assert _body_of(posts[0]) == _body_of(posts[1])
 
 
+async def test_post_review_raises_when_app_identity_cannot_be_resolved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """App identity 조회 실패는 webhook 재시도를 유도하는 명시적 예외여야 한다."""
+    monkeypatch.setattr(jwt, "encode", lambda *a, **k: "fake.jwt")
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/app" and req.method == "GET":
+            return httpx.Response(503, json={"message": "temporary failure"})
+        return httpx.Response(404)
+
+    async with httpx.AsyncClient(
+        base_url="https://api.github.com",
+        transport=httpx.MockTransport(handler),
+    ) as http_client:
+        client = GitHubAppClient(app_id=1, private_key_pem="-", http_client=http_client)
+        with pytest.raises(ReviewPublisherUnavailableError):
+            await client.post_review(_pr(), _review_result_with_inline())
+
+
 async def test_post_review_refreshes_token_when_head_verification_gets_bad_credentials(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -422,6 +443,94 @@ async def test_post_review_skips_when_head_changed_before_posting(
 
     assert posted is False
     assert posts == []
+
+
+async def test_post_review_skips_stale_head_after_transport_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """transport 오류 뒤 head가 바뀌면 webhook 재시도 대신 stale 결과를 폐기한다."""
+    monkeypatch.setattr(jwt, "encode", lambda *a, **k: "fake.jwt")
+    pull_reads = 0
+    native_posts: list[httpx.Request] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        nonlocal pull_reads
+        if req.url.path.endswith("/access_tokens"):
+            return httpx.Response(
+                200, json={"token": "ITOK", "expires_at": "2099-01-01T00:00:00Z"}
+            )
+        if req.url.path.endswith("/pulls/1") and req.method == "GET":
+            pull_reads += 1
+            sha = "abc" if pull_reads == 1 else "def"
+            return httpx.Response(200, json={"head": {"sha": sha}, "state": "open"})
+        if req.method == "GET" and req.url.path.endswith(
+            ("/issues/1/comments", "/pulls/1/reviews")
+        ):
+            return httpx.Response(200, json=[])
+        if req.url.path.endswith("/pulls/1/reviews") and req.method == "POST":
+            native_posts.append(req)
+            raise httpx.ReadTimeout("review request timed out")
+        return httpx.Response(404)
+
+    async with httpx.AsyncClient(
+        base_url="https://api.github.com",
+        transport=httpx.MockTransport(handler),
+    ) as http_client:
+        client = GitHubAppClient(
+            app_id=1,
+            private_key_pem="-",
+            http_client=http_client,
+            bot_login="codex-review-bot[bot]",
+        )
+        posted = await client.post_review(_pr(), _review_result_with_inline())
+
+    assert posted is False
+    assert pull_reads == 2
+    assert len(native_posts) == 1
+
+
+async def test_post_review_retries_same_head_after_transport_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """같은 HEAD에서 marker가 없으면 전송 오류를 1회 재처리한다."""
+    monkeypatch.setattr(jwt, "encode", lambda *a, **k: "fake.jwt")
+    post_attempts = 0
+    native_posts: list[httpx.Request] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        nonlocal post_attempts
+        if req.url.path.endswith("/access_tokens"):
+            return httpx.Response(
+                200, json={"token": "ITOK", "expires_at": "2099-01-01T00:00:00Z"}
+            )
+        if req.url.path.endswith("/pulls/1") and req.method == "GET":
+            return httpx.Response(200, json={"head": {"sha": "abc"}, "state": "open"})
+        if req.method == "GET" and req.url.path.endswith(
+            ("/issues/1/comments", "/pulls/1/reviews")
+        ):
+            return httpx.Response(200, json=[])
+        if req.url.path.endswith("/pulls/1/reviews") and req.method == "POST":
+            post_attempts += 1
+            native_posts.append(req)
+            if post_attempts == 1:
+                raise httpx.ReadTimeout("review request timed out")
+            return httpx.Response(200, json={})
+        return httpx.Response(404)
+
+    async with httpx.AsyncClient(
+        base_url="https://api.github.com",
+        transport=httpx.MockTransport(handler),
+    ) as http_client:
+        client = GitHubAppClient(
+            app_id=1,
+            private_key_pem="-",
+            http_client=http_client,
+            bot_login="codex-review-bot[bot]",
+        )
+        posted = await client.post_review(_pr(), _review_result_with_inline())
+
+    assert posted is True
+    assert len(native_posts) == 2
 
 
 async def test_post_review_preserves_merged_review_as_issue_comment(

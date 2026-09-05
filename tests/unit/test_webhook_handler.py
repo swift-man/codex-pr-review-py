@@ -17,6 +17,7 @@ from codex_review.domain import (
     ReviewResult,
     TokenBudget,
 )
+from codex_review.interfaces import ReviewPublisherUnavailableError
 
 SECRET = "top-secret"
 
@@ -26,6 +27,11 @@ class FakeGitHub:
     posted_reviews: list[tuple[PullRequest, ReviewResult]] = field(default_factory=list)
     posted_comments: list[tuple[PullRequest, str]] = field(default_factory=list)
     pr_to_return: PullRequest | None = None
+    publisher_available: bool = True
+
+    async def ensure_bot_login(self) -> None:
+        if not self.publisher_available:
+            raise ReviewPublisherUnavailableError("identity unavailable")
 
     async def fetch_pull_request(
         self, repo: RepoRef, number: int, installation_id: int
@@ -251,6 +257,30 @@ async def test_accept_accepts_numeric_string_pr_number(tmp_path: Path) -> None:
     }
     code, reason = await handler.accept("pull_request", "ok-str", payload)
     assert (code, reason) == (202, "queued")
+
+
+async def test_accept_returns_503_when_review_publisher_is_unavailable(
+    tmp_path: Path,
+) -> None:
+    """백그라운드 작업 전 identity 실패는 GitHub webhook 재시도로 노출한다."""
+    github = FakeGitHub(publisher_available=False)
+    handler = _build_handler(
+        github,
+        FileDump(entries=(), total_chars=0),
+        ReviewResult(summary="ok", event=ReviewEvent.COMMENT),
+        tmp_path,
+    )
+    payload: dict[str, Any] = {
+        "action": "opened",
+        "pull_request": {"draft": False, "number": 42},
+        "repository": {"full_name": "o/r"},
+        "installation": {"id": 7},
+    }
+
+    code, reason = await handler.accept("pull_request", "identity-down", payload)
+
+    assert (code, reason) == (503, "review-publisher-unavailable")
+    assert handler._queue.empty()  # type: ignore[attr-defined]
 
 
 async def test_accept_ignores_unsupported_action(tmp_path: Path) -> None:
@@ -615,6 +645,67 @@ async def test_stop_preserves_in_flight_work_when_queue_is_full() -> None:
     assert len(github.posted_reviews) == 1, (
         "in-flight 리뷰의 post_review 가 정상적으로 호출돼야 한다"
     )
+
+
+async def test_stop_waits_for_idle_worker_when_queue_is_smaller_than_concurrency() -> None:
+    """queue_maxsize < concurrency 여도 tombstone 삽입 중 in-flight 작업을 취소하지 않는다."""
+    github = FakeGitHub(pr_to_return=_sample_pr())
+    review_started = asyncio.Event()
+    resume = asyncio.Event()
+    completed_reviews: list[int] = []
+
+    class _ControlledEngine:
+        async def review(
+            self, pr: PullRequest, dump: FileDump, *, history=None
+        ) -> ReviewResult:
+            review_started.set()
+            await resume.wait()
+            completed_reviews.append(pr.number)
+            return ReviewResult(summary="done", event=ReviewEvent.COMMENT)
+
+    use_case = ReviewPullRequestUseCase(
+        github=github,
+        repo_fetcher=FakeFetcher(Path(".")),
+        file_collector=FakeCollector(FileDump(entries=(), total_chars=0)),
+        engine=_ControlledEngine(),
+        max_input_tokens=1000,
+    )
+    handler = WebhookHandler(
+        secret=SECRET,
+        github=github,
+        use_case=use_case,
+        concurrency=2,
+        queue_maxsize=1,
+        shutdown_timeout=2.0,
+    )
+    await handler.start()
+    stop_task: asyncio.Task[None] | None = None
+    try:
+        await handler.accept(
+            "pull_request",
+            "d-concurrency-queue",
+            {
+                "action": "opened",
+                "pull_request": {"draft": False, "number": 1},
+                "repository": {"full_name": "o/r"},
+                "installation": {"id": 7},
+            },
+        )
+        await asyncio.wait_for(review_started.wait(), timeout=1.0)
+
+        stop_task = asyncio.create_task(handler.stop())
+        await asyncio.sleep(0.05)
+        assert not stop_task.done()
+
+        resume.set()
+        await asyncio.wait_for(stop_task, timeout=2.0)
+    finally:
+        resume.set()
+        if stop_task is None or not stop_task.done():
+            await handler.stop()
+
+    assert completed_reviews == [1]
+    assert len(github.posted_reviews) == 1
 
 
 async def test_stop_does_not_deadlock_when_queue_is_full() -> None:
