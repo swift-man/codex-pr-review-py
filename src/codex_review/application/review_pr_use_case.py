@@ -221,6 +221,8 @@ class ReviewPullRequestUseCase:
             return_exceptions=True,
         )
         for reply, outcome in zip(validated, results, strict=True):
+            if isinstance(outcome, asyncio.CancelledError):
+                raise outcome
             if isinstance(outcome, BaseException):
                 logger.warning(
                     "meta_reply post failed: comment_id=%d on %s#%d",

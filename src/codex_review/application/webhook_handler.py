@@ -126,8 +126,9 @@ class WebhookHandler:
           1) 큐에서 '아직 워커가 꺼내지 않은' job 을 먼저 비운다 (GitHub 가 재전송하거나
              운영자가 수동 재처리). busy 워커 본인은 건드리지 않으므로 진행 중 리뷰는
              그대로 완료까지 진행된다.
-          2) 이제 확보된 큐 공간에 worker 수만큼 tombstone 을 `put_nowait` — 블로킹 없음.
-          3) `shutdown_timeout` 동안 tombstone 도달 후 자연 종료를 기다린다.
+          2) 확보된 큐 공간에 worker 수만큼 tombstone 을 넣고, 잠시 찬 경우 idle worker
+             가 소비할 때까지 기다린다.
+          3) `shutdown_timeout` 안에서 tombstone 도달 후 자연 종료를 기다린다.
           4) 타임아웃을 초과하면 그때서야 `cancel()` 로 강제 종료.
 
         이전 구현은 큐가 가득 찬 상태에서 `put_nowait` 이 실패하자마자 즉시
@@ -135,31 +136,19 @@ class WebhookHandler:
         """
         dropped = self._drain_pending_jobs()
 
-        failed_tombstone = False
-        for _ in self._workers:
-            try:
-                self._queue.put_nowait(None)
-            except asyncio.QueueFull:
-                # maxsize < concurrency 인 엣지 케이스에만 해당. graceful 보장이 어렵다.
-                logger.warning(
-                    "cannot enqueue tombstone after draining %d job(s); "
-                    "queue_maxsize=%d < concurrency=%d",
-                    dropped, self._queue.maxsize, self._concurrency,
-                )
-                failed_tombstone = True
-                break
-
-        if not failed_tombstone:
-            try:
-                async with asyncio.timeout(self._shutdown_timeout):
-                    await asyncio.gather(*self._workers, return_exceptions=True)
-            except TimeoutError:
-                logger.warning(
-                    "graceful shutdown exceeded %.0fs; cancelling workers",
-                    self._shutdown_timeout,
-                )
-                self._cancel_workers()
-        else:
+        try:
+            async with asyncio.timeout(self._shutdown_timeout):
+                # `put()` may briefly wait for an idle worker to consume a tombstone
+                # when maxsize < concurrency. Keep that wait inside the same shutdown
+                # deadline so a stalled worker still reaches the cancellation path.
+                for _ in self._workers:
+                    await self._queue.put(None)
+                await asyncio.gather(*self._workers, return_exceptions=True)
+        except TimeoutError:
+            logger.warning(
+                "graceful shutdown exceeded %.0fs; cancelling workers",
+                self._shutdown_timeout,
+            )
             self._cancel_workers()
 
         # 최종 정리 — CancelledError 는 정상 신호로 suppress, 다른 예외는 가시성 위해 로그.

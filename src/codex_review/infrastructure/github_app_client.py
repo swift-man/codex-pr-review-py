@@ -132,6 +132,8 @@ _REVIEW_MARKER_PREFIX = "<!-- codex-review:review:"
 _POST_MERGE_FALLBACK_MARKER_PREFIX = "<!-- codex-review:post-merge-fallback:"
 _UNKNOWN_REVIEW_STATUSES = frozenset({408, 425, 429})
 _AUTH_FAILURE_STATUSES = frozenset({401, 403})
+_REVIEW_TRANSPORT_RETRY_LIMIT = 1
+_REVIEW_TRANSPORT_RETRY_DELAY = 0.25
 
 
 class GitHubAppClient:
@@ -253,6 +255,8 @@ class GitHubAppClient:
 
     async def ensure_bot_login(self) -> None:
         """Fail loudly when marker ownership cannot be established for a webhook."""
+        if self._dry_run:
+            return
         if not await self._ensure_bot_login():
             raise ReviewPublisherUnavailableError(
                 "could not resolve authenticated GitHub App login"
@@ -455,83 +459,103 @@ class GitHubAppClient:
             "event": result.event.value,
             "comments": [_finding_to_comment(f) for f in result.findings],
         }
-        try:
-            await self._request_with_installation_token_retry(
-                pr.installation_id,
-                f"post_review {pr.repo.full_name}#{pr.number}",
-                "POST",
-                path,
-                body=payload,
-            )
-            return True
-        except httpx.HTTPStatusError as exc:
-            status_code = exc.response.status_code
-            if not _is_review_fallback_status(status_code):
-                raise
-            # PR 이 native review POST 직전에 닫히거나 머지될 수 있다. 이 경우 422 외
-            # 상태 코드도 발생하므로 최신 상태를 다시 확인해 일반 댓글로 보존한다.
-            current_state = await self._fetch_current_pull_request_state(pr)
-            if current_state.is_closed:
-                if not self._is_expected_pull_head(pr, current_state):
-                    return False
-                return await self._post_review_as_issue_comment(
-                    pr, result, current_state.is_merged
+        transport_retries = 0
+        while True:
+            try:
+                await self._request_with_installation_token_retry(
+                    pr.installation_id,
+                    f"post_review {pr.repo.full_name}#{pr.number}",
+                    "POST",
+                    path,
+                    body=payload,
                 )
+                return True
+            except httpx.HTTPStatusError as exc:
+                status_code = exc.response.status_code
+                if not _is_review_fallback_status(status_code):
+                    raise
+                # PR 이 native review POST 직전에 닫히거나 머지될 수 있다. 이 경우 422 외
+                # 상태 코드도 발생하므로 최신 상태를 다시 확인해 일반 댓글로 보존한다.
+                current_state = await self._fetch_current_pull_request_state(pr)
+                if current_state.is_closed:
+                    if not self._is_expected_pull_head(pr, current_state):
+                        return False
+                    return await self._post_review_as_issue_comment(
+                        pr, result, current_state.is_merged
+                    )
 
-            # 방어선: use-case 단계의 diff 필터가 있음에도 422 가 나면 인라인 코멘트를 포기하고
-            # 본문만 재게시한다. 리뷰 전체를 포기하는 것보다 낫다.
-            # 제거한 findings 는 **조용히 삭제하지 않고** `dropped_findings` 로 옮겨
-            # 본문 접이식 섹션으로 보존. 그래야 리뷰어가 "모델이 뭘 지적했었는지" 를
-            # 나중에라도 확인할 수 있다 (codex/gemini PR #17 지적 반영).
-            if status_code == 422 and payload["comments"]:
-                logger.warning(
-                    "422 on review POST for %s#%d; retrying without inline comments "
-                    "(%d finding(s) preserved in body)",
-                    pr.repo.full_name, pr.number, len(result.findings),
-                )
-                retry_result = replace(
-                    result,
-                    findings=(),
-                    dropped_findings=result.dropped_findings + result.findings,
-                )
-                payload["body"] = _with_review_marker(
-                    _with_review_footer(
-                        retry_result.render_body(),
-                        _resolve_model_label(retry_result, self._review_model_label),
-                        _resolve_reasoning_effort(
-                            retry_result, self._review_reasoning_effort
+                # 방어선: use-case 단계의 diff 필터가 있음에도 422 가 나면 인라인 코멘트를 포기하고
+                # 본문만 재게시한다. 리뷰 전체를 포기하는 것보다 낫다.
+                # 제거한 findings 는 **조용히 삭제하지 않고** `dropped_findings` 로 옮겨
+                # 본문 접이식 섹션으로 보존. 그래야 리뷰어가 "모델이 뭘 지적했었는지" 를
+                # 나중에라도 확인할 수 있다 (codex/gemini PR #17 지적 반영).
+                if status_code == 422 and payload["comments"]:
+                    logger.warning(
+                        "422 on review POST for %s#%d; retrying without inline comments "
+                        "(%d finding(s) preserved in body)",
+                        pr.repo.full_name, pr.number, len(result.findings),
+                    )
+                    retry_result = replace(
+                        result,
+                        findings=(),
+                        dropped_findings=result.dropped_findings + result.findings,
+                    )
+                    payload["body"] = _with_review_marker(
+                        _with_review_footer(
+                            retry_result.render_body(),
+                            _resolve_model_label(retry_result, self._review_model_label),
+                            _resolve_reasoning_effort(
+                                retry_result, self._review_reasoning_effort
+                            ),
                         ),
-                    ),
-                    pr,
-                )
-                payload["comments"] = []
-                return await self._post_review_body_only_retry(
-                    pr, result, path, payload, current_state
-                )
-            if _is_explicit_review_rejection(status_code):
+                        pr,
+                    )
+                    payload["comments"] = []
+                    return await self._post_review_body_only_retry(
+                        pr, result, path, payload, current_state
+                    )
+                if _is_explicit_review_rejection(status_code):
+                    if not self._is_expected_pull_head(pr, current_state):
+                        return False
+                    return await self._post_review_as_issue_comment(
+                        pr,
+                        result,
+                        is_merged=False,
+                        reason=(
+                            "GitHub 네이티브 리뷰 API가 "
+                            f"HTTP {exc.response.status_code}로 거부해 일반 댓글로 보존합니다."
+                        ),
+                    )
+                raise
+            except (httpx.TransportError, TimeoutError, OSError):
+                # transport/timeout은 GitHub가 리뷰를 저장했는지 알 수 없다. 최신 상태가
+                # 종료·머지로 바뀌었고 같은 head라면 marker를 확인한 뒤에만 보존한다.
+                current_state = await self._fetch_current_pull_request_state(pr)
                 if not self._is_expected_pull_head(pr, current_state):
                     return False
-                return await self._post_review_as_issue_comment(
-                    pr,
-                    result,
-                    is_merged=False,
-                    reason=(
-                        "GitHub 네이티브 리뷰 API가 "
-                        f"HTTP {exc.response.status_code}로 거부해 일반 댓글로 보존합니다."
-                    ),
+                if current_state.is_closed:
+                    return await self._post_review_as_issue_comment(
+                        pr, result, current_state.is_merged
+                    )
+                # A transport failure is ambiguous: the POST may have succeeded. Only
+                # retry when a fresh marker read proves that it did not.
+                published = await self._has_published_review(pr)
+                if published is None:
+                    raise
+                if published:
+                    return False
+                if transport_retries >= _REVIEW_TRANSPORT_RETRY_LIMIT:
+                    raise
+                transport_retries += 1
+                logger.warning(
+                    "review POST transport failure for %s#%d; retrying same head "
+                    "(%d/%d)",
+                    pr.repo.full_name,
+                    pr.number,
+                    transport_retries,
+                    _REVIEW_TRANSPORT_RETRY_LIMIT,
                 )
-            raise
-        except (httpx.TransportError, TimeoutError, OSError):
-            # transport/timeout은 GitHub가 리뷰를 저장했는지 알 수 없다. 최신 상태가
-            # 종료·머지로 바뀌었고 같은 head라면 marker를 확인한 뒤에만 보존한다.
-            current_state = await self._fetch_current_pull_request_state(pr)
-            if not self._is_expected_pull_head(pr, current_state):
-                return False
-            if current_state.is_closed:
-                return await self._post_review_as_issue_comment(
-                    pr, result, current_state.is_merged
-                )
-            raise
+                await asyncio.sleep(_REVIEW_TRANSPORT_RETRY_DELAY)
 
     async def _post_review_body_only_retry(
         self,
@@ -905,6 +929,8 @@ class GitHubAppClient:
         데이터로 history 컨텍스트를 채운다.
         """
         if isinstance(result, BaseException):
+            if isinstance(result, asyncio.CancelledError):
+                raise result
             logger.warning(
                 "fetch_review_history: %s endpoint failed for %s#%d — "
                 "proceeding with partial data",

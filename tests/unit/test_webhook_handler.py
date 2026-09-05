@@ -647,6 +647,67 @@ async def test_stop_preserves_in_flight_work_when_queue_is_full() -> None:
     )
 
 
+async def test_stop_waits_for_idle_worker_when_queue_is_smaller_than_concurrency() -> None:
+    """queue_maxsize < concurrency 여도 tombstone 삽입 중 in-flight 작업을 취소하지 않는다."""
+    github = FakeGitHub(pr_to_return=_sample_pr())
+    review_started = asyncio.Event()
+    resume = asyncio.Event()
+    completed_reviews: list[int] = []
+
+    class _ControlledEngine:
+        async def review(
+            self, pr: PullRequest, dump: FileDump, *, history=None
+        ) -> ReviewResult:
+            review_started.set()
+            await resume.wait()
+            completed_reviews.append(pr.number)
+            return ReviewResult(summary="done", event=ReviewEvent.COMMENT)
+
+    use_case = ReviewPullRequestUseCase(
+        github=github,
+        repo_fetcher=FakeFetcher(Path(".")),
+        file_collector=FakeCollector(FileDump(entries=(), total_chars=0)),
+        engine=_ControlledEngine(),
+        max_input_tokens=1000,
+    )
+    handler = WebhookHandler(
+        secret=SECRET,
+        github=github,
+        use_case=use_case,
+        concurrency=2,
+        queue_maxsize=1,
+        shutdown_timeout=2.0,
+    )
+    await handler.start()
+    stop_task: asyncio.Task[None] | None = None
+    try:
+        await handler.accept(
+            "pull_request",
+            "d-concurrency-queue",
+            {
+                "action": "opened",
+                "pull_request": {"draft": False, "number": 1},
+                "repository": {"full_name": "o/r"},
+                "installation": {"id": 7},
+            },
+        )
+        await asyncio.wait_for(review_started.wait(), timeout=1.0)
+
+        stop_task = asyncio.create_task(handler.stop())
+        await asyncio.sleep(0.05)
+        assert not stop_task.done()
+
+        resume.set()
+        await asyncio.wait_for(stop_task, timeout=2.0)
+    finally:
+        resume.set()
+        if stop_task is None or not stop_task.done():
+            await handler.stop()
+
+    assert completed_reviews == [1]
+    assert len(github.posted_reviews) == 1
+
+
 async def test_stop_does_not_deadlock_when_queue_is_full() -> None:
     """회귀(codex/gemini 지적): 큐가 가득 찬 상태에서도 `stop()` 이 유한 시간 안에
     끝나야 한다. 이전 구현은 `await put(None)` 이 무한 대기했거나, 그 패치조차
