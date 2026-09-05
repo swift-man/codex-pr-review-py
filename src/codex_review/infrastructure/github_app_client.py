@@ -127,6 +127,7 @@ class _PullRequestState:
     is_merged: bool
 
 
+_REVIEW_MARKER_PREFIX = "<!-- codex-review:review:"
 _POST_MERGE_FALLBACK_MARKER_PREFIX = "<!-- codex-review:post-merge-fallback:"
 
 
@@ -157,6 +158,12 @@ class GitHubAppClient:
         # installation_id 별 개별 락. 단일 전역 락은 서로 다른 installation 의 동시 재발급까지
         # 직렬화해 병목을 만든다. LRU 상한이 있는 레지스트리를 써 무한히 쌓이지 않게 한다.
         self._token_locks = _LockRegistry()
+        # 같은 PR/head에 대한 webhook 재전달이 한 프로세스에서 겹치면 marker 조회와
+        # 게시를 하나의 임계구역으로 묶어 native review/comment 중복을 줄인다.
+        self._review_post_locks: weakref.WeakValueDictionary[
+            tuple[str, int, str], asyncio.Lock
+        ] = weakref.WeakValueDictionary()
+        self._review_post_locks_guard = asyncio.Lock()
 
     # --- Auth ---------------------------------------------------------------
 
@@ -345,22 +352,50 @@ class GitHubAppClient:
             logger.info("DRY_RUN — review not posted: %s#%d", pr.repo.full_name, pr.number)
             return False
 
+        lock = await self._review_post_lock(pr)
+        async with lock:
+            return await self._post_review_unlocked(pr, result)
+
+    async def _post_review_unlocked(self, pr: PullRequest, result: ReviewResult) -> bool:
+        """Serialize marker verification and review publication for one PR head."""
+
         path = f"/repos/{pr.repo.full_name}/pulls/{pr.number}/reviews"
+        published = await self._has_published_review(pr)
+        if published is None:
+            logger.warning(
+                "skipping review post for %s#%d — could not verify existing review marker",
+                pr.repo.full_name,
+                pr.number,
+            )
+            return False
+        if published:
+            logger.info(
+                "skipping duplicate review post for %s#%d head=%s",
+                pr.repo.full_name,
+                pr.number,
+                pr.head_sha,
+            )
+            return False
+
         current_state = await self._fetch_current_pull_request_state(pr)
         if not self._is_expected_pull_head(pr, current_state):
             return False
         if current_state.is_closed:
-            await self._post_review_as_issue_comment(pr, result, current_state.is_merged)
-            return True
+            return await self._post_review_as_issue_comment(
+                pr, result, current_state.is_merged
+            )
 
         # commit_id 를 명시해야 리뷰가 "이 head SHA 시점"에 고정된다. 생략하면 최신 SHA 기준으로
         # 붙어 라인 번호 오정렬이 발생할 수 있다.
         payload: dict[str, object] = {
             "commit_id": pr.head_sha,
-            "body": _with_review_footer(
-                result.render_body(),
-                _resolve_model_label(result, self._review_model_label),
-                _resolve_reasoning_effort(result, self._review_reasoning_effort),
+            "body": _with_review_marker(
+                _with_review_footer(
+                    result.render_body(),
+                    _resolve_model_label(result, self._review_model_label),
+                    _resolve_reasoning_effort(result, self._review_reasoning_effort),
+                ),
+                pr,
             ),
             "event": result.event.value,
             "comments": [_finding_to_comment(f) for f in result.findings],
@@ -381,8 +416,9 @@ class GitHubAppClient:
             if current_state.is_closed:
                 if not self._is_expected_pull_head(pr, current_state):
                     return False
-                await self._post_review_as_issue_comment(pr, result, current_state.is_merged)
-                return True
+                return await self._post_review_as_issue_comment(
+                    pr, result, current_state.is_merged
+                )
 
             # 방어선: use-case 단계의 diff 필터가 있음에도 422 가 나면 인라인 코멘트를 포기하고
             # 본문만 재게시한다. 리뷰 전체를 포기하는 것보다 낫다.
@@ -400,12 +436,15 @@ class GitHubAppClient:
                     findings=(),
                     dropped_findings=result.dropped_findings + result.findings,
                 )
-                payload["body"] = _with_review_footer(
-                    retry_result.render_body(),
-                    _resolve_model_label(retry_result, self._review_model_label),
-                    _resolve_reasoning_effort(
-                        retry_result, self._review_reasoning_effort
+                payload["body"] = _with_review_marker(
+                    _with_review_footer(
+                        retry_result.render_body(),
+                        _resolve_model_label(retry_result, self._review_model_label),
+                        _resolve_reasoning_effort(
+                            retry_result, self._review_reasoning_effort
+                        ),
                     ),
+                    pr,
                 )
                 payload["comments"] = []
                 if not await self._is_current_pull_head(pr):
@@ -418,12 +457,43 @@ class GitHubAppClient:
                     body=payload,
                 )
                 return True
-            else:
-                raise
+            if 400 <= exc.response.status_code < 500:
+                if not self._is_expected_pull_head(pr, current_state):
+                    return False
+                return await self._post_review_as_issue_comment(
+                    pr,
+                    result,
+                    is_merged=False,
+                    reason=(
+                        "GitHub 네이티브 리뷰 API가 "
+                        f"HTTP {exc.response.status_code}로 거부해 일반 댓글로 보존합니다."
+                    ),
+                )
+            raise
+        except (httpx.TransportError, TimeoutError, OSError):
+            # transport/timeout은 GitHub가 리뷰를 저장했는지 알 수 없다. 최신 상태가
+            # 종료·머지로 바뀌었고 같은 head라면 marker를 확인한 뒤에만 보존한다.
+            current_state = await self._fetch_current_pull_request_state(pr)
+            if current_state.is_closed:
+                if not self._is_expected_pull_head(pr, current_state):
+                    return False
+                return await self._post_review_as_issue_comment(
+                    pr, result, current_state.is_merged
+                )
+            raise
 
     async def _is_current_pull_head(self, pr: PullRequest) -> bool:
         current_state = await self._fetch_current_pull_request_state(pr)
         return self._is_expected_pull_head(pr, current_state)
+
+    async def _review_post_lock(self, pr: PullRequest) -> asyncio.Lock:
+        key = (pr.repo.full_name, pr.number, pr.head_sha)
+        async with self._review_post_locks_guard:
+            lock = self._review_post_locks.get(key)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._review_post_locks[key] = lock
+            return lock
 
     def _is_expected_pull_head(
         self, pr: PullRequest, current_state: _PullRequestState
@@ -468,39 +538,85 @@ class GitHubAppClient:
             is_merged=is_merged,
         )
 
-    async def _post_review_as_issue_comment(
-        self, pr: PullRequest, result: ReviewResult, is_merged: bool
-    ) -> None:
-        marker = _post_merge_fallback_marker(pr)
-        existing_comments = await self._collect_pages_with_installation_token_retry(
-            pr.installation_id,
-            f"find post-merge review fallback {pr.repo.full_name}#{pr.number}",
-            f"/repos/{pr.repo.full_name}/issues/{pr.number}/comments?per_page=100",
+    async def _has_published_review(self, pr: PullRequest) -> bool | None:
+        """Check native and issue comments without treating a partial read as empty."""
+        results = await asyncio.gather(
+            self._collect_pages_strict_with_installation_token_retry(
+                pr.installation_id,
+                f"find review marker issues/comments {pr.repo.full_name}#{pr.number}",
+                f"/repos/{pr.repo.full_name}/issues/{pr.number}/comments?per_page=100",
+            ),
+            self._collect_pages_strict_with_installation_token_retry(
+                pr.installation_id,
+                f"find review marker pulls/reviews {pr.repo.full_name}#{pr.number}",
+                f"/repos/{pr.repo.full_name}/pulls/{pr.number}/reviews?per_page=100",
+            ),
+            return_exceptions=True,
         )
-        if any(
-            isinstance(comment, dict)
-            and marker in str(comment.get("body") or "")
-            for comment in existing_comments
-        ):
+        pages: list[list[Any]] = []
+        for result in results:
+            if not isinstance(result, list):
+                if isinstance(result, asyncio.CancelledError):
+                    raise result
+                logger.warning(
+                    "could not verify review marker for %s#%d",
+                    pr.repo.full_name,
+                    pr.number,
+                    exc_info=result,
+                )
+                return None
+            pages.append(result)
+
+        marker = _review_marker(pr)
+        legacy_marker = _post_merge_fallback_marker(pr)
+        return any(
+            isinstance(item, dict)
+            and any(
+                candidate in str(item.get("body") or "")
+                for candidate in (marker, legacy_marker)
+            )
+            for page in pages
+            for item in page
+        )
+
+    async def _post_review_as_issue_comment(
+        self,
+        pr: PullRequest,
+        result: ReviewResult,
+        is_merged: bool,
+        *,
+        reason: str | None = None,
+    ) -> bool:
+        published = await self._has_published_review(pr)
+        if published is None:
+            logger.warning(
+                "skipping fallback review comment for %s#%d — marker verification failed",
+                pr.repo.full_name,
+                pr.number,
+            )
+            return False
+        if published:
             logger.info(
                 "skipping duplicate post-merge review comment for %s#%d head=%s",
                 pr.repo.full_name,
                 pr.number,
                 pr.head_sha,
             )
-            return
+            return False
 
         status = "머지" if is_merged else "종료"
         body = _render_post_merge_review_body(
             pr,
             result,
             status=status,
+            reason=reason,
             model_label=_resolve_model_label(result, self._review_model_label),
             reasoning_effort=_resolve_reasoning_effort(
                 result, self._review_reasoning_effort
             ),
         )
         await self.post_comment(pr, body)
+        return True
 
     async def post_comment(self, pr: PullRequest, body: str) -> None:
         if self._dry_run:
@@ -695,6 +811,32 @@ class GitHubAppClient:
             operation,
             lambda token: self._collect_pages(url_or_path, auth=f"token {token}"),
         )
+
+    async def _collect_pages_strict_with_installation_token_retry(
+        self, installation_id: int, operation: str, url_or_path: str
+    ) -> list[Any]:
+        return await self._with_installation_token_retry(
+            installation_id,
+            operation,
+            lambda token: self._collect_pages_strict(url_or_path, auth=f"token {token}"),
+        )
+
+    async def _collect_pages_strict(
+        self, url_or_path: str, *, auth: str
+    ) -> list[Any]:
+        """Collect every page and propagate errors for idempotency checks."""
+        out: list[Any] = []
+        next_url: str | None = url_or_path
+        for _ in range(100):
+            if not next_url:
+                return out
+            page, next_url = await self._get_page_with_next(next_url, auth=auth)
+            if not isinstance(page, list):
+                raise RuntimeError(
+                    f"GitHub pagination response was not a list for {url_or_path}"
+                )
+            out.extend(page)
+        raise RuntimeError(f"GitHub pagination exceeded safety cap for {url_or_path}")
 
     async def _collect_pages(self, url_or_path: str, *, auth: str) -> list[Any]:
         """`Link rel=next` 따라 끝까지 순회하며 모든 페이지 항목을 평탄화해 반환.
@@ -919,19 +1061,34 @@ def _post_merge_fallback_marker(pr: PullRequest) -> str:
     return f"{_POST_MERGE_FALLBACK_MARKER_PREFIX}{pr.head_sha} -->"
 
 
+def _review_marker(pr: PullRequest) -> str:
+    return f"{_REVIEW_MARKER_PREFIX}{pr.head_sha} -->"
+
+
+def _with_review_marker(body: str, pr: PullRequest) -> str:
+    marker = _review_marker(pr)
+    return body if marker in body else f"{marker}\n{body}"
+
+
 def _render_post_merge_review_body(
     pr: PullRequest,
     result: ReviewResult,
     *,
     status: str,
+    reason: str | None = None,
     model_label: str | None,
     reasoning_effort: str | None,
 ) -> str:
     """Native review 대신 남기는 일반 댓글에 인라인 지적까지 보존한다."""
+    title = "## Codex 리뷰 (일반 댓글 보존)" if reason else "## Codex 리뷰 (PR 종료 후 보존)"
+    explanation = reason or (
+        f"PR이 이미 {status}되어 native review를 등록할 수 없어 일반 댓글로 보존합니다."
+    )
     parts = [
+        _review_marker(pr),
         _post_merge_fallback_marker(pr),
-        "## Codex 리뷰 (PR 종료 후 보존)",
-        f"PR이 이미 {status}되어 native review를 등록할 수 없어 일반 댓글로 보존합니다.",
+        title,
+        explanation,
         "",
         result.render_body(),
     ]

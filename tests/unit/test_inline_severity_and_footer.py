@@ -115,6 +115,10 @@ async def capturing_client(
                 )
             if req.url.path.endswith("/pulls/1") and req.method == "GET":
                 return httpx.Response(200, json={"head": {"sha": "abc"}})
+            if req.method == "GET" and req.url.path.endswith(
+                ("/issues/1/comments", "/pulls/1/reviews")
+            ):
+                return httpx.Response(200, json=[])
             if "/reviews" in req.url.path and req.method == "POST":
                 posts.append(req)
             return httpx.Response(200, json={})
@@ -160,6 +164,7 @@ async def test_post_review_sends_severity_prefixed_comments_and_model_footer(
     assert len(posts) == 1
     posted = json.loads(posts[0].content.decode("utf-8"))
 
+    assert "<!-- codex-review:review:abc -->" in posted["body"]
     # (1) 본문 섹션: 반드시 수정 + footer 는 그대로 유지.
     assert "**🔴 반드시 수정할 사항**" in posted["body"]
     assert posted["body"].rstrip().endswith(
