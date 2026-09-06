@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import fcntl
+import http.client
 import json
 import os
 import re
-import signal
 import stat
 import subprocess
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -99,15 +100,22 @@ def restart(log_fd: int, secret: str) -> None:
         or identity(pid) != captured
     ):
         raise ValueError("unexpected listener identity")
-    handoff = control_request(secret, "commit-restart", {
-        "instanceId": before["instanceId"], "operationId": before["operationId"],
-    })
-    if handoff != {
-        "status": "restart-committed", "instanceId": before["instanceId"],
-        "operationId": before["operationId"], "pid": pid,
-    } or listeners() != {pid} or identity(pid) != captured:
-        raise ValueError("restart handoff or listener identity changed")
-    os.kill(pid, signal.SIGTERM)
+    try:
+        handoff = control_request(secret, "commit-restart", {
+            "instanceId": before["instanceId"], "operationId": before["operationId"],
+        })
+    except urllib.error.HTTPError:
+        raise
+    except (OSError, http.client.HTTPException):
+        # The server owns shutdown even if its acknowledgement is lost.
+        # Never signal the old PID; only launch after the port becomes free.
+        pass
+    else:
+        if handoff != {
+            "status": "restart-committed", "instanceId": before["instanceId"],
+            "operationId": before["operationId"], "pid": pid,
+        }:
+            raise ValueError("restart handoff changed")
     deadline = time.monotonic() + 15
     while listeners():
         if time.monotonic() >= deadline:

@@ -1,6 +1,6 @@
 import asyncio
 import os
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
@@ -36,7 +36,8 @@ def application(enabled: bool = True) -> FastAPI:
     app.state.handler = WebhookHandler(
         secret="webhook", github=AsyncMock(), use_case=AsyncMock(),
     )
-    app.include_router(control_router(settings))
+    app.state.request_shutdown = Mock()
+    app.include_router(control_router(settings, request_shutdown=app.state.request_shutdown))
     return app
 
 
@@ -171,6 +172,8 @@ async def test_restart_commit_rejects_stale_or_busy_drain(race: str) -> None:
                                          })
             assert response.status_code == 409
             assert not handler.intake.restart_committed
+            await asyncio.sleep(0)
+            app.state.request_shutdown.assert_not_called()
             if race in ("resume", "expire", "queued"):
                 assert handler.queue_depth == 1
     finally:
@@ -202,6 +205,12 @@ async def test_restart_commit_seals_intake_against_resume_expiry_and_late_accept
                                                 "instanceId": drained.json()["instanceId"]})
             assert committed.status_code == 200
             assert committed.json()["status"] == "restart-committed"
+            repeated = await client.post("/internal/control/commit-restart", headers=HEADERS,
+                                         json={"operationId": OPERATION,
+                                               "instanceId": drained.json()["instanceId"]})
+            assert repeated.status_code == 200
+            await asyncio.sleep(0)
+            app.state.request_shutdown.assert_called_once_with()
             resumed = await client.post("/internal/control/resume", headers=HEADERS,
                                         json={"operationId": OPERATION})
             assert resumed.json() == {"resumed": False}

@@ -39,10 +39,14 @@ GitHub webhook, 프록시, Claude control secret과 재사용하지 마세요. �
 - 관리 전용 `scripts/restart_webhook_server.sh --no-tail`은 인증된 drain 후에만
   호출합니다. 임의 PID/포트/명령 인자를 받지 않으며, `8022`의 단일 소유 프로세스와
   빈 큐를 확인하고 `operationId`·`instanceId`를 `/commit-restart`에 전달해 종료 인계를
-  원자적으로 확정한 뒤 TERM을 보냅니다. 다른 listener를 강제 종료하지 않습니다.
+  원자적으로 확정합니다. 확정한 서버가 응답 전송과 독립적으로 자기 자신에게 TERM을
+  보내고, 스크립트는 포트가 비워진 뒤에만 새 서버를 시작합니다. 기존 PID나 다른
+  listener에 종료 신호를 보내지 않습니다.
 - 확정 상태(`restartCommitted=true`)에서는 `/resume`과 lease 만료가 접수를 다시 열지
-  않습니다. 확정 직후 관리 프로세스가 실패해 기존 봇이 살아 있으면 관리 스크립트를
-  재시도하거나 수동 재기동으로 복구해야 합니다. 확정 응답 유실도 같은 복구 절차를 따릅니다.
+  않습니다. 확정 응답 유실 시에도 서버는 종료를 진행하고, 관리 스크립트는 최대 15초 동안
+  포트가 비워지는지 확인합니다. 종료되지 않으면 강제 종료나 새 서버 기동 없이 실패합니다.
+  관리 프로세스 자체가 취소되면 서버 종료는 진행되지만 새 서버는 뜨지 않을 수 있습니다.
+  이때 private 로그를 확인하고 `bash scripts/run_webhook_server.sh`로 수동 복구하세요.
 - 고정 `.venv/bin/python -m uvicorn`을 `0.0.0.0:8022`로 시작하고 새 instance/PID를
   확인합니다. 기존 `HOST`, `PORT`, `VENV_DIR` 설정은 관리 재기동 경로를 바꾸지 않습니다.
   기존 `.runtime`과 별개인 owner-only `.admin-runtime/`에 잠금과 로그를 저장합니다.

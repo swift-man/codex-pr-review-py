@@ -1,9 +1,12 @@
 """Authenticated loopback-only restart coordination; never executes commands."""
 
+import asyncio
 import hmac
 import ipaddress
 import os
+import signal
 import uuid
+from collections.abc import Callable
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -22,7 +25,13 @@ class RestartOperation(ControlOperation):
     instance_id: str = Field(alias="instanceId", pattern=r"^[0-9a-f]{32}$")
 
 
-def control_router(settings: Settings) -> APIRouter:
+def _shutdown_current_process() -> None:
+    os.kill(os.getpid(), signal.SIGTERM)
+
+
+def control_router(
+    settings: Settings, *, request_shutdown: Callable[[], None] = _shutdown_current_process,
+) -> APIRouter:
     router = APIRouter(prefix="/internal/control")
     instance_id = uuid.uuid4().hex
 
@@ -95,11 +104,16 @@ def control_router(settings: Settings) -> APIRouter:
         operation: RestartOperation,
         current: Annotated[WebhookHandler, Depends(handler)],
     ) -> dict[str, object]:
+        already_committed = current.intake.restart_committed
         if (
             operation.instance_id != instance_id
             or not current.commit_restart(operation.operation_id)
         ):
             raise HTTPException(409, "Restart handoff no longer matches an idle drain")
+        if not already_committed:
+            # Independent of response delivery: a disconnected launcher cannot
+            # leave this process alive with intake permanently sealed.
+            asyncio.get_running_loop().call_soon(request_shutdown)
         return {
             "status": "restart-committed", "instanceId": instance_id,
             "operationId": operation.operation_id, "pid": os.getpid(),

@@ -1,9 +1,10 @@
 import fcntl
+import http.client
 import importlib.util
 import json
 import os
-import signal
 import stat
+import urllib.error
 from pathlib import Path
 from types import ModuleType
 from unittest.mock import MagicMock
@@ -84,7 +85,7 @@ def test_restart_rejects_unowned_or_unexpected_process_identity(
     environment["kill"].assert_not_called()
 
 
-def test_restart_rechecks_identity_before_signalling(runner: ModuleType, environment: dict) -> None:
+def test_restart_rechecks_identity_before_commit(runner: ModuleType, environment: dict) -> None:
     environment["identity"].side_effect = [
         f"{os.geteuid()} original uvicorn codex_review.main:app_factory",
         f"{os.geteuid()} replaced uvicorn codex_review.main:app_factory",
@@ -92,21 +93,32 @@ def test_restart_rechecks_identity_before_signalling(runner: ModuleType, environ
     with pytest.raises(ValueError, match="identity"):
         runner.restart(10, "a" * 64)
     environment["kill"].assert_not_called()
+    environment["control_request"].assert_not_called()
 
 
+@pytest.mark.parametrize("lost_response", [False, True])
 def test_old_listener_shutdown_timeout_never_launches_replacement(
     runner: ModuleType, environment: dict, monkeypatch: pytest.MonkeyPatch,
+    lost_response: bool,
 ) -> None:
+    if lost_response:
+        environment["control_request"].side_effect = TimeoutError("response lost")
     monkeypatch.setattr(runner.time, "monotonic", MagicMock(side_effect=[0, 16]))
     with pytest.raises(TimeoutError, match="listener did not stop"):
         runner.restart(10, "a" * 64)
-    environment["kill"].assert_called_once_with(4321, signal.SIGTERM)
+    environment["kill"].assert_not_called()
     environment["popen"].assert_not_called()
 
 
+@pytest.mark.parametrize("response_error", [
+    None, TimeoutError("response lost"), urllib.error.URLError("connection reset"),
+    http.client.IncompleteRead(b"partial"),
+])
 def test_restart_verifies_new_instance_and_leaves_it_running(
     runner: ModuleType, environment: dict, monkeypatch: pytest.MonkeyPatch,
+    response_error: Exception | None,
 ) -> None:
+    environment["control_request"].side_effect = response_error
     monkeypatch.setenv("PORT", "9999")
     process = environment["popen"].return_value
     process.pid = 5432
@@ -116,7 +128,7 @@ def test_restart_verifies_new_instance_and_leaves_it_running(
     }]
     environment["listeners"].side_effect = [{4321}, {4321}, set(), {5432}]
     runner.restart(10, "a" * 64)
-    environment["kill"].assert_called_once_with(4321, signal.SIGTERM)
+    environment["kill"].assert_not_called()
     environment["control_request"].assert_called_once_with("a" * 64, "commit-restart", {
         "instanceId": "a" * 32, "operationId": "b" * 64,
     })
@@ -193,8 +205,10 @@ def test_status_uses_fixed_loopback_without_environment_proxy(
 def test_restart_does_not_signal_when_resume_invalidates_handoff(
     runner: ModuleType, environment: dict,
 ) -> None:
-    environment["control_request"].side_effect = ValueError("drain resumed; job accepted")
-    with pytest.raises(ValueError, match="drain resumed"):
+    environment["control_request"].side_effect = urllib.error.HTTPError(
+        "http://127.0.0.1:8022", 409, "drain resumed; job accepted", {}, None,
+    )
+    with pytest.raises(urllib.error.HTTPError, match="drain resumed"):
         runner.restart(10, "a" * 64)
     environment["kill"].assert_not_called()
     environment["popen"].assert_not_called()
@@ -210,6 +224,16 @@ def test_restart_does_not_signal_on_mismatched_handoff(
     with pytest.raises(ValueError, match="handoff"):
         runner.restart(10, "a" * 64)
     environment["kill"].assert_not_called()
+
+
+def test_cancelled_launcher_never_signals_old_process_or_launches_replacement(
+    runner: ModuleType, environment: dict,
+) -> None:
+    environment["control_request"].side_effect = KeyboardInterrupt
+    with pytest.raises(KeyboardInterrupt):
+        runner.restart(10, "a" * 64)
+    environment["kill"].assert_not_called()
+    environment["popen"].assert_not_called()
 
 
 def test_log_descriptors_append_without_overwriting_old_server_shutdown(
