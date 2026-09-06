@@ -10,6 +10,7 @@ from codex_review.interfaces import GitHubClient, ReviewPublisherUnavailableErro
 from codex_review.logging_utils import get_delivery_logger
 
 from .follow_up_use_case import FollowUpReviewUseCase
+from .intake_control import IntakeControl
 from .review_pr_use_case import ReviewPullRequestUseCase
 
 logger = logging.getLogger(__name__)
@@ -103,8 +104,28 @@ class WebhookHandler:
         self._queue: asyncio.Queue[WebhookJob | None] = asyncio.Queue(maxsize=qmax)
         self._workers: list[asyncio.Task[None]] = []
         self._shutdown_timeout = shutdown_timeout
+        self.intake = IntakeControl()
+
+    @property
+    def queue_depth(self) -> int:
+        return self._queue.qsize()
+
+    async def drain(self, operation_id: str, timeout: float = 60.0) -> bool:
+        if not self.intake.pause(operation_id, timeout + 180.0):
+            return False
+        try:
+            async with asyncio.timeout(timeout):
+                await self._queue.join()
+            return self.intake.operation_id == operation_id
+        except BaseException:
+            self.intake.resume(operation_id)
+            raise
 
     # --- Lifecycle ----------------------------------------------------------
+
+    def commit_restart(self, operation_id: str) -> bool:
+        # No await: queue inspection and sealing intake are one event-loop step.
+        return self._queue.empty() and self.intake.commit_restart(operation_id)
 
     async def start(self) -> None:
         if self._workers:
@@ -134,6 +155,7 @@ class WebhookHandler:
         이전 구현은 큐가 가득 찬 상태에서 `put_nowait` 이 실패하자마자 즉시
         `_cancel_workers()` 로 진행 중 리뷰까지 죽였다 — Gemini 지적.
         """
+        await self.intake.close()
         dropped = self._drain_pending_jobs()
 
         try:
@@ -272,6 +294,10 @@ class WebhookHandler:
         # 큐가 가득 차면 즉시 거절 — GitHub 가 재전송하거나 운영자가 원인을 찾도록.
         # 무제한 큐는 Codex 쿼터 장애·장시간 리뷰 시 메모리와 대기시간을 무한 증가시킬 수 있다.
         try:
+            # No await between this gate and enqueue: a drain cannot miss an
+            # accept() suspended in publisher identity discovery above.
+            if self.intake.operation_id is not None:
+                return 503, "draining"
             self._queue.put_nowait(job)
         except asyncio.QueueFull:
             dlog.warning(
@@ -299,7 +325,11 @@ class WebhookHandler:
                 if job is None:
                     # Graceful shutdown tombstone. 워커 하나를 종료.
                     return
-                await self._process(job)
+                self.intake.active_jobs += 1
+                try:
+                    await self._process(job)
+                finally:
+                    self.intake.active_jobs -= 1
             finally:
                 self._queue.task_done()
 

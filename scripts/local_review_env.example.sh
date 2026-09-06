@@ -6,6 +6,11 @@ export GITHUB_APP_ID="123456"
 export GITHUB_APP_PRIVATE_KEY_PATH="/absolute/path/to/codex-review.private-key.pem"
 export GITHUB_WEBHOOK_SECRET="change-me-long-random"
 
+# Optional admin.gorani.me restart control: openssl rand -hex 32
+# Match admin ADMIN_CODEX_CONTROL_SHARED_SECRET: local .env or production LaunchAgent.
+# Production does not read .env. Use a separate secret, not the webhook/proxy secret.
+# export CODEX_CONTROL_SHARED_SECRET="GENERATE_INDEPENDENT_256_BIT_SECRET"
+
 # --- Codex CLI ---
 # Available models (queryable via ~/.codex/models_cache.json):
 #   gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, gpt-reserve, gpt-5.5, gpt-5.4,

@@ -161,13 +161,16 @@ stop_existing_server() {
         [[ -n "$pid" ]] && current_pids+=("$pid")
     done < <(find_existing_server_pids)
 
-    for pid in "${current_pids[@]}"; do
-        if ! is_codex_review_server "$pid"; then
-            echo "Port $PORT is now used by a non codex-review process (pid: $pid)" >&2
-            echo "Stop it manually or choose another PORT." >&2
-            exit 1
-        fi
-    done
+    # Bash 3.2 treats an empty array expansion as unset under `set -u`.
+    if [[ "${#current_pids[@]}" -gt 0 ]]; then
+        for pid in "${current_pids[@]}"; do
+            if ! is_codex_review_server "$pid"; then
+                echo "Port $PORT is now used by a non codex-review process (pid: $pid)" >&2
+                echo "Stop it manually or choose another PORT." >&2
+                exit 1
+            fi
+        done
+    fi
 
     related=()
     while IFS= read -r pid; do
@@ -175,7 +178,9 @@ stop_existing_server() {
     done < <(
         {
             matching_snapshot_pids <<< "$term_snapshot"
-            related_server_pids "${current_pids[@]}"
+            if [[ "${#current_pids[@]}" -gt 0 ]]; then
+                related_server_pids "${current_pids[@]}"
+            fi
         } | dedupe_pids
     )
 
@@ -190,6 +195,7 @@ stop_existing_server
 
 exec uvicorn codex_review.main:app_factory \
     --factory \
+    --no-proxy-headers \
     --host "$HOST" \
     --port "$PORT" \
     --log-level info

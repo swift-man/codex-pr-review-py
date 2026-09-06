@@ -13,6 +13,7 @@ from codex_review.application.follow_up_use_case import (
 from codex_review.application.review_pr_use_case import ReviewPullRequestUseCase
 from codex_review.application.webhook_handler import WebhookHandler
 from codex_review.config import Settings
+from codex_review.control import control_router
 from codex_review.infrastructure.codex_cli_engine import (
     CODEX_CLI_COLLECTOR_MAX_CHARS,
     CodexAuthError,
@@ -134,6 +135,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 await handler.stop()
 
     app = FastAPI(title="codex-review", lifespan=lifespan)
+    app.include_router(control_router(settings))
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:
@@ -151,8 +153,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         try:
             payload = json.loads(body.decode("utf-8") or "{}")
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, UnicodeDecodeError):
             return Response(status_code=400, content="invalid json")
+        if not isinstance(payload, dict):
+            return Response(status_code=400, content="invalid payload format")
 
         event = request.headers.get("X-GitHub-Event", "")
         delivery = request.headers.get("X-GitHub-Delivery", "-")

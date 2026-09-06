@@ -2,6 +2,31 @@
 
 이 프로젝트의 주요 변경 사항을 기록합니다. 버전은 [Semantic Versioning](https://semver.org/)을 따릅니다.
 
+## [Unreleased]
+
+### 수정
+
+- 재기동 직전 operation·instance에 결속한 종료 인계를 확정하여 resume·lease 만료로
+  신규 리뷰 접수가 재개되는 경합을 차단합니다.
+- 종료 확정 후 서버가 응답 전송과 무관하게 자기 종료를 진행하여 응답 유실이나
+  관리 요청 취소로 기존 서버가 영구적으로 503을 반환하던 경로를 수정했습니다.
+  관리 스크립트는 기존 PID에 신호를 보내지 않고, 응답 유실 시에도 포트가 비워진 뒤
+  새 서버를 검증합니다. 관리 프로세스 취소로 새 기동이 생략되면 수동 복구가 필요합니다.
+- 관리 재기동 로그를 append 모드로 열어 기존 서버 종료 로그가 덮어써지지 않도록 수정했습니다.
+- 배열·문자열·숫자 등 JSON 객체가 아닌 webhook payload를 400으로 거절합니다.
+- macOS Bash 3.2에서 종료 대기 후 listener 목록이 비면 수동 시작 스크립트가
+  중단되던 오류를 수정하고, 종료된 listener의 잔여 자식 정리는 유지했습니다.
+- 서명이 유효하지만 UTF-8이 손상된 webhook 요청은 500 대신 400으로 거절합니다.
+
+### 추가
+
+- Admin의 모델 저장 후 재기동을 위한 loopback 전용 인증 status/drain/resume/commit-restart API.
+  이미 수락한 리뷰의 완료를 기다리며 종료 인계 확정 전 타임아웃·취소·lease 만료 시 intake를 재개합니다.
+- 포트 8022의 인증된 단일 drain 프로세스만 종료하는 고정 macOS 재기동 스크립트와
+  새 instance 검증, owner-only `.admin-runtime` 잠금·로그를 추가했습니다.
+- 신규 요청의 전달 헤더로 loopback peer를 위장하지 못하도록 Uvicorn proxy headers를
+  비활성화하고, 전용 secret 설정·초기 수동 재기동·실패 delivery 재전송 절차를 문서화했습니다.
+
 ## [0.1.7] - 2026-09-05
 
 ### 변경
