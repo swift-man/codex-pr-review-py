@@ -155,6 +155,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             payload = json.loads(body.decode("utf-8") or "{}")
         except (json.JSONDecodeError, UnicodeDecodeError):
             return Response(status_code=400, content="invalid json")
+        if not isinstance(payload, dict):
+            return Response(status_code=400, content="invalid payload format")
 
         event = request.headers.get("X-GitHub-Event", "")
         delivery = request.headers.get("X-GitHub-Delivery", "-")

@@ -18,6 +18,10 @@ class ControlOperation(BaseModel):
     operation_id: str = Field(alias="operationId", pattern=r"^[0-9a-f]{64}$")
 
 
+class RestartOperation(ControlOperation):
+    instance_id: str = Field(alias="instanceId", pattern=r"^[0-9a-f]{32}$")
+
+
 def control_router(settings: Settings) -> APIRouter:
     router = APIRouter(prefix="/internal/control")
     instance_id = uuid.uuid4().hex
@@ -55,6 +59,7 @@ def control_router(settings: Settings) -> APIRouter:
             "fallbacks": list(settings.codex_model_fallbacks),
             "draining": current.intake.operation_id is not None,
             "operationId": current.intake.operation_id,
+            "restartCommitted": current.intake.restart_committed,
             "queueDepth": current.queue_depth,
             "activeJobs": current.intake.active_jobs,
         }
@@ -84,5 +89,20 @@ def control_router(settings: Settings) -> APIRouter:
         current: Annotated[WebhookHandler, Depends(handler)],
     ) -> dict[str, object]:
         return {"resumed": current.intake.resume(operation.operation_id)}
+
+    @router.post("/commit-restart", dependencies=dependency)
+    async def commit_restart(
+        operation: RestartOperation,
+        current: Annotated[WebhookHandler, Depends(handler)],
+    ) -> dict[str, object]:
+        if (
+            operation.instance_id != instance_id
+            or not current.commit_restart(operation.operation_id)
+        ):
+            raise HTTPException(409, "Restart handoff no longer matches an idle drain")
+        return {
+            "status": "restart-committed", "instanceId": instance_id,
+            "operationId": operation.operation_id, "pid": os.getpid(),
+        }
 
     return router

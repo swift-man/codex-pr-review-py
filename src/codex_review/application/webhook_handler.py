@@ -123,6 +123,10 @@ class WebhookHandler:
 
     # --- Lifecycle ----------------------------------------------------------
 
+    def commit_restart(self, operation_id: str) -> bool:
+        # No await: queue inspection and sealing intake are one event-loop step.
+        return self._queue.empty() and self.intake.commit_restart(operation_id)
+
     async def start(self) -> None:
         if self._workers:
             return

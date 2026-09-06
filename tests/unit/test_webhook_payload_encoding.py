@@ -12,8 +12,13 @@ from codex_review.config import Settings
 from codex_review.main import create_app
 
 
-@pytest.mark.parametrize("body", [b'\xff', b'{"value":"\xff"}', b'{broken'])
-async def test_signed_invalid_encoding_or_json_returns_400(body: bytes) -> None:
+@pytest.mark.parametrize("body,reason", [
+    (b'\xff', "invalid json"), (b'{"value":"\xff"}', "invalid json"),
+    (b'{broken', "invalid json"),
+    *[(raw, "invalid payload format") for raw in
+      (b'[]', b'[{}]', b'"str"', b'123', b'null', b'true')],
+])
+async def test_signed_invalid_encoding_or_json_returns_400(body: bytes, reason: str) -> None:
     settings = Settings(
         GITHUB_APP_ID=123, GITHUB_APP_PRIVATE_KEY="placeholder",
         GITHUB_WEBHOOK_SECRET="test-webhook-secret", _env_file=None,
@@ -32,5 +37,5 @@ async def test_signed_invalid_encoding_or_json_returns_400(body: bytes) -> None:
         )
     assert unsigned.status_code == 401
     assert signed.status_code == 400
-    assert signed.text == "invalid json"
+    assert signed.text == reason
     handler.accept.assert_not_awaited()

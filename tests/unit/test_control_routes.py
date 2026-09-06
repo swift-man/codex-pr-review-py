@@ -1,3 +1,4 @@
+import asyncio
 import os
 from unittest.mock import AsyncMock
 
@@ -59,7 +60,7 @@ async def test_status_reports_configured_state_and_stable_instance_identity(peer
     assert SECRET not in first.text
 
 
-@pytest.mark.parametrize("path", ["status", "drain", "resume"])
+@pytest.mark.parametrize("path", ["status", "drain", "resume", "commit-restart"])
 @pytest.mark.parametrize("peer,secret,enabled", [
     ("192.0.2.1", SECRET, True),
     ("unresolved-peer", SECRET, True),
@@ -134,3 +135,81 @@ async def test_drain_timeout_is_reported_as_retryable_conflict() -> None:
         )
     assert response.status_code == 409
     assert "intake resumed" in response.json()["detail"]
+
+
+@pytest.mark.parametrize("race", ["resume", "expire", "queued", "busy", "instance", "owner"])
+async def test_restart_commit_rejects_stale_or_busy_drain(race: str) -> None:
+    app = application()
+    handler = app.state.handler
+    transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 1234))
+    payload = {
+        "action": "opened", "pull_request": {"number": 1},
+        "repository": {"full_name": "o/r"}, "installation": {"id": 1},
+    }
+    try:
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            await client.post("/internal/control/drain", headers=HEADERS,
+                              json={"operationId": OPERATION})
+            before = (await client.get("/internal/control/status", headers=HEADERS)).json()
+            if race in ("resume", "expire", "queued"):
+                if race != "expire":
+                    await client.post("/internal/control/resume", headers=HEADERS,
+                                      json={"operationId": OPERATION})
+                else:
+                    await handler.intake._expire(OPERATION, 0)
+                assert await handler.accept("pull_request", "race", payload) == (202, "queued")
+                if race == "queued":
+                    assert handler.intake.pause(OPERATION, 60)
+            elif race == "busy":
+                handler.intake.active_jobs = 1
+            response = await client.post("/internal/control/commit-restart", headers=HEADERS,
+                                         json={
+                                             "operationId": "c" * 64 if race == "owner"
+                                             else OPERATION,
+                                             "instanceId": "0" * 32 if race == "instance"
+                                             else before["instanceId"],
+                                         })
+            assert response.status_code == 409
+            assert not handler.intake.restart_committed
+            if race in ("resume", "expire", "queued"):
+                assert handler.queue_depth == 1
+    finally:
+        await handler.stop()
+
+
+async def test_restart_commit_seals_intake_against_resume_expiry_and_late_accept() -> None:
+    app = application()
+    handler = app.state.handler
+    started, finish = asyncio.Event(), asyncio.Event()
+
+    async def discover() -> None:
+        started.set()
+        await finish.wait()
+
+    handler._github.ensure_bot_login = discover
+    accepting = asyncio.create_task(handler.accept("pull_request", "late", {
+        "action": "opened", "pull_request": {"number": 1},
+        "repository": {"full_name": "o/r"}, "installation": {"id": 1},
+    }))
+    transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 1234))
+    try:
+        await asyncio.wait_for(started.wait(), 1)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            drained = await client.post("/internal/control/drain", headers=HEADERS,
+                                        json={"operationId": OPERATION})
+            committed = await client.post("/internal/control/commit-restart", headers=HEADERS,
+                                          json={"operationId": OPERATION,
+                                                "instanceId": drained.json()["instanceId"]})
+            assert committed.status_code == 200
+            assert committed.json()["status"] == "restart-committed"
+            resumed = await client.post("/internal/control/resume", headers=HEADERS,
+                                        json={"operationId": OPERATION})
+            assert resumed.json() == {"resumed": False}
+            await handler.intake._expire(OPERATION, 0)
+            finish.set()
+            assert await accepting == (503, "draining")
+            assert handler.queue_depth == handler.intake.active_jobs == 0
+    finally:
+        finish.set()
+        await accepting
+        await handler.stop()

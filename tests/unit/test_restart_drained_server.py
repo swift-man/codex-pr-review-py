@@ -1,3 +1,4 @@
+import fcntl
 import importlib.util
 import json
 import os
@@ -25,14 +26,19 @@ def environment(runner: ModuleType, monkeypatch: pytest.MonkeyPatch) -> dict:
     before = {
         "pid": 4321, "draining": True, "queueDepth": 0, "activeJobs": 0,
         "instanceId": "a" * 32,
+        "operationId": "b" * 64,
     }
     mocks = {
         "status": MagicMock(return_value=before),
         "listeners": MagicMock(return_value={4321}),
         "identity": MagicMock(return_value=f"{os.geteuid()} uvicorn codex_review.main:app_factory"),
         "kill": MagicMock(), "killpg": MagicMock(), "popen": MagicMock(),
+        "control_request": MagicMock(return_value={
+            "status": "restart-committed", "pid": 4321,
+            "instanceId": "a" * 32, "operationId": "b" * 64,
+        }),
     }
-    for name in ("status", "listeners", "identity"):
+    for name in ("status", "listeners", "identity", "control_request"):
         monkeypatch.setattr(runner, name, mocks[name])
     monkeypatch.setattr(runner.os, "kill", mocks["kill"])
     monkeypatch.setattr(runner.os, "killpg", mocks["killpg"])
@@ -44,6 +50,7 @@ def environment(runner: ModuleType, monkeypatch: pytest.MonkeyPatch) -> dict:
 @pytest.mark.parametrize("field,value", [
     ("pid", True), ("pid", 1), ("draining", False),
     ("queueDepth", 1), ("activeJobs", 1), ("queueDepth", False), ("activeJobs", False),
+    ("operationId", None), ("operationId", "invalid"),
 ])
 def test_restart_refuses_undrained_or_invalid_status(
     runner: ModuleType, environment: dict, field: str, value: object,
@@ -107,9 +114,12 @@ def test_restart_verifies_new_instance_and_leaves_it_running(
     environment["status"].side_effect = [environment["before"], {
         "pid": 5432, "draining": False, "instanceId": "b" * 32,
     }]
-    environment["listeners"].side_effect = [{4321}, set(), {5432}]
+    environment["listeners"].side_effect = [{4321}, {4321}, set(), {5432}]
     runner.restart(10, "a" * 64)
     environment["kill"].assert_called_once_with(4321, signal.SIGTERM)
+    environment["control_request"].assert_called_once_with("a" * 64, "commit-restart", {
+        "instanceId": "a" * 32, "operationId": "b" * 64,
+    })
     environment["popen"].assert_called_once()
     args, kwargs = environment["popen"].call_args
     assert args[0] == [
@@ -137,7 +147,7 @@ def test_unverified_startup_kills_and_reaps_newborn_in_owned_parent_group(
     process.pid = 5432
     process.poll.side_effect = [None, 1]
     environment["status"].side_effect = [environment["before"], after]
-    environment["listeners"].side_effect = [{4321}, set(), {5432}]
+    environment["listeners"].side_effect = [{4321}, {4321}, set(), {5432}]
     with pytest.raises(TimeoutError, match="new listener"):
         runner.restart(10, "a" * 64)
     environment["killpg"].assert_not_called()
@@ -154,7 +164,7 @@ def test_startup_rejects_shared_listener_and_cleans_up_newborn(
     environment["status"].side_effect = [environment["before"], {
         "pid": 5432, "draining": False, "instanceId": "b" * 32,
     }]
-    environment["listeners"].side_effect = [{4321}, set(), {5432, 9999}]
+    environment["listeners"].side_effect = [{4321}, {4321}, set(), {5432, 9999}]
     with pytest.raises(TimeoutError, match="new listener"):
         runner.restart(10, "a" * 64)
     environment["killpg"].assert_not_called()
@@ -178,6 +188,49 @@ def test_status_uses_fixed_loopback_without_environment_proxy(
     assert request.full_url == "http://127.0.0.1:8022/internal/control/status"
     assert dict(request.header_items())["X-gorani-bot-control-secret"] == "a" * 64
     response.read.assert_called_once_with(16385)
+
+
+def test_restart_does_not_signal_when_resume_invalidates_handoff(
+    runner: ModuleType, environment: dict,
+) -> None:
+    environment["control_request"].side_effect = ValueError("drain resumed; job accepted")
+    with pytest.raises(ValueError, match="drain resumed"):
+        runner.restart(10, "a" * 64)
+    environment["kill"].assert_not_called()
+    environment["popen"].assert_not_called()
+
+
+@pytest.mark.parametrize("field,value", [
+    ("instanceId", "c" * 32), ("operationId", "d" * 64), ("pid", 9999),
+])
+def test_restart_does_not_signal_on_mismatched_handoff(
+    runner: ModuleType, environment: dict, field: str, value: object,
+) -> None:
+    environment["control_request"].return_value[field] = value
+    with pytest.raises(ValueError, match="handoff"):
+        runner.restart(10, "a" * 64)
+    environment["kill"].assert_not_called()
+
+
+def test_log_descriptors_append_without_overwriting_old_server_shutdown(
+    runner: ModuleType, tmp_path: Path,
+) -> None:
+    path = tmp_path / "server.log"
+    old = runner.owned_descriptor(path, append=True)
+    new = runner.owned_descriptor(path, append=True)
+    try:
+        os.write(old, b"old running\n")
+        os.lseek(new, 0, os.SEEK_END)
+        os.write(old, b"old shutdown\n")
+        os.write(new, b"new startup\n")
+        os.write(old, b"old finished\n")
+        os.write(new, b"new ready\n")
+    finally:
+        os.close(old)
+        os.close(new)
+    assert path.read_text() == (
+        "old running\nold shutdown\nnew startup\nold finished\nnew ready\n"
+    )
 
 
 @pytest.mark.parametrize("raw", [b"x" * 16385, b"[]", b"invalid-json"])
@@ -211,7 +264,10 @@ def test_main_creates_private_runtime_without_changing_legacy_runtime(
     legacy.mkdir(mode=0o755)
     monkeypatch.setenv("CODEX_CONTROL_SHARED_SECRET", "a" * 64)
     monkeypatch.setattr(runner, "ROOT", tmp_path)
-    restart = MagicMock()
+    def assert_append(log_fd: int, secret: str) -> None:
+        assert fcntl.fcntl(log_fd, fcntl.F_GETFL) & os.O_APPEND
+
+    restart = MagicMock(side_effect=assert_append)
     monkeypatch.setattr(runner, "restart", restart)
     assert runner.main() == 0
     private = tmp_path / ".admin-runtime"

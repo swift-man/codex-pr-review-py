@@ -27,6 +27,20 @@ async def test_expired_lease_restores_intake_and_allows_new_owner() -> None:
     await intake.close()
 
 
+async def test_committed_restart_cannot_expire_resume_or_reopen_on_close() -> None:
+    intake = IntakeControl()
+    assert intake.pause("a" * 64, 0)
+    assert intake.commit_restart("a" * 64)
+    assert not intake.resume("a" * 64)
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert intake.operation_id == "a" * 64
+    assert not intake.pause("b" * 64, 60)
+    await intake.close()
+    assert intake.restart_committed
+    assert intake.operation_id == "a" * 64
+
+
 async def test_cancelled_old_expiry_cannot_release_replacement_lease() -> None:
     intake = IntakeControl()
     assert intake.pause("a" * 64, 0)

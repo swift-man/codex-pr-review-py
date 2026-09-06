@@ -22,9 +22,14 @@ def command(*argv: str) -> str:
 
 
 def status(secret: str) -> dict:
+    return control_request(secret, "status")
+
+
+def control_request(secret: str, action: str, body: dict | None = None) -> dict:
     request = urllib.request.Request(
-        f"http://127.0.0.1:{PORT}/internal/control/status",
-        headers={"X-Gorani-Bot-Control-Secret": secret},
+        f"http://127.0.0.1:{PORT}/internal/control/{action}",
+        headers={"X-Gorani-Bot-Control-Secret": secret, "Content-Type": "application/json"},
+        data=json.dumps(body).encode() if body is not None else None,
     )
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     with opener.open(request, timeout=3) as response:
@@ -54,8 +59,9 @@ def identity(pid: int) -> str:
     return command("/bin/ps", "-ww", "-p", str(pid), "-o", "uid=,lstart=,command=")
 
 
-def owned_descriptor(path: Path) -> int:
-    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+def owned_descriptor(path: Path, *, append: bool = False) -> int:
+    flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK
+    fd = os.open(path, flags | (os.O_APPEND if append else 0), 0o600)
     metadata = os.fstat(fd)
     if (
         not stat.S_ISREG(metadata.st_mode)
@@ -76,6 +82,8 @@ def restart(log_fd: int, secret: str) -> None:
         or before.get("draining") is not True
         or not isinstance(before.get("instanceId"), str)
         or not re.fullmatch(r"[0-9a-f]{32}", before["instanceId"])
+        or not isinstance(before.get("operationId"), str)
+        or not re.fullmatch(r"[0-9a-f]{64}", before["operationId"])
         or type(before.get("queueDepth")) is not int
         or before["queueDepth"] != 0
         or type(before.get("activeJobs")) is not int
@@ -91,6 +99,14 @@ def restart(log_fd: int, secret: str) -> None:
         or identity(pid) != captured
     ):
         raise ValueError("unexpected listener identity")
+    handoff = control_request(secret, "commit-restart", {
+        "instanceId": before["instanceId"], "operationId": before["operationId"],
+    })
+    if handoff != {
+        "status": "restart-committed", "instanceId": before["instanceId"],
+        "operationId": before["operationId"], "pid": pid,
+    } or listeners() != {pid} or identity(pid) != captured:
+        raise ValueError("restart handoff or listener identity changed")
     os.kill(pid, signal.SIGTERM)
     deadline = time.monotonic() + 15
     while listeners():
@@ -164,8 +180,7 @@ def main() -> int:
         return 78
     with os.fdopen(owned_descriptor(runtime / "restart.lock"), "r+") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        with os.fdopen(owned_descriptor(runtime / "codex-review.log"), "a") as log:
-            os.lseek(log.fileno(), 0, os.SEEK_END)
+        with os.fdopen(owned_descriptor(runtime / "codex-review.log", append=True), "a") as log:
             restart(log.fileno(), secret)
     return 0
 
