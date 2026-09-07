@@ -45,6 +45,8 @@ class PullRequest:
     diff_patches: Mapping[str, str] = field(
         default_factory=lambda: _EMPTY_DIFF_PATCHES
     )
+    # Retain the existence of paths removed by policy, without sending their patches.
+    policy_excluded_files: tuple[str, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
         # frozen=True 이므로 object.__setattr__ 우회가 필요. 이미 MappingProxyType 이면

@@ -320,7 +320,7 @@ class ReviewPullRequestUseCase:
         # 코드베이스 지적이 얕은지" 를 바로 인지하도록 한다. `scope_reason` 은
         # 위에서 결정 — full 실패 후 diff 재시도 성공 경로는 reactive 로 표기.
         if dump.mode == DUMP_MODE_DIFF:
-            result = _prepend_diff_scope_badge(result, dump, scope_reason)
+            result = _prepend_diff_scope_badge(result, dump, scope_reason, pr)
         return result
 
     async def _post_engine_failure_comment(
@@ -432,9 +432,8 @@ def _changed_trimmed_by_budget(pr: PullRequest, dump: FileDump) -> bool:
 def _filter_pr_to_reviewable_changes(pr: PullRequest, dump: FileDump) -> PullRequest:
     """Remove changed paths that the file collector excluded by policy.
 
-    The prompt should not list README/assets/lock files as changed when the repo policy says
-    they are out of scope. Keeping only reviewable changed files also makes diff fallback use
-    the same scope as full mode.
+    Keep excluded paths as inventory metadata only. Their code and inline comment
+    targets stay out of scope, including during diff fallback.
     """
     policy_excluded = set(dump.filter_excluded)
     if not policy_excluded:
@@ -448,6 +447,9 @@ def _filter_pr_to_reviewable_changes(pr: PullRequest, dump: FileDump) -> PullReq
     return replace(
         pr,
         changed_files=changed_files,
+        policy_excluded_files=pr.policy_excluded_files + tuple(
+            path for path in pr.changed_files if path in policy_excluded
+        ),
         diff_right_lines={
             path: lines for path, lines in pr.diff_right_lines.items()
             if path in changed_set
@@ -527,7 +529,7 @@ _SCOPE_REACTIVE_ENGINE_REJECT = "reactive_engine_reject"
 
 
 def _prepend_diff_scope_badge(
-    result: ReviewResult, dump: FileDump, scope_reason: str
+    result: ReviewResult, dump: FileDump, scope_reason: str, pr: PullRequest
 ) -> ReviewResult:
     """diff-only 모드 리뷰임을 알리는 안내를 summary 최상단에 붙인다.
 
@@ -552,12 +554,14 @@ def _prepend_diff_scope_badge(
     else:
         # 기본: 사전 예산 fallback. 전체 코드베이스 합산이 우리 추정 예산을 넘었다.
         reason_text = (
-            "> 전체 코드베이스가 입력 예산(`CODEX_MAX_INPUT_TOKENS`) 을 초과하여 "
+            "> 전체 코드베이스가 파일 크기 또는 입력 예산(`CODEX_MAX_INPUT_TOKENS`)을 초과하여 "
             "PR 의 unified patch 만 근거로 리뷰했습니다."
         )
     lines = [
         "> ⚠️ **리뷰 범위: diff-only (자동 전환)**",
         reason_text,
+        f"> PR 변경 파일 총 {len(pr.changed_files) + len(pr.policy_excluded_files)}건, "
+        f"정책상 제외 {len(pr.policy_excluded_files)}건.",
         f"> 포함된 diff 파일 {len(dump.entries)}건, "
         f"예산 초과로 제외 {len(dump.budget_trimmed)}건, "
         f"patch 누락 {len(dump.patch_missing)}건.",

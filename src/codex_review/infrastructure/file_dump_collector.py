@@ -258,9 +258,9 @@ def _build_dump_sync(
     """순수 동기 파일 수집. `collect()` 가 스레드로 오프로드해 호출한다.
 
     두 종류의 제외를 구분한다:
-      - filter_excluded : 바이너리/미디어/크기 한도 등 **정책상 제외**. PR 에 이미지만
+      - filter_excluded : 바이너리/미디어/경로 등 **정책상 제외**. PR 에 이미지만
                          변경돼도 무조건 들어간다 — "예산 초과" 신호로 쓰면 안 된다.
-      - budget_trimmed  : 토큰 예산이 부족해 **컨텍스트에서 잘려 나간** 파일.
+      - budget_trimmed  : 파일 크기 또는 토큰 예산으로 **컨텍스트에서 잘려 나간** 파일.
                           이것만이 `exceeded_budget` 판정의 근거.
     이전에는 둘을 합쳐 `excluded` 에 넣어 바이너리 파일 포함 PR 이 "예산 초과" 로 오진됐다.
     """
@@ -277,12 +277,18 @@ def _build_dump_sync(
         abs_path = root / rel_path
         if not abs_path.is_file():
             continue
-        if _should_skip(
-            rel_path, abs_path, file_max_bytes, data_file_max_bytes, path_filter
-        ):
+        if _excluded_by_policy(rel_path, abs_path, path_filter):
             if rel_path not in filter_excluded_set:
                 filter_excluded.append(rel_path)
                 filter_excluded_set.add(rel_path)
+            continue
+        if not path_filter.always_allows(rel_path) and _exceeds_size_limit(
+            abs_path, abs_path.name, abs_path.suffix.lower(),
+            file_max_bytes, data_file_max_bytes,
+        ):
+            # A large source/test file can still have a small, reviewable patch.
+            # Keep it in the PR scope so diff fallback can recover that patch.
+            budget_trimmed.append(rel_path)
             continue
         try:
             content = abs_path.read_text(encoding="utf-8")
@@ -423,19 +429,12 @@ def _sort_by_priority(paths: list[str], changed: set[str]) -> list[str]:
     return sorted(paths, key=rank)
 
 
-def _should_skip(
+def _excluded_by_policy(
     rel_path: str,
     abs_path: Path,
-    file_max_bytes: int,
-    data_file_max_bytes: int,
     path_filter: ReviewPathFilter,
 ) -> bool:
-    """Decide whether to exclude a tracked file from the dump.
-
-    필터는 세 단계로 나뉜다 — 아이덴티티(경로/이름) → 확장자 → 크기.
-    각 단계가 실패 이유(왜 제외되는지)를 한 군데 모아 두므로 Tier 추가/삭제 시 영향 범위가
-    작아진다.
-    """
+    """Exclude paths/formats from both full and diff review, independent of size."""
     if path_filter.always_allows(rel_path):
         return False
     if not path_filter.allows(rel_path):
@@ -446,11 +445,7 @@ def _should_skip(
         return True
     name = parts[-1]
     suffix = abs_path.suffix.lower()
-    if _is_hard_excluded_name_or_suffix(name, suffix):
-        return True
-    return _exceeds_size_limit(
-        abs_path, name, suffix, file_max_bytes, data_file_max_bytes
-    )
+    return _is_hard_excluded_name_or_suffix(name, suffix)
 
 
 def _is_in_always_skip_dir(parts: list[str]) -> bool:
