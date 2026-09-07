@@ -11,6 +11,7 @@ from .reviewbot_config import load_review_path_filter
 logger = logging.getLogger(__name__)
 
 _REVIEWBOT_CONFIG_NAME = ".reviewbot.yml"
+_MAX_FILE_READ_BYTES = 5 * 1024 * 1024
 
 _ALWAYS_SKIP_DIRS = {
     # VCS / Python / JS 공통
@@ -291,7 +292,14 @@ def _build_dump_sync(
             budget_trimmed.append(rel_path)
             continue
         try:
-            content = abs_path.read_text(encoding="utf-8")
+            # Bound the read itself, even for manifests/always_review and files
+            # that grow after the size check. Oversized patches remain eligible.
+            with abs_path.open("rb") as source:
+                raw = source.read(_MAX_FILE_READ_BYTES + 1)
+            if len(raw) > _MAX_FILE_READ_BYTES:
+                budget_trimmed.append(rel_path)
+                continue
+            content = raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
         except (UnicodeDecodeError, OSError):
             if rel_path not in filter_excluded_set:
                 filter_excluded.append(rel_path)
@@ -464,10 +472,10 @@ def _is_hard_excluded_name_or_suffix(name: str, suffix: str) -> bool:
 
 
 def _is_important_config(name: str) -> bool:
-    """Known project manifests that must reach the reviewer regardless of size.
+    """Known manifests exempt from soft limits, but not the absolute read cap.
 
     대형 모노레포의 루트 `package.json` 처럼 수백 KB 에 이르는 매니페스트도 리뷰 컨텍스트에
-    반드시 포함돼야 한다. 이름 기반 화이트리스트라 실수로 데이터 덤프를 끌어올 위험은 낮다.
+    포함될 수 있다. 절대 읽기 상한을 넘으면 전체 파일 대신 diff 재시도로 전달한다.
     """
     return name in _IMPORTANT_CONFIG_NAMES
 

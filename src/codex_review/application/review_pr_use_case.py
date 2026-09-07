@@ -264,9 +264,10 @@ class ReviewPullRequestUseCase:
             # 으로 진입했다는 의미. full 시도는 일어나지 않았다 (codex PR #18 Minor 반영:
             # 이전 boolean `attempted_diff=True` 표현은 "full→diff 재시도" 로 오해 소지).
             if entered_diff_preemptively:
-                logger.exception(
-                    "engine failed in preemptive diff-only mode for %s#%d — no further fallback",
-                    pr.repo.full_name, pr.number,
+                logger.error(
+                    "engine failed in preemptive diff-only mode for %s#%d "
+                    "— no further fallback (cause: %s)",
+                    pr.repo.full_name, pr.number, redact_text(str(exc)),
                 )
                 await self._post_engine_failure_comment(
                     pr,
@@ -282,14 +283,14 @@ class ReviewPullRequestUseCase:
             # 마스킹된 메시지(str(exc)) 를 직접 노출 (gemini PR #18 Minor 반영).
             logger.warning(
                 "engine failed on full mode for %s#%d — retrying in diff-only mode (cause: %s)",
-                pr.repo.full_name, pr.number, str(exc),
+                pr.repo.full_name, pr.number, redact_text(str(exc)),
             )
             fallback_dump = await self._try_diff_fallback(pr)
             if fallback_dump is None:
                 # diff fallback 자체가 불가 — patch 없거나 운영자가 옵트아웃.
-                logger.exception(
-                    "engine failed and diff fallback unavailable for %s#%d",
-                    pr.repo.full_name, pr.number,
+                logger.error(
+                    "engine failed and diff fallback unavailable for %s#%d (cause: %s)",
+                    pr.repo.full_name, pr.number, redact_text(str(exc)),
                 )
                 await self._post_engine_failure_comment(
                     pr,
@@ -302,9 +303,9 @@ class ReviewPullRequestUseCase:
             try:
                 result = await self._engine.review(pr, fallback_dump, history=history)
             except ReviewEngineError as retry_exc:
-                logger.exception(
-                    "engine retry in diff mode also failed for %s#%d",
-                    pr.repo.full_name, pr.number,
+                logger.error(
+                    "engine retry in diff mode also failed for %s#%d (cause: %s)",
+                    pr.repo.full_name, pr.number, redact_text(str(retry_exc)),
                 )
                 await self._post_engine_failure_comment(
                     pr,
