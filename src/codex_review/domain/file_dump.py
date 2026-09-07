@@ -41,12 +41,12 @@ class FileDump:
     - `mode == "diff"` — GitHub unified patch 원문 (`@@ -a,b +c,d @@` 헤더 포함)
 
     제외 분류:
-      - `filter_excluded` — 바이너리/미디어/크기 한도 등 **정책상** 뺀 파일.
+      - `filter_excluded` — 바이너리/미디어/경로 규칙 등 **정책상** 뺀 파일.
         예산과 무관하게 해당 PR 이 그 파일만 바꿨어도 리뷰는 불가하므로
         fallback 을 트리거하면 안 된다.
       - `patch_missing` (diff 모드) — GitHub 가 patch 를 안 준 파일
         (rename/delete/binary/거대 diff).
-      - `budget_trimmed` (property) — 순수하게 **예산 때문에** 잘린 파일 (`excluded -
+      - `budget_trimmed` (property) — **파일 크기·입력 예산 때문에** 잘린 파일 (`excluded -
         filter_excluded - patch_missing`). 이것만이 "리뷰가 얕아진" 실제 원인.
 
     운영 관측용 `excluded` 는 세 카테고리의 합집합을 유지한다 (역호환).
@@ -58,7 +58,7 @@ class FileDump:
     exceeded_budget: bool = False
     budget: TokenBudget | None = None
     mode: str = DUMP_MODE_FULL
-    # 정책(바이너리/크기/화이트리스트) 로 배제된 파일. full collector 가 채운다.
+    # 정책(바이너리/경로 규칙) 으로 배제된 파일. full collector 가 채운다.
     # diff 모드에서는 항상 비어 있다 (정책 필터는 diff 모드에 없다).
     filter_excluded: tuple[str, ...] = field(default_factory=tuple)
     # diff 모드에서 patch 가 누락돼 리뷰 대상에서 제외된 파일 (rename/delete/binary/거대 diff).

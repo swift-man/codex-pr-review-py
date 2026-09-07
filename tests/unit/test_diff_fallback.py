@@ -874,6 +874,45 @@ async def test_use_case_filters_diff_fallback_to_reviewable_changed_files() -> N
     assert set(engine.seen_prs[0].diff_right_lines) == {"Sources/App.swift"}
 
 
+async def test_use_case_recovers_oversized_tests_without_reintroducing_policy_exclusions(
+    tmp_path: Path,
+) -> None:
+    from codex_review.domain import ReviewPathFilter
+    from codex_review.infrastructure.file_dump_collector import _build_dump_sync
+
+    test_path = "Tests/WorkflowTests.swift"
+    (tmp_path / "Tests").mkdir()
+    (tmp_path / test_path).write_text("// existing tests\n" * 15_000, encoding="utf-8")
+    (tmp_path / "app.swift").write_text("let x = 1\n", encoding="utf-8")
+    (tmp_path / "logo.png").write_bytes(b"image")
+    changed = ("app.swift", test_path, "logo.png")
+    patches = dict.fromkeys(changed, "@@ -1 +1,2 @@\n context\n+new regression test\n")
+    full_dump = _build_dump_sync(
+        tmp_path, list(changed), changed, set(changed), TokenBudget(1_000_000),
+        204_800, 20_000, ReviewPathFilter.allow_all(),
+    )
+    github = _CapturingGitHub()
+    uc, engine = _use_case(
+        github, full_dump, ReviewResult(summary="OK", event=ReviewEvent.APPROVE),
+        max_tokens=100_000,
+    )
+
+    await uc.execute(_pr(changed=changed, patches=patches))
+
+    assert engine.seen_dumps[0].mode == DUMP_MODE_DIFF
+    assert tuple(e.path for e in engine.seen_dumps[0].entries) == ("app.swift", test_path)
+    assert test_path not in full_dump.filter_excluded
+    assert "logo.png" in full_dump.filter_excluded
+    reviewed_pr, reviewed_dump = engine.seen_prs[0], engine.seen_dumps[0]
+    prompt = build_prompt(reviewed_pr, reviewed_dump)
+    assert reviewed_pr.policy_excluded_files == ("logo.png",)
+    assert "PR 변경 파일 총 3건" in prompt
+    assert "'Tests/WorkflowTests.swift': included" in prompt
+    assert "'logo.png': policy-excluded" in prompt
+    assert "=== PATCH: logo.png ===" not in prompt
+    assert "PR 변경 파일 총 3건, 정책상 제외 1건" in github.posted_reviews[0][1].summary
+
+
 async def test_use_case_still_falls_back_when_source_change_was_budget_trimmed() -> None:
     """대조군: 같은 시나리오라도 변경 파일이 **예산 컷** 으로 빠진 경우는 fallback 성공."""
     github = _CapturingGitHub()

@@ -1,3 +1,7 @@
+from dataclasses import replace
+
+import pytest
+
 from codex_review.domain import FileDump, FileEntry, PullRequest, RepoRef
 from codex_review.infrastructure.codex_prompt import build_prompt
 
@@ -34,6 +38,33 @@ def test_prompt_contains_four_section_schema_and_korean_rule() -> None:
     assert "--- FILE: src/a.py [CHANGED] ---" in prompt
     assert "    1| x=1" in prompt
     assert "    2| y=2" in prompt
+
+
+@pytest.mark.parametrize("mode", ["full", "diff"])
+def test_inventory_distinguishes_absent_input_from_absent_tests(mode: str) -> None:
+    pr = replace(
+        _pr(),
+        changed_files=("src/a.py", "tests/budget.py", "tests/missing.py", "tests/unread.py"),
+        policy_excluded_files=("assets/icon.png",),
+    )
+    dump = FileDump(
+        entries=(FileEntry("src/a.py", "source", 6, True),),
+        total_chars=6,
+        excluded=("tests/budget.py", "tests/missing.py"),
+        patch_missing=("tests/missing.py",),
+        mode=mode,
+    )
+
+    prompt = build_prompt(pr, dump)
+
+    assert "PR 변경 파일 총 5건" in prompt
+    assert "'src/a.py': included" in prompt
+    assert "'tests/budget.py': size-or-budget-excluded" in prompt
+    assert "'tests/missing.py': patch-missing" in prompt
+    assert "'tests/unread.py': not-provided" in prompt
+    assert "'assets/icon.png': policy-excluded" in prompt
+    assert "전달되지 않은 테스트를 '테스트 없음/추가되지 않음'으로 단정하지 마라" in prompt
+    assert "파일명/PR 설명만으로 커버리지를 입증하거나 부정하지 마라" in prompt
 
 
 def test_prompt_requires_line_numbers_and_severity_for_comments() -> None:

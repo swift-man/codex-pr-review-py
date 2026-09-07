@@ -58,6 +58,28 @@ async def test_collect_filters_skip_dirs_and_binaries(repo: Path) -> None:
     assert "logo.png" not in paths
 
 
+async def test_large_changed_file_is_budget_limited_unless_explicitly_excluded(repo: Path) -> None:
+    path = "tests/large.py"
+    (repo / "tests").mkdir()
+    (repo / path).write_text("# test\n" * 1_000, encoding="utf-8")
+    _git(repo, "add", path)
+    collector = FileDumpCollector(file_max_bytes=1024)
+
+    dump = await collector.collect(repo, (path,), TokenBudget(100_000))
+
+    assert dump.exceeded_budget
+    assert path in dump.budget_trimmed
+    assert path not in dump.filter_excluded
+
+    (repo / ".reviewbot.yml").write_text(
+        'version: 1\nreview:\n  exclude:\n    - "tests/**"\n', encoding="utf-8",
+    )
+    dump = await collector.collect(repo, (path,), TokenBudget(100_000))
+    assert path in dump.filter_excluded
+    assert path not in dump.budget_trimmed
+    assert not dump.exceeded_budget
+
+
 async def test_collect_applies_reviewbot_config_scope(repo: Path) -> None:
     (repo / ".reviewbot.yml").write_text(
         """

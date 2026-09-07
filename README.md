@@ -61,6 +61,16 @@ Control API나 `8022` 포트를 admin 공개 경로로 프록시하지 마세요
 
 ### 리뷰 처리 흐름
 
+단일 파일이 `FILE_MAX_BYTES` 또는 `DATA_FILE_MAX_BYTES`를 넘으면 전체 파일 대신
+PR의 unified patch로 리뷰를 재시도합니다. 대형 테스트 파일도 작은 변경분은 검토할 수
+있으며, `.reviewbot.yml`의 경로 제외·바이너리·생성물 제외 규칙은 재시도에서도 유지합니다.
+patch가 없거나 변경분도 예산을 넘으면 해당 파일을 읽지 못했다는 사실을 표시합니다.
+
+full/diff 프롬프트에는 PR의 전체 변경 파일 수와 각 파일의 전달·정책 제외·크기/예산 제외·
+patch 누락 상태가 포함됩니다. 정책 제외 파일은 이름만 기록하며 본문은 전달하지 않습니다.
+모델에는 읽지 못한 테스트를 “없음”으로 단정하지 말고 검증 불가로 구분하도록 지시합니다.
+이는 판단 근거를 명확히 하는 장치이며 모델 오탐을 완전히 차단한다는 보장은 아닙니다.
+
 ```
 GitHub PR event
   → FastAPI /github/webhook (HMAC 검증, 게시자 확인, 정상 시 202 즉시 응답)
@@ -156,7 +166,7 @@ REPO_FULL_NAME=owner/repo PR_NUMBER=1 INSTALLATION_ID=1234567 \
 | `REPO_CACHE_DIR` | `~/.codex-review/repos` | clone 캐시 위치 |
 | `GIT_TIMEOUT_SEC` | `120` | git clone/fetch/checkout/ls-files 호출 타임아웃 |
 | `FILE_MAX_BYTES` | `204800` | 단일 파일 크기 상한 |
-| `DATA_FILE_MAX_BYTES` | `20000` | JSON/YAML/XML 등 모호한 확장자의 별도 상한. `package.json`·`tsconfig.json`·`pyproject.toml` 같은 화이트리스트 매니페스트는 두 파일 크기 제한 모두 면제. 단 전체 컨텍스트 예산(`CODEX_MAX_INPUT_TOKENS`) 초과 시에는 우선순위에 따라 제외될 수 있음. |
+| `DATA_FILE_MAX_BYTES` | `20000` | JSON/YAML/XML 등 모호한 확장자의 별도 상한. `package.json`·`tsconfig.json`·`pyproject.toml` 같은 화이트리스트 매니페스트는 두 설정 한도는 면제하지만 절대 읽기 상한 5 MiB는 적용. `always_review`에도 동일하게 적용하며 초과 파일은 diff 재시도 대상으로 유지. 전체 컨텍스트 예산(`CODEX_MAX_INPUT_TOKENS`) 초과 시에는 우선순위에 따라 제외될 수 있음. |
 | `HOST` / `PORT` | `127.0.0.1` / `8000` | 바인딩 주소 |
 | `REVIEW_CONCURRENCY` | `1` | 동시 실행 리뷰 개수. `1`=직렬, `2~`=병렬. Codex 쿼터와 맞춰 조절 |
 | `REVIEW_QUEUE_MAXSIZE` | `(concurrency × 10)` | 웹훅 큐 상한. 가득 차면 503 반환. 비우면 자동 계산 |
