@@ -341,6 +341,35 @@ async def test_review_uses_max_for_reserve_and_supported_xhigh_for_spark(
     assert "model_reasoning_effort=xhigh" in calls[2]
 
 
+async def test_review_records_successful_reserve_model_uses_max(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[Any, ...]] = []
+    stdout = b'{"summary":"ok","event":"COMMENT","comments":[]}\n'
+    _patch_subprocess_sequence(
+        monkeypatch,
+        [
+            _FakeProc(1, stderr=b"Error: primary usage limit reached\n"),
+            _FakeProc(0, stdout=stdout),
+        ],
+        calls,
+    )
+
+    pr, dump = _sample_review_input()
+    eng = CodexCliEngine(
+        binary="codex",
+        model="gpt-6-astra",
+        fallback_models=("gpt-reserve", "gpt-5.3-codex-spark"),
+        reasoning_effort="max",
+    )
+
+    result = await eng.review(pr, dump)
+
+    assert result.model_used == "gpt-reserve"
+    assert result.reasoning_effort_used == "max"
+    assert "model_reasoning_effort=max" in calls[1]
+
+
 async def test_review_records_successful_primary_model_used(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -365,8 +394,7 @@ async def test_review_records_successful_primary_model_used(
     assert result.summary == "ok"
     assert result.model_used == "gpt-5.3-codex-spark"
     assert result.reasoning_effort_used == "xhigh"
-    config_index = calls[0].index("--config")
-    assert calls[0][config_index + 1] == "model_reasoning_effort=xhigh"
+    assert "model_reasoning_effort=xhigh" in calls[0]
 
 
 async def test_review_limits_total_timeout_across_fallbacks(
