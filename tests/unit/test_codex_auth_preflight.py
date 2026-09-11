@@ -318,6 +318,7 @@ async def test_review_uses_max_for_reserve_and_supported_xhigh_for_spark(
         monkeypatch,
         [
             _FakeProc(1, stderr=b"Error: primary usage limit reached\n"),
+            _FakeProc(1, stderr=b"Error: reserve usage limit reached\n"),
             _FakeProc(0, stdout=stdout),
         ],
         calls,
@@ -333,9 +334,10 @@ async def test_review_uses_max_for_reserve_and_supported_xhigh_for_spark(
 
     result = await eng.review(pr, dump)
 
-    assert result.model_used == "gpt-reserve"
-    assert result.reasoning_effort_used == "max"
+    assert result.model_used == "gpt-5.3-codex-spark"
+    assert result.reasoning_effort_used == "xhigh"
     assert "model_reasoning_effort=max" in calls[1]
+    assert "model_reasoning_effort=xhigh" in calls[2]
 
 
 async def test_review_records_successful_primary_model_used(

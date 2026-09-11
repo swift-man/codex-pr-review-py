@@ -192,6 +192,7 @@ def test_legacy_55_primary_gets_compatible_dynamic_budget(
 @pytest.mark.parametrize(
     ("model", "expected_context", "expected_budget"),
     [
+        ("gpt-6-astra", 272_000, 258_400),
         ("gpt-5.6-terra", 272_000, 258_400),
         ("gpt-5.6-luna", 272_000, 258_400),
         ("gpt-reserve", 272_000, 258_400),
