@@ -6,11 +6,13 @@
 """
 
 from pathlib import Path
+from typing import cast
 
 import pytest
 from pydantic import ValidationError
 
 from codex_review.config import Settings
+from codex_review.model_utils import ReasoningEffort, effective_reasoning_effort
 
 _REQUIRED_ENV = {
     "GITHUB_APP_ID": "1",
@@ -403,6 +405,15 @@ def test_extended_reasoning_effort_allows_model_specific_fallback_downgrade(
 ) -> None:
     settings = _settings(monkeypatch, CODEX_REASONING_EFFORT=effort)
     assert settings.codex_reasoning_effort == effort
+    requested = cast(ReasoningEffort, effort)
+    assert tuple(
+        effective_reasoning_effort(model, requested)
+        for model in settings.codex_model_sequence
+    ) == (
+        "max" if effort == "max" else "ultra",
+        "max",
+        "xhigh",
+    )
 
 
 def test_codex_model_fallbacks_are_parsed_and_deduplicated(
