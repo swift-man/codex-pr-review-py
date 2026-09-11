@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from typing import Literal, TypeAlias
 
 ReasoningEffort: TypeAlias = Literal["low", "medium", "high", "xhigh", "max", "ultra"]
-DEFAULT_CODEX_REASONING_EFFORT: ReasoningEffort = "xhigh"
+DEFAULT_CODEX_REASONING_EFFORT: ReasoningEffort = "max"
 
 _STANDARD_REASONING_EFFORTS: frozenset[ReasoningEffort] = frozenset(
     {"low", "medium", "high", "xhigh"}
@@ -14,6 +14,14 @@ _MAX_REASONING_EFFORTS: frozenset[ReasoningEffort] = frozenset(
 _ULTRA_REASONING_EFFORTS: frozenset[ReasoningEffort] = frozenset(
     {"low", "medium", "high", "xhigh", "max", "ultra"}
 )
+_REASONING_EFFORT_RANK: dict[ReasoningEffort, int] = {
+    "low": 0,
+    "medium": 1,
+    "high": 2,
+    "xhigh": 3,
+    "max": 4,
+    "ultra": 5,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +65,21 @@ def incompatible_reasoning_effort_models(
         if (config := _KNOWN_MODELS.get(model)) is not None
         and reasoning_effort not in config.reasoning_efforts
     )
+
+
+def effective_reasoning_effort(model: str, requested: ReasoningEffort) -> ReasoningEffort:
+    """Choose the strongest effort supported by a model without exceeding the request."""
+    config = _KNOWN_MODELS.get(model)
+    if config is None or requested in config.reasoning_efforts:
+        return requested
+
+    requested_rank = _REASONING_EFFORT_RANK[requested]
+    compatible = (
+        effort
+        for effort in config.reasoning_efforts
+        if _REASONING_EFFORT_RANK[effort] <= requested_rank
+    )
+    return max(compatible, key=_REASONING_EFFORT_RANK.__getitem__)
 
 
 def dedupe_models(models: Iterable[str]) -> tuple[str, ...]:

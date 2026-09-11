@@ -76,7 +76,7 @@ def test_defaults_are_all_valid(monkeypatch: pytest.MonkeyPatch) -> None:
         "gpt-5.3-codex-spark",
     )
     assert s.codex_model_label == "gpt-5.6-sol -> gpt-reserve -> gpt-5.3-codex-spark"
-    assert s.codex_reasoning_effort == "xhigh"
+    assert s.codex_reasoning_effort == "max"
     assert s.effective_codex_model_context_window == 872_000
     assert s.review_concurrency == 1
     assert s.codex_timeout_sec == 600
@@ -93,7 +93,7 @@ def test_local_review_env_example_prefers_gpt_56_sol_budget() -> None:
     assert (
         'export CODEX_MODEL_FALLBACKS="gpt-reserve,gpt-5.3-codex-spark"' in text
     )
-    assert 'export CODEX_REASONING_EFFORT="xhigh"' in text
+    assert 'export CODEX_REASONING_EFFORT="max"' in text
     assert 'export CODEX_MODEL_CONTEXT_WINDOW="872000"' in text
     assert 'export CODEX_MAX_INPUT_TOKENS="828400"' in text
 
@@ -395,23 +395,13 @@ def test_unknown_codex_reasoning_effort_is_rejected(
         _settings(monkeypatch, CODEX_REASONING_EFFORT="extreme")
 
 
-@pytest.mark.parametrize(
-    ("effort", "incompatible_models"),
-    [
-        ("max", "gpt-5.3-codex-spark"),
-        ("ultra", "gpt-reserve, gpt-5.3-codex-spark"),
-    ],
-)
-def test_extended_reasoning_effort_rejects_incompatible_default_fallbacks(
+@pytest.mark.parametrize("effort", ["max", "ultra"])
+def test_extended_reasoning_effort_allows_model_specific_fallback_downgrade(
     monkeypatch: pytest.MonkeyPatch,
     effort: str,
-    incompatible_models: str,
 ) -> None:
-    with pytest.raises(
-        ValidationError,
-        match=incompatible_models,
-    ):
-        _settings(monkeypatch, CODEX_REASONING_EFFORT=effort)
+    settings = _settings(monkeypatch, CODEX_REASONING_EFFORT=effort)
+    assert settings.codex_reasoning_effort == effort
 
 
 def test_codex_model_fallbacks_are_parsed_and_deduplicated(

@@ -1,6 +1,10 @@
 import pytest
 
-from codex_review.model_utils import dedupe_models, incompatible_reasoning_effort_models
+from codex_review.model_utils import (
+    dedupe_models,
+    effective_reasoning_effort,
+    incompatible_reasoning_effort_models,
+)
 
 
 def test_dedupe_models_preserves_first_seen_order() -> None:
@@ -36,3 +40,10 @@ def test_incompatible_reasoning_effort_models_checks_known_aliases() -> None:
         ("gpt-reserve", "codex-auto-review"),
         "ultra",
     ) == ("gpt-reserve", "codex-auto-review")
+
+
+def test_effective_reasoning_effort_downgrades_only_unsupported_models() -> None:
+    assert effective_reasoning_effort("gpt-reserve", "max") == "max"
+    assert effective_reasoning_effort("gpt-5.6-luna", "max") == "max"
+    assert effective_reasoning_effort("gpt-5.3-codex-spark", "max") == "xhigh"
+    assert effective_reasoning_effort("gpt-5.3-codex-spark", "ultra") == "xhigh"

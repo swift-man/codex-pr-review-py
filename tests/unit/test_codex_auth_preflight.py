@@ -309,6 +309,35 @@ async def test_review_tries_reserve_then_spark_when_model_limits_are_reached(
     assert all("model_context_window=872000" not in call for call in calls[1:])
 
 
+async def test_review_uses_max_for_reserve_and_supported_xhigh_for_spark(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[Any, ...]] = []
+    stdout = b'{"summary":"ok","event":"COMMENT","comments":[]}\n'
+    _patch_subprocess_sequence(
+        monkeypatch,
+        [
+            _FakeProc(1, stderr=b"Error: primary usage limit reached\n"),
+            _FakeProc(0, stdout=stdout),
+        ],
+        calls,
+    )
+
+    pr, dump = _sample_review_input()
+    eng = CodexCliEngine(
+        binary="codex",
+        model="gpt-6-astra",
+        fallback_models=("gpt-reserve", "gpt-5.3-codex-spark"),
+        reasoning_effort="max",
+    )
+
+    result = await eng.review(pr, dump)
+
+    assert result.model_used == "gpt-reserve"
+    assert result.reasoning_effort_used == "max"
+    assert "model_reasoning_effort=max" in calls[1]
+
+
 async def test_review_records_successful_primary_model_used(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
