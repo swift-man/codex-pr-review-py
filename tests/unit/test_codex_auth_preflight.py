@@ -367,6 +367,7 @@ async def test_review_records_successful_reserve_model_uses_max(
 
     assert result.model_used == "gpt-reserve"
     assert result.reasoning_effort_used == "max"
+    assert "model_reasoning_effort=max" in calls[0]
     assert "model_reasoning_effort=max" in calls[1]
 
 

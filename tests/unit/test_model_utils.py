@@ -30,3 +30,8 @@ def test_effective_reasoning_effort_downgrades_only_unsupported_models() -> None
     assert effective_reasoning_effort("gpt-5.3-codex-spark", "max") == "xhigh"
     assert effective_reasoning_effort("gpt-5.3-codex-spark", "ultra") == "xhigh"
     assert effective_reasoning_effort("custom-review-model", "ultra") == "ultra"
+
+
+@pytest.mark.parametrize("effort", ["low", "medium", "high", "xhigh"])
+def test_effective_reasoning_effort_preserves_supported_values(effort: str) -> None:
+    assert effective_reasoning_effort("gpt-5.3-codex-spark", effort) == effort
