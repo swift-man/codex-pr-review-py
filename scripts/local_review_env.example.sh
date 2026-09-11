@@ -13,7 +13,7 @@ export GITHUB_WEBHOOK_SECRET="change-me-long-random"
 
 # --- Codex CLI ---
 # Available models (queryable via ~/.codex/models_cache.json):
-#   gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, gpt-reserve, gpt-5.5, gpt-5.4,
+#   gpt-6-astra, gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, gpt-reserve, gpt-5.5, gpt-5.4,
 #   gpt-5.4-mini, gpt-5.3-codex-spark, codex-auto-review
 export CODEX_MODEL="gpt-5.6-sol"
 export CODEX_MODEL_FALLBACKS="gpt-reserve,gpt-5.3-codex-spark"

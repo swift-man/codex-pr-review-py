@@ -336,6 +336,7 @@ async def test_review_uses_max_for_reserve_and_supported_xhigh_for_spark(
 
     assert result.model_used == "gpt-5.3-codex-spark"
     assert result.reasoning_effort_used == "xhigh"
+    assert "model_reasoning_effort=max" in calls[0]
     assert "model_reasoning_effort=max" in calls[1]
     assert "model_reasoning_effort=xhigh" in calls[2]
 
