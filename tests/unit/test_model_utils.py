@@ -1,6 +1,9 @@
+from typing import cast
+
 import pytest
 
 from codex_review.model_utils import (
+    ReasoningEffort,
     dedupe_models,
     effective_reasoning_effort,
 )
@@ -34,4 +37,5 @@ def test_effective_reasoning_effort_downgrades_only_unsupported_models() -> None
 
 @pytest.mark.parametrize("effort", ["low", "medium", "high", "xhigh"])
 def test_effective_reasoning_effort_preserves_supported_values(effort: str) -> None:
-    assert effective_reasoning_effort("gpt-5.3-codex-spark", effort) == effort
+    requested = cast(ReasoningEffort, effort)
+    assert effective_reasoning_effort("gpt-5.3-codex-spark", requested) == effort
