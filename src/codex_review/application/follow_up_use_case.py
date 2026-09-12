@@ -191,10 +191,8 @@ class FollowUpReviewUseCase:
             return False
         if thread.has_followup_marker:
             return False
-        if thread.line is None:
-            # GitHub 가 outdated 처리해 line 이 끊긴 스레드 — 별도 follow-up 의미 X.
-            return False
-        return True
+        # GitHub 가 outdated 처리해 line 이 끊긴 스레드 — 별도 follow-up 의미 X.
+        return thread.line is not None
 
 
 # ---------------------------------------------------------------------------

@@ -48,7 +48,6 @@ def test_external_mutation_does_not_leak_into_pull_request() -> None:
 def test_already_proxied_mapping_is_not_rewrapped() -> None:
     """이미 MappingProxyType 이면 추가 복사 없이 그대로 재사용 (불필요한 할당 방지)."""
     proxy = MappingProxyType({"a.py": frozenset({1})})
-    pr = _pr()
     # 직접 필드를 수동 세팅한 시뮬레이션은 __post_init__ 경로를 우회하므로
     # 여기서는 "입력이 MappingProxy 일 때도 동일 객체가 유지되는가" 를 간접 검증한다.
     # 단 default 래핑 이후 재할당은 frozen 특성상 불가하므로, 생성 시 주입 경로로 확인.

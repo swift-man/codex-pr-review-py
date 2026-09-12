@@ -1,4 +1,3 @@
-from collections.abc import AsyncIterator
 from contextlib import AbstractAsyncContextManager
 from pathlib import Path
 from typing import Protocol

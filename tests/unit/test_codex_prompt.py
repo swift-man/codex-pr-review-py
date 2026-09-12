@@ -1,8 +1,16 @@
 from dataclasses import replace
+from datetime import datetime
 
 import pytest
 
-from codex_review.domain import FileDump, FileEntry, PullRequest, RepoRef
+from codex_review.domain import (
+    FileDump,
+    FileEntry,
+    PullRequest,
+    RepoRef,
+    ReviewComment,
+    ReviewHistory,
+)
 from codex_review.infrastructure.codex_prompt import build_prompt
 
 
@@ -141,11 +149,6 @@ def test_prompt_mentions_exclusions_when_budget_truncated() -> None:
 # ---------------------------------------------------------------------------
 # REVIEW HISTORY 섹션 — 이전 라운드 코멘트 / 다른 봇 의견 노출
 # ---------------------------------------------------------------------------
-
-
-from datetime import datetime
-
-from codex_review.domain import ReviewComment, ReviewHistory
 
 
 def test_prompt_omits_history_section_when_empty() -> None:

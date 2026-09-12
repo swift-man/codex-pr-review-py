@@ -2,7 +2,8 @@ from dataclasses import dataclass
 from enum import Enum
 
 
-class ReviewEvent(str, Enum):
+# Keep the public str(member) representation (ReviewEvent.COMMENT), unlike StrEnum.
+class ReviewEvent(str, Enum):  # noqa: UP042
     COMMENT = "COMMENT"
     REQUEST_CHANGES = "REQUEST_CHANGES"
     APPROVE = "APPROVE"
@@ -11,7 +12,8 @@ class ReviewEvent(str, Enum):
 # 라인 고정 기술 단위 코멘트의 4단계 등급.
 #
 #   Critical   장애 가능성·데이터 손실·보안 취약점·크래시 — "반드시 막아야 할 문제"
-#   Major      버그 가능성·예외 처리 누락·상태 불일치·동시성 문제·큰 테스트 누락 — "머지 전에 고치는 게 좋은 문제"
+#   Major      버그 가능성·예외 처리 누락·상태 불일치·동시성 문제·큰 테스트 누락
+#              — "머지 전에 고치는 게 좋은 문제"
 #   Minor      가독성·중복 코드·네이밍·구조 개선 — "당장 큰 문제는 아니지만 개선 가치 있음"
 #   Suggestion 대안 제안·취향 차이·리팩터링 아이디어 — "선택 제안"
 #

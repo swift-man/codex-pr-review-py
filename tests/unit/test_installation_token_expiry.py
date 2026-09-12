@@ -12,7 +12,7 @@ import os
 import time
 from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import AsyncExitStack
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import httpx
 import jwt
@@ -94,7 +94,7 @@ async def test_expires_at_parsed_as_utc_regardless_of_local_tz(
 ) -> None:
     """로컬 TZ 를 어떤 값으로 바꿔도 동일한 UTC 문자열은 동일한 epoch 로 변환돼야 한다."""
     iso = "2026-04-22T00:00:00Z"
-    expected_epoch = datetime(2026, 4, 22, 0, 0, 0, tzinfo=timezone.utc).timestamp()
+    expected_epoch = datetime(2026, 4, 22, 0, 0, 0, tzinfo=UTC).timestamp()
 
     for tz in ("UTC", "Asia/Seoul", "America/Los_Angeles"):
         tz_sandbox(tz)
