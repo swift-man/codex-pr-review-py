@@ -17,6 +17,7 @@ from codex_review.infrastructure.codex_cli_engine import (
     CodexCliEngine,
 )
 from codex_review.interfaces import ReviewEngineError
+from codex_review.model_utils import ReasoningEffort
 
 
 class _FakeProc:
@@ -309,8 +310,12 @@ async def test_review_tries_reserve_then_spark_when_model_limits_are_reached(
     assert all("model_context_window=872000" not in call for call in calls[1:])
 
 
+@pytest.mark.parametrize("primary_effort", ["max", "xhigh"])
+@pytest.mark.parametrize("fallback_model", ["gpt-reserve", "gpt-5.6-luna"])
 async def test_review_uses_max_for_reserve_and_supported_xhigh_for_spark(
     monkeypatch: pytest.MonkeyPatch,
+    primary_effort: ReasoningEffort,
+    fallback_model: str,
 ) -> None:
     calls: list[tuple[Any, ...]] = []
     stdout = b'{"summary":"ok","event":"COMMENT","comments":[]}\n'
@@ -328,15 +333,17 @@ async def test_review_uses_max_for_reserve_and_supported_xhigh_for_spark(
     eng = CodexCliEngine(
         binary="codex",
         model="gpt-6-astra",
-        fallback_models=("gpt-reserve", "gpt-5.3-codex-spark"),
-        reasoning_effort="max",
+        fallback_models=(fallback_model, "gpt-5.3-codex-spark"),
+        reasoning_effort=primary_effort,
+        fallback_reasoning_effort="max",
     )
 
     result = await eng.review(pr, dump)
 
     assert result.model_used == "gpt-5.3-codex-spark"
     assert result.reasoning_effort_used == "xhigh"
-    assert "model_reasoning_effort=max" in calls[0]
+    assert f"model_reasoning_effort={primary_effort}" in calls[0]
+    assert fallback_model in calls[1]
     assert "model_reasoning_effort=max" in calls[1]
     assert "model_reasoning_effort=xhigh" in calls[2]
 

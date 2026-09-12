@@ -44,12 +44,14 @@ class CodexCliEngine:
         reasoning_effort: ReasoningEffort = DEFAULT_CODEX_REASONING_EFFORT,
         primary_context_window: int | None = None,
         timeout_sec: int = 600,
+        fallback_reasoning_effort: ReasoningEffort | None = None,
     ) -> None:
         if primary_context_window is not None and primary_context_window <= 0:
             raise ValueError("primary_context_window must be positive")
         self._binary = binary
         self._models = dedupe_models((model, *fallback_models))
         self._reasoning_effort = reasoning_effort
+        self._fallback_reasoning_effort = fallback_reasoning_effort or reasoning_effort
         self._primary_context_window = primary_context_window
         self._timeout_sec = timeout_sec
 
@@ -164,7 +166,12 @@ class CodexCliEngine:
         model: str,
         timeout_sec: float,
     ) -> ReviewResult:
-        model_reasoning_effort = effective_reasoning_effort(model, self._reasoning_effort)
+        requested_effort = (
+            self._reasoning_effort
+            if model == self._models[0]
+            else self._fallback_reasoning_effort
+        )
+        model_reasoning_effort = effective_reasoning_effort(model, requested_effort)
         # "-" positional 은 codex exec 에 stdin 에서 프롬프트를 읽으라는 지시.
         # argv 로 넘기면 전체 레포 덤프가 ARG_MAX 를 초과할 수 있어 stdin 이 안전.
         logger.info(

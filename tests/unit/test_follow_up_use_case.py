@@ -20,7 +20,6 @@ from pathlib import Path
 from codex_review.application.follow_up_use_case import FollowUpReviewUseCase
 from codex_review.domain import PullRequest, RepoRef, ReviewThread
 
-
 BOT_LOGIN = "codex-review-bot[bot]"
 
 

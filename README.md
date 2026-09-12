@@ -33,6 +33,10 @@ GitHub webhook, 프록시, Claude control secret과 재사용하지 마세요. �
 - `/internal/control/status`, `/drain`, `/resume`, `/commit-restart`는 실제 loopback peer와
   `X-Gorani-Bot-Control-Secret`이 모두 맞아야 접근할 수 있습니다. Secret 미설정은
   접근 거부이며 `--no-proxy-headers`로 전달 헤더의 loopback 위장을 차단합니다.
+  Status의 `fallbackReasoningEffort`는 저장된 fallback 요청 강도이며, `null`이면
+  primary의 `reasoningEffort`를 상속합니다. `fallbackReasoningEfforts`는 primary를
+  제외한 각 fallback 모델의 지원 범위로 조정한 실행 강도입니다. 이 필드를 제공하는
+  봇을 먼저 배포해야 admin에서 재시동 후 fallback 강도까지 검증할 수 있습니다.
 - Drain은 작업 ID별 배타 lease로 신규 리뷰를 차단하고 이미 받은 큐와 실행 작업을
   최대 60초 기다립니다. 종료 인계 확정 전에는 타임아웃·고아 lease 만료로 intake를 재개합니다.
   이 구간의 새 delivery는 `503`이므로 GitHub에서 실패 delivery를 확인·재전송하세요.
@@ -159,6 +163,7 @@ REPO_FULL_NAME=owner/repo PR_NUMBER=1 INSTALLATION_ID=1234567 \
 | `GITHUB_WEBHOOK_SECRET` | — | HMAC 서명 검증용 비밀 (필수) |
 | `CODEX_BIN` | `codex` | Codex CLI 실행 파일 |
 | `CODEX_MODEL` | `gpt-5.6-sol` | 1순위 리뷰 모델 |
+| `CODEX_FALLBACK_REASONING_EFFORT` | `(1순위 강도 사용)` | fallback 전용 요청 강도. Astra `xhigh`, Reserve/Luna `max` 구성은 `CODEX_REASONING_EFFORT=xhigh`, 이 값을 `max`로 지정. Spark는 지원 상한 `xhigh`로 조정됩니다. |
 | `CODEX_MODEL_FALLBACKS` | `gpt-reserve,gpt-5.3-codex-spark` | 쉼표로 구분한 fallback 모델 목록. 기본 순서는 Sol `max` → Reserve `max` → Spark `xhigh`. 비우면 fallback 없이 `CODEX_MODEL`만 사용 |
 | `CODEX_REASONING_EFFORT` | `max` | 요청 강도. 모델별로 요청값 이하의 최고 지원 강도를 사용합니다. 기본 fallback에서는 Reserve가 `max`, Spark가 `xhigh`로 실행됩니다. |
 | `CODEX_MODEL_CONTEXT_WINDOW` | `(모델별 자동)` | 1순위 모델에 전달할 Codex CLI `model_context_window`. 기본 Sol은 확장 `872000`; 다른 내장 모델은 CLI 기본값. 명시값은 모델별 카탈로그 최대값 이하로 제한 |

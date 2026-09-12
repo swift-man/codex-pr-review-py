@@ -72,6 +72,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 model=settings.codex_model,
                 fallback_models=settings.codex_model_fallbacks,
                 reasoning_effort=settings.codex_reasoning_effort,
+                fallback_reasoning_effort=settings.codex_fallback_reasoning_effort,
                 primary_context_window=settings.effective_codex_model_context_window,
                 timeout_sec=settings.codex_timeout_sec,
             )

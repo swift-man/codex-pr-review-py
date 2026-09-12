@@ -220,10 +220,7 @@ def test_redacts_dict_inside_tuple_args() -> None:
     _RedactFilter().filter(record)
     # args 가 dict 로 unwrap 됐든, (dict,) tuple 로 유지됐든 어느 경로든 leak 없어야 함.
     # 두 경우 모두 검증 — 안쪽 dict 의 값에 토큰 흔적이 없어야 함.
-    if isinstance(record.args, tuple):
-        inner = record.args[0]
-    else:
-        inner = record.args
+    inner = record.args[0] if isinstance(record.args, tuple) else record.args
     assert isinstance(inner, dict)
     assert "ghs_LEAK" not in inner["detail"]
     assert "authorization=***" in inner["detail"]

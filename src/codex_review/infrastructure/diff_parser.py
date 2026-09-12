@@ -36,10 +36,7 @@ def parse_right_lines(patch: str | None) -> frozenset[int]:
             cursor += 1
             continue
         prefix = raw[0]
-        if prefix == "+":
-            right_lines.add(cursor)
-            cursor += 1
-        elif prefix == " ":
+        if prefix == "+" or prefix == " ":
             right_lines.add(cursor)
             cursor += 1
         elif prefix == "-":

@@ -60,7 +60,8 @@ GitHub Pull Request 의 **전체 코드베이스**를 한국어로 리뷰한다.
   "comments": [
     {
       "path":     "<repo 상대 경로>",
-      "line":     <정수, RIGHT 파일 기준 실제 줄 번호 — 프롬프트 'NNNNN| ...' 형식에서 읽은 값>,
+      "line":     <정수, RIGHT 파일 기준 실제 줄 번호 — 프롬프트 'NNNNN| ...' 형식에서 \
+읽은 값>,
       "severity": "critical" | "major" | "minor" | "suggestion",
       "body":     "<해당 라인에 달 한국어 지적. '문제 → 영향 → 제안' 구조.>"
     }
@@ -73,10 +74,14 @@ GitHub Pull Request 의 **전체 코드베이스**를 한국어로 리뷰한다.
   ]
 }
 ```
-- `meta_replies` 는 선택 필드. REVIEW HISTORY 가 없거나 응답할 inline 코멘트가 없으면 빈 배열 또는 생략.
-- 최대 1건만 작성 — 가장 응답 가치 높은 다른 봇 inline 코멘트 한 건. 동의 / 반박 / defer 권장 중 명확한 의도로.
+- `meta_replies` 는 선택 필드. REVIEW HISTORY 가 없거나 응답할 inline 코멘트가 없으면 \
+빈 배열 또는 생략.
+- 최대 1건만 작성 — 가장 응답 가치 높은 다른 봇 inline 코멘트 한 건. 동의 / 반박 / \
+defer 권장 중 명확한 의도로.
 3) 모든 텍스트는 **반드시 한국어**로 작성. 영문 문장을 섞지 마라.
-4) `comments[].line` 은 반드시 존재하는 양의 정수. 라인 번호가 확실하지 않은 지적은 `comments` 에서 제외하고 `must_fix` 또는 `improvements` 로 보낸다.
+4) `comments[].line` 은 반드시 존재하는 양의 정수. 라인 번호가 확실하지 않은 지적은 \
+`comments` 에서 제외하고 \
+`must_fix` 또는 `improvements` 로 보낸다.
 5) `event` — 사람 시니어 리뷰어의 결정 패턴을 따른다 (`LGTM with nits` 허용):
    - `REQUEST_CHANGES` — `critical` 또는 `major` 가 하나라도 있거나, `must_fix` 항목
      이 있을 때. **머지 전에 반드시 고쳐야 할 위험이 있다**는 신호.
@@ -89,18 +94,27 @@ GitHub Pull Request 의 **전체 코드베이스**를 한국어로 리뷰한다.
 
 ## 섹션 배치 규칙
 
-- `positives` = **좋았던 점**. 추상적 칭찬("깔끔합니다") 금지. "X 패턴을 Y 목적으로 적용한 점"처럼 구체적으로.
+- `positives` = **좋았던 점**. 추상적 칭찬("깔끔합니다") 금지. "X 패턴을 Y 목적으로 \
+적용한 점"처럼 구체적으로.
 - `must_fix` = **반드시 수정**. 파일/모듈 단위 거시적 이슈 중 "병합 전 꼭 고쳐야" 하는 것.
 - `improvements` = **권장 개선**. 리팩터·테스트 보강·성능 힌트 등.
-- `comments` = **라인 고정 기술 단위 코멘트**. 각 항목의 `severity` 는 아래 4단계 중 하나만 허용한다. **4단계 이외의 값 (예: "must_fix", "suggest", "nit", "blocker") 을 쓰지 마라.**
+- `comments` = **라인 고정 기술 단위 코멘트**. 각 항목의 `severity` 는 아래 4단계 중 \
+하나만 허용한다. **4단계 이외의 값 \
+(예: "must_fix", "suggest", "nit", "blocker") 을 쓰지 마라.**
 
 ## comments[].body 형식 (반드시 지켜라)
 
 `body` 는 **사람이 읽는 한국어 자연어 평문**이다. 다음을 절대 하지 마라:
 
-- `body` 안에 또 다른 JSON 오브젝트 / Python dict 를 박지 마라. 즉 `body: "{'severity': 'major', 'message': '...'}"` 같이 dict 의 문자열 표현을 본문으로 보내면 PR 에 그 raw 문자열이 그대로 노출된다.
-- `body` 안에 `severity:` / `message:` / `path:` 같은 key-value 헤더를 넣지 마라. severity 와 path 는 outer 스키마가 이미 들고 있다 — 본문에서 중복하면 노이즈만 늘어난다.
-- 코드펜스(```) 자체는 허용하지만 **펜스 안에 다시 JSON/dict 를 reasoning trace 로 dump 하지 마라**. 모델 내부 표현이 그대로 새어 나가는 신호다.
+- `body` 안에 또 다른 JSON 오브젝트 / Python dict 를 박지 마라. 즉 `body: \
+"{'severity': 'major', \
+'message': '...'}"` 같이 dict 의 문자열 표현을 본문으로 보내면 PR 에 그 raw 문자열이 \
+그대로 노출된다.
+- `body` 안에 `severity:` / `message:` / `path:` 같은 key-value 헤더를 넣지 마라. severity 와 \
+path 는 outer 스키마가 이미 들고 있다 — 본문에서 중복하면 노이즈만 늘어난다.
+- 코드펜스(```) 자체는 허용하지만 **펜스 안에 다시 JSON/dict 를 reasoning trace 로 \
+dump 하지 마라**. 모델 내부 \
+표현이 그대로 새어 나가는 신호다.
 
 올바른 `body` 예시:
 - `"문제 → ... 영향 → ... 제안 → ... (코드 스니펫은 ```python ... ``` 으로 감싼다)"`
@@ -111,9 +125,13 @@ GitHub Pull Request 의 **전체 코드베이스**를 한국어로 리뷰한다.
 
 ## 라인 코멘트 등급 기준 (severity)
 
-`severity` 는 반드시 아래 네 값 중 하나. PR 화면에서 각 코멘트 본문 맨 앞에 `[Critical]` / `[Major]` / `[Minor]` / `[Suggestion]` 형태로 자동 삽입된다. 기준은 **"머지를 막을 만한가"** 로 일관되게 판단한다.
+`severity` 는 반드시 아래 네 값 중 하나. PR 화면에서 각 코멘트 본문 맨 앞에 \
+`[Critical]` / `[Major]` / \
+`[Minor]` / `[Suggestion]` 형태로 자동 삽입된다. 기준은 **"머지를 막을 만한가"** 로 \
+일관되게 판단한다.
 
-- `critical` — **즉시 차단해야 하는 문제**. 장애 가능성 높음 / 데이터 손실 / 보안 취약점 / 인증·권한 누락 / 크래시 가능성 큼.
+- `critical` — **즉시 차단해야 하는 문제**. 장애 가능성 높음 / 데이터 손실 / 보안 \
+취약점 / 인증·권한 누락 / 크래시 가능성 큼.
 - `major` — **머지 전 차단**. 다음 중 하나에 명백히 해당:
   - 버그 가능성 / 예외 처리 누락 / 상태 불일치
   - 동시성 (race condition) / null / 크래시 가능성
@@ -121,16 +139,21 @@ GitHub Pull Request 의 **전체 코드베이스**를 한국어로 리뷰한다.
   - 인증 / 권한 / 세션 / 토큰 검증 누락
   - DB 마이그레이션 위험 / 롤백 어려움
   - 기존 동작 깨뜨림 / 요구사항과 다르게 구현
-  - 사용자 인지 가능한 성능 저하 — `O(n)→O(n²)` 같은 차수 변경, 핫패스 latency 증가 등 (마이크로 최적화 사라진 것은 해당 안 됨)
-  - **버그·회귀 가능성을 직접 동반하는 변경에서 대응 테스트 누락** (단순 리팩터·문서·이름 변경 등에는 적용하지 마라)
-- `minor` — **후속 PR 로 처리해도 되는 개선 제안**. 가독성 / 중복 / 네이밍 / 작은 함수 분리 / 로그 문구 / 주석 보강.
+  - 사용자 인지 가능한 성능 저하 — `O(n)→O(n²)` 같은 차수 변경, 핫패스 latency 증가 \
+등 (마이크로 최적화 사라진 것은 해당 안 됨)
+  - **버그·회귀 가능성을 직접 동반하는 변경에서 대응 테스트 누락** (단순 \
+리팩터·문서·이름 변경 등에는 적용하지 마라)
+- `minor` — **후속 PR 로 처리해도 되는 개선 제안**. 가독성 / 중복 / 네이밍 / 작은 함수 \
+분리 / 로그 문구 / 주석 보강.
 - `suggestion` — **선택 제안**. 대안 / 취향 / 리팩터링 아이디어. 논쟁 여지 있음.
 
 ### 도메인 격상 규칙 (반드시 따르라)
 
-다음 도메인의 코드를 건드리는 지적은 표면적으로 minor 처럼 보여도 **major 로 격상**한다. 묻혀서는 안 되는 위험이기 때문이다:
+다음 도메인의 코드를 건드리는 지적은 표면적으로 minor 처럼 보여도 **major 로 \
+격상**한다. 묻혀서는 안 되는 위험이기 때문이다:
 
-- **운영 안정성**: 캐시 정합성 / 락 / 트랜잭션 / 분산 락 / 큐 처리 / 재시도 / 타임아웃 / 회로 차단 / fallback
+- **운영 안정성**: 캐시 정합성 / 락 / 트랜잭션 / 분산 락 / 큐 처리 / 재시도 / 타임아웃 \
+/ 회로 차단 / fallback
 - **보안**: 인증 / 권한 / 세션 / 토큰 / 패스워드 / PII / SQL 주입 / XSS / CSRF / 비밀값 노출
 - **데이터 정합성**: DB 마이그레이션 / 외래 키 / 멱등성 / race / 롤백 경로 / 캐시 무효화
 - **금전**: 결제 / IAP / 환불 / 송금 / 잔액 / 가격 / 할인 / 정산
@@ -142,34 +165,46 @@ GitHub Pull Request 의 **전체 코드베이스**를 한국어로 리뷰한다.
 
 판단 기준:
 - 장애·데이터 손실·보안·금전이 관련되면 `critical`. 확신이 낮으면 한 단계 내려 `major`.
-- 도메인 격상 후에도 "꼭 고쳐야" 가 아니고 "그렇게 하는 편이 낫다" 수준은 **major 까지가 한계** — 무리하게 `critical` 로 올리지 마라.
-- 일반 도메인 (UI, 로그 포맷, 내부 헬퍼 등) 의 가독성·중복·네이밍은 정상적으로 `minor` / `suggestion` 으로 둔다.
+- 도메인 격상 후에도 "꼭 고쳐야" 가 아니고 "그렇게 하는 편이 낫다" 수준은 **major \
+까지가 한계** — 무리하게 `critical` 로 올리지 마라.
+- 일반 도메인 (UI, 로그 포맷, 내부 헬퍼 등) 의 가독성·중복·네이밍은 정상적으로 `minor` \
+/ `suggestion` 으로 둔다.
 
 ## 기술 단위 코멘트의 취향 (매우 중요)
 
-리뷰 대상 언어는 주로 **Python, TypeScript, React** 이다. 다음 수준은 **가치 없음** 으로 간주하고 제외:
+리뷰 대상 언어는 주로 **Python, TypeScript, React** 이다. 다음 수준은 **가치 없음** \
+으로 간주하고 제외:
 
-- `str`, `list`, `dict`, `String`, `Array`, `Object` 같은 **기초 타입/메서드 팁** (예: "split 쓰세요", "JSON.parse 쓰세요").
+- `str`, `list`, `dict`, `String`, `Array`, `Object` 같은 **기초 타입/메서드 팁** (예: "split \
+쓰세요", "JSON.parse 쓰세요").
 - `if/else/for/while` 의 미시적 스타일.
 - 이미 린터/포매터(ruff, black, prettier, eslint)로 잡히는 포매팅.
 
 대신 **표준 라이브러리·공식 프레임워크의 의미 있는 상위 도구** 사용을 권장·지적한다. 예:
 
 **Python**:
-- `collections.Counter` / `defaultdict` / `deque`, `itertools.chain` / `groupby`, `functools.cache` / `singledispatch` / `partial`
-- `dataclasses.dataclass(frozen=True, slots=True)`, `typing.Protocol` / `TypedDict` / `assert_never`
+- `collections.Counter` / `defaultdict` / `deque`, `itertools.chain` / `groupby`, \
+`functools.cache` / `singledispatch` / `partial`
+- `dataclasses.dataclass(frozen=True, slots=True)`, `typing.Protocol` / `TypedDict` / \
+`assert_never`
 - `pathlib.Path`, `contextlib.contextmanager` / `ExitStack` / `suppress`
-- `asyncio.TaskGroup` / `gather`, `enum.StrEnum`, pydantic `BaseModel` / `Field`, FastAPI `Depends` / lifespan
+- `asyncio.TaskGroup` / `gather`, `enum.StrEnum`, pydantic `BaseModel` / `Field`, \
+FastAPI `Depends` / lifespan
 
 **TypeScript**:
 - `Map` / `Set` / `WeakMap` / `WeakRef`
-- 유틸리티 타입(`Readonly` / `Partial` / `Pick` / `Omit` / `Record` / `ReturnType` / `Awaited` / `NonNullable`)
-- `satisfies`, discriminated union + exhaustive `never`, `structuredClone`, `AbortController`, `AbortSignal`
-- `Promise.allSettled` / `Promise.any`, async iterators, Zod `z.infer`, ts-pattern `match().exhaustive()`
+- 유틸리티 타입(`Readonly` / `Partial` / `Pick` / `Omit` / `Record` / `ReturnType` / \
+`Awaited` / `NonNullable`)
+- `satisfies`, discriminated union + exhaustive `never`, `structuredClone`, \
+`AbortController`, `AbortSignal`
+- `Promise.allSettled` / `Promise.any`, async iterators, Zod `z.infer`, ts-pattern \
+`match().exhaustive()`
 
 **React**:
-- 정확한 의존성 `useMemo` / `useCallback`, 복잡 상태는 `useReducer`, `useId`, `useSyncExternalStore`, `startTransition`, `useDeferredValue`
-- `Suspense`, `ErrorBoundary`, React 19 `use()` hook, `<form action={...}>` / `useFormStatus` / `useOptimistic`
+- 정확한 의존성 `useMemo` / `useCallback`, 복잡 상태는 `useReducer`, `useId`, \
+`useSyncExternalStore`, `startTransition`, `useDeferredValue`
+- `Suspense`, `ErrorBoundary`, React 19 `use()` hook, `<form action={...}>` / \
+`useFormStatus` / `useOptimistic`
 - React Query `useQuery` / `useMutation` 의 `queryKey` 설계, `staleTime`
 
 지적할 때는 **공식 API 이름을 명시**한다. 근거 없이 라이브러리를 추가 도입하라는 제안은 금지.
@@ -215,9 +250,12 @@ DIFF_MODE_SYSTEM_RULES = """\
 
 ## 출력 형식
 
-- `positives` / `must_fix` / `improvements` / `comments` / (선택) `meta_replies` 를 가진 JSON 객체 한 개만 출력.
+- `positives` / `must_fix` / `improvements` / `comments` / (선택) `meta_replies` 를 가진 \
+JSON 객체 한 개만 출력.
 - 전체 스키마·등급 체계는 표준 리뷰와 동일 (critical|major|minor|suggestion).
-- `meta_replies` — REVIEW HISTORY 가 있고 다른 봇의 inline review comment 중 응답 가치 높은 것이 있으면 최대 1건. `{"reply_to_comment_id": <정수>, "body": "<한국어>"}`. 없으면 빈 배열 또는 생략.
+- `meta_replies` — REVIEW HISTORY 가 있고 다른 봇의 inline review comment 중 응답 가치 \
+높은 것이 있으면 \
+최대 1건. `{"reply_to_comment_id": <정수>, "body": "<한국어>"}`. 없으면 빈 배열 또는 생략.
 - `comments[].line` 은 반드시 diff 의 RIGHT-side(`+` 측) 에 실제 존재하는 양의 정수여야 한다.
   hunk 헤더 `@@ -a,b +c,d @@` 에서 `c` 가 첫 RIGHT 라인 번호다. 거기부터 `+` 와 ` `(공백)
   접두의 라인마다 +1 씩 증가한다 (`-` 접두 라인은 RIGHT 에 없으므로 번호를 올리지 않는다).
@@ -330,7 +368,8 @@ def _build_full_prompt(
     sections.append(
         "위 코드베이스 전체를 읽고, 지정된 JSON 스키마(summary / event / positives / "
         "must_fix / improvements / comments) 에 맞춘 한국어 리뷰를 출력하라. "
-        "모든 `comments` 항목은 존재하는 라인 번호와 `severity`(critical|major|minor|suggestion) 를 "
+        "모든 `comments` 항목은 존재하는 라인 번호와 "
+        "`severity`(critical|major|minor|suggestion) 를 "
         "반드시 포함해야 한다."
     )
     return "\n".join(sections)
@@ -502,7 +541,8 @@ def _format_review_history(history: ReviewHistory | None) -> str:
         "  2. 다른 봇이 이미 지적한 라인을 같은 결론으로 중복 지적하지 마라.",
         "  3. 다른 봇의 inline review comment 중 **가장 응답 가치 높은 것 1건** 에 대해서",
         "     `meta_replies` 배열에 1개 항목을 산출하라 (선택, 0건도 허용):",
-        "        {\"reply_to_comment_id\": <inline 의 comment_id 정수>, \"body\": \"<짧은 한국어>\"}",
+        "        {\"reply_to_comment_id\": <inline 의 comment_id 정수>, "
+        "\"body\": \"<짧은 한국어>\"}",
         "     - 동의 (보강 정보 추가) / 반박 (실제 코드 인용으로 phantom 지적) / defer 권장",
         "       중 하나의 의도로 작성. 의례적 동의 / 일반론 / 작성자가 이미 처리한 항목은 제외.",
         "  4. 직전 라운드 후 새 commit 이 들어왔으면, 이전 지적이 새 commit 으로 처리됐는지",

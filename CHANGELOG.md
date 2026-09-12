@@ -6,6 +6,11 @@
 
 ### 수정
 
+- primary와 fallback 추론 강도를 독립 지정합니다. Astra `xhigh`와 Luna·reserve `max`를
+  조합할 수 있으며 Spark는 지원 상한 `xhigh`를 유지합니다. 인증된 control status에
+  fallback 요청값과 모델별 적용 강도를 추가해 admin의 재시동 검증을 지원합니다.
+- 기존 Ruff 및 mypy 검사 오류를 정리했습니다. 프롬프트 문자열과 Enum 표시 호환성은 유지합니다.
+
 - 모델별 추론 강도 지원 범위를 적용해 `gpt-reserve`는 `max`, `gpt-5.3-codex-spark`는
   자동으로 `xhigh`를 사용하도록 fallback 실행을 보완했습니다. 지원하지 않는 강도 때문에
   전체 fallback 체인이 기동 단계에서 거부되지 않습니다.
