@@ -33,6 +33,10 @@ GitHub webhook, 프록시, Claude control secret과 재사용하지 마세요. �
 - `/internal/control/status`, `/drain`, `/resume`, `/commit-restart`는 실제 loopback peer와
   `X-Gorani-Bot-Control-Secret`이 모두 맞아야 접근할 수 있습니다. Secret 미설정은
   접근 거부이며 `--no-proxy-headers`로 전달 헤더의 loopback 위장을 차단합니다.
+  Status의 `fallbackReasoningEffort`는 저장된 fallback 요청 강도이며, `null`이면
+  primary의 `reasoningEffort`를 상속합니다. `fallbackReasoningEfforts`는 primary를
+  제외한 각 fallback 모델의 지원 범위로 조정한 실행 강도입니다. 이 필드를 제공하는
+  봇을 먼저 배포해야 admin에서 재시동 후 fallback 강도까지 검증할 수 있습니다.
 - Drain은 작업 ID별 배타 lease로 신규 리뷰를 차단하고 이미 받은 큐와 실행 작업을
   최대 60초 기다립니다. 종료 인계 확정 전에는 타임아웃·고아 lease 만료로 intake를 재개합니다.
   이 구간의 새 delivery는 `503`이므로 GitHub에서 실패 delivery를 확인·재전송하세요.
