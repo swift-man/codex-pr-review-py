@@ -18,6 +18,9 @@ export GITHUB_WEBHOOK_SECRET="change-me-long-random"
 export CODEX_MODEL="gpt-5.6-sol"
 export CODEX_MODEL_FALLBACKS="gpt-reserve,gpt-5.3-codex-spark"
 export CODEX_REASONING_EFFORT="max"  # Reserve=max, Spark는 지원 범위에 맞춰 xhigh로 자동 조정
+# To run primary at xhigh and Reserve/Luna at max:
+# export CODEX_REASONING_EFFORT="xhigh"
+# export CODEX_FALLBACK_REASONING_EFFORT="max"
 # 1순위 Sol 에만 Codex CLI 확장 컨텍스트를 적용한다. fallback 모델은 각자 CLI
 # 카탈로그 기본 윈도우를 유지하며, 큰 입력을 못 받으면 diff-only 로 재시도한다.
 export CODEX_MODEL_CONTEXT_WINDOW="872000"

@@ -159,6 +159,7 @@ REPO_FULL_NAME=owner/repo PR_NUMBER=1 INSTALLATION_ID=1234567 \
 | `GITHUB_WEBHOOK_SECRET` | — | HMAC 서명 검증용 비밀 (필수) |
 | `CODEX_BIN` | `codex` | Codex CLI 실행 파일 |
 | `CODEX_MODEL` | `gpt-5.6-sol` | 1순위 리뷰 모델 |
+| `CODEX_FALLBACK_REASONING_EFFORT` | `(1순위 강도 사용)` | fallback 전용 요청 강도. Astra `xhigh`, Reserve/Luna `max` 구성은 `CODEX_REASONING_EFFORT=xhigh`, 이 값을 `max`로 지정. Spark는 지원 상한 `xhigh`로 조정됩니다. |
 | `CODEX_MODEL_FALLBACKS` | `gpt-reserve,gpt-5.3-codex-spark` | 쉼표로 구분한 fallback 모델 목록. 기본 순서는 Sol `max` → Reserve `max` → Spark `xhigh`. 비우면 fallback 없이 `CODEX_MODEL`만 사용 |
 | `CODEX_REASONING_EFFORT` | `max` | 요청 강도. 모델별로 요청값 이하의 최고 지원 강도를 사용합니다. 기본 fallback에서는 Reserve가 `max`, Spark가 `xhigh`로 실행됩니다. |
 | `CODEX_MODEL_CONTEXT_WINDOW` | `(모델별 자동)` | 1순위 모델에 전달할 Codex CLI `model_context_window`. 기본 Sol은 확장 `872000`; 다른 내장 모델은 CLI 기본값. 명시값은 모델별 카탈로그 최대값 이하로 제한 |

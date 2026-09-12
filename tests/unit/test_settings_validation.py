@@ -34,6 +34,7 @@ _ALL_ALIASES = (
     "CODEX_MODEL",
     "CODEX_MODEL_FALLBACKS",
     "CODEX_REASONING_EFFORT",
+    "CODEX_FALLBACK_REASONING_EFFORT",
     "CODEX_MODEL_CONTEXT_WINDOW",
     "CODEX_TIMEOUT_SEC",
     "CODEX_MAX_INPUT_TOKENS",
@@ -79,6 +80,7 @@ def test_defaults_are_all_valid(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     assert s.codex_model_label == "gpt-5.6-sol -> gpt-reserve -> gpt-5.3-codex-spark"
     assert s.codex_reasoning_effort == "max"
+    assert s.codex_fallback_reasoning_effort is None
     assert s.effective_codex_model_context_window == 872_000
     assert s.review_concurrency == 1
     assert s.codex_timeout_sec == 600
@@ -416,6 +418,26 @@ def test_extended_reasoning_effort_allows_model_specific_fallback_downgrade(
     )
 
 
+def test_fallback_reasoning_effort_is_independent(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = _settings(
+        monkeypatch,
+        CODEX_REASONING_EFFORT="xhigh",
+        CODEX_FALLBACK_REASONING_EFFORT=" MAX ",
+    )
+    assert settings.codex_reasoning_effort == "xhigh"
+    assert settings.codex_fallback_reasoning_effort == "max"
+    with pytest.raises(ValidationError):
+        _settings(monkeypatch, CODEX_FALLBACK_REASONING_EFFORT="invalid")
+
+
+@pytest.mark.parametrize("value", ["", " ", "highest", "0"])
+def test_invalid_fallback_reasoning_effort_is_rejected(
+    monkeypatch: pytest.MonkeyPatch, value: str,
+) -> None:
+    with pytest.raises(ValidationError):
+        _settings(monkeypatch, CODEX_FALLBACK_REASONING_EFFORT=value)
+
+
 def test_codex_model_fallbacks_are_parsed_and_deduplicated(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -523,7 +545,10 @@ def test_create_app_wires_runtime_review_dependencies(
 
     # `[bot]` suffix 가 이미 붙은 입력. 정상 wiring 이라면 헬퍼를 통과해 단일 `[bot]`
     # 만 남아야 한다. `_settings()` 헬퍼는 `_ALL_ALIASES` 환경 변수 정리 + 필수값 주입.
-    _settings(monkeypatch, GITHUB_APP_SLUG="codex-review-bot[bot]")
+    _settings(
+        monkeypatch, GITHUB_APP_SLUG="codex-review-bot[bot]",
+        CODEX_REASONING_EFFORT="xhigh", CODEX_FALLBACK_REASONING_EFFORT="max",
+    )
 
     # 1) lifespan 안에서 호출되는 codex 인증 preflight 를 noop 으로 우회 — 이 테스트는
     #    follow-up wiring 까지 도달하는 게 목적이라 외부 binary 의존을 잘라낸다.
@@ -533,6 +558,15 @@ def test_create_app_wires_runtime_review_dependencies(
     monkeypatch.setattr(
         codex_cli_engine.CodexCliEngine, "verify_auth", _ok_preflight
     )
+
+    engine_captured: dict[str, object] = {}
+    original_engine_init = codex_cli_engine.CodexCliEngine.__init__
+
+    def spy_engine_init(self, **kwargs):  # type: ignore[no-untyped-def]
+        engine_captured.update(kwargs)
+        original_engine_init(self, **kwargs)
+
+    monkeypatch.setattr(codex_cli_engine.CodexCliEngine, "__init__", spy_engine_init)
 
     # 2) `FollowUpReviewUseCase.__init__` 인자를 캡처. wiring 이 정규화된 login 을
     #    실제로 넘기는지 직접 확인.
@@ -585,3 +619,5 @@ def test_create_app_wires_runtime_review_dependencies(
     assert review_captured.get("max_input_chars") == (
         codex_cli_engine.CODEX_CLI_COLLECTOR_MAX_CHARS
     )
+    assert engine_captured["reasoning_effort"] == "xhigh"
+    assert engine_captured["fallback_reasoning_effort"] == "max"

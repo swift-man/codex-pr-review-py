@@ -93,6 +93,9 @@ class Settings(BaseSettings):
         default=DEFAULT_CODEX_REASONING_EFFORT,
         alias="CODEX_REASONING_EFFORT",
     )
+    codex_fallback_reasoning_effort: ReasoningEffort | None = Field(
+        default=None, alias="CODEX_FALLBACK_REASONING_EFFORT"
+    )
     # 1순위 모델에만 전달할 Codex CLI `model_context_window` 오버라이드. 미설정 시
     # 알려진 모델은 로컬 CLI 카탈로그 값을 사용하고, 사용자 정의 모델은 CLI 기본값을 따른다.
     codex_model_context_window: int | None = Field(
@@ -138,7 +141,7 @@ class Settings(BaseSettings):
             raise ValueError("GITHUB_APP_PRIVATE_KEY_PATH는 공백일 수 없습니다.")
         return value
 
-    @field_validator("codex_reasoning_effort", mode="before")
+    @field_validator("codex_reasoning_effort", "codex_fallback_reasoning_effort", mode="before")
     @classmethod
     def normalize_codex_reasoning_effort(cls, value: object) -> object:
         """Normalize env input before the Literal contract validates it."""

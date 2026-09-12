@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from codex_review.application.webhook_handler import WebhookHandler
 from codex_review.config import Settings
+from codex_review.model_utils import effective_reasoning_effort
 
 
 class ControlOperation(BaseModel):
@@ -66,6 +67,14 @@ def control_router(
             "model": settings.codex_model,
             "reasoningEffort": settings.codex_reasoning_effort,
             "fallbacks": list(settings.codex_model_fallbacks),
+            "fallbackReasoningEffort": settings.codex_fallback_reasoning_effort,
+            "fallbackReasoningEfforts": {
+                model: effective_reasoning_effort(
+                    model,
+                    settings.codex_fallback_reasoning_effort or settings.codex_reasoning_effort,
+                )
+                for model in settings.codex_model_fallbacks if model != settings.codex_model
+            },
             "draining": current.intake.operation_id is not None,
             "operationId": current.intake.operation_id,
             "restartCommitted": current.intake.restart_committed,
