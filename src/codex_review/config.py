@@ -8,7 +8,6 @@ from codex_review.model_utils import (
     DEFAULT_CODEX_REASONING_EFFORT,
     ReasoningEffort,
     dedupe_models,
-    incompatible_reasoning_effort_models,
     known_model_default_context_window,
     known_model_max_context_window,
 )
@@ -144,22 +143,6 @@ class Settings(BaseSettings):
     def normalize_codex_reasoning_effort(cls, value: object) -> object:
         """Normalize env input before the Literal contract validates it."""
         return value.strip().lower() if isinstance(value, str) else value
-
-    @model_validator(mode="after")
-    def require_compatible_model_reasoning_effort(self) -> Self:
-        """Reject known model sequences that cannot preserve fallback behavior."""
-        incompatible = incompatible_reasoning_effort_models(
-            self.codex_model_sequence,
-            self.codex_reasoning_effort,
-        )
-        if incompatible:
-            models = ", ".join(incompatible)
-            raise ValueError(
-                f"CODEX_REASONING_EFFORT='{self.codex_reasoning_effort}'은 다음 모델에서 "
-                f"지원되지 않습니다: {models}. 모든 모델이 지원하는 값을 사용하거나 "
-                "CODEX_MODEL_FALLBACKS를 조정하세요."
-            )
-        return self
 
     @model_validator(mode="after")
     def require_context_window_within_known_model_max(self) -> Self:

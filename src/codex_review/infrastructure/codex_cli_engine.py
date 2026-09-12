@@ -10,6 +10,7 @@ from codex_review.model_utils import (
     DEFAULT_CODEX_REASONING_EFFORT,
     ReasoningEffort,
     dedupe_models,
+    effective_reasoning_effort,
 )
 
 from ._subprocess import kill_and_reap
@@ -163,6 +164,7 @@ class CodexCliEngine:
         model: str,
         timeout_sec: float,
     ) -> ReviewResult:
+        model_reasoning_effort = effective_reasoning_effort(model, self._reasoning_effort)
         # "-" positional 은 codex exec 에 stdin 에서 프롬프트를 읽으라는 지시.
         # argv 로 넘기면 전체 레포 덤프가 ARG_MAX 를 초과할 수 있어 stdin 이 안전.
         logger.info(
@@ -170,7 +172,7 @@ class CodexCliEngine:
             len(dump.entries),
             dump.total_chars,
             model,
-            self._reasoning_effort,
+            model_reasoning_effort,
             self._context_window_for(model) or "default",
         )
         command = [
@@ -181,7 +183,7 @@ class CodexCliEngine:
             # reasoning_effort 는 config 오버라이드로 넘긴다 — `codex exec` 가 별도 CLI
             # 플래그로 지원하지 않고 ~/.codex/config.toml 값만 읽기 때문.
             "--config",
-            f"model_reasoning_effort={self._reasoning_effort}",
+            f"model_reasoning_effort={model_reasoning_effort}",
         ]
         if (context_window := self._context_window_for(model)) is not None:
             command.extend(("--config", f"model_context_window={context_window}"))
@@ -242,7 +244,7 @@ class CodexCliEngine:
         return replace(
             parse_review(stdout.decode(errors="replace")),
             model_used=model,
-            reasoning_effort_used=self._reasoning_effort,
+            reasoning_effort_used=model_reasoning_effort,
         )
 
     def _context_window_for(self, model: str) -> int | None:

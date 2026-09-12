@@ -8,7 +8,7 @@ GitHub App 웹훅으로 PR 이벤트를 받아, 레포를 체크아웃하고 전
 
 - GitHub App 설치 토큰 기반 인증 (PAT 불필요)
 - diff가 아닌 **전체 코드베이스**를 컨텍스트로 사용
-- Codex CLI를 `subprocess`로 호출 → 로그인된 ChatGPT 계정의 OAuth 토큰 사용 (기본 리뷰 순서 `gpt-5.6-sol` → `gpt-reserve` → `gpt-5.3-codex-spark`, 모두 `xhigh`)
+- Codex CLI를 `subprocess`로 호출 → 로그인된 ChatGPT 계정의 OAuth 토큰 사용 (기본 리뷰 순서 `gpt-5.6-sol` → `gpt-reserve` → `gpt-5.3-codex-spark`; Reserve는 `max`, Spark는 `xhigh`)
 - 한국어 리뷰 고정 출력 (JSON 스키마 강제)
 - **리뷰 4섹션**: `좋은 점` / `🔴 반드시 수정할 사항` / `💡 권장 개선 사항` / `기술 단위 코멘트(라인 고정)`
 - 라인 코멘트는 **4단계 등급**(`Critical` / `Major` / `Minor` / `Suggestion`) 으로 분류되고, PR 화면에서 각 코멘트 본문 최상단에 `[Critical] …` 형태의 대괄호 접두로 표기
@@ -147,9 +147,10 @@ REPO_FULL_NAME=owner/repo PR_NUMBER=1 INSTALLATION_ID=1234567 \
 > 1순위 모델에만 전달되며 fallback 모델에는 적용되지 않는다.
 > 모델 토큰 예산과 별개로 Codex CLI `turn/start` 입력은 1,048,576자 제한이 있으므로,
 > 수집기는 리뷰 이력 공간을 남긴 1,000,000자에서 제한하고 큰 저장소는 diff-only로 전환한다.
-> 추론 강도는 1순위와 모든 fallback 모델이 함께 지원해야 한다. 기본 모델인
-> `gpt-5.6-sol`에서 `max`나 `ultra`를 사용하려면 호환되는 fallback만 지정하거나
-> `CODEX_MODEL_FALLBACKS`를 비워야 한다. 알려진 비호환 조합은 서버 기동 시 거부된다.
+> 추론 강도는 모델별 지원 범위에 맞춰 실행 시 자동 조정된다. 기본 fallback에서는
+> `gpt-5.6-sol`과 `gpt-reserve`가 `max`, Spark가 `xhigh`를 사용한다.
+> 카탈로그에 없는 사용자 정의 모델은 요청값을 그대로 전달하므로 해당 CLI 모델의
+> 지원 강도를 운영자가 확인해야 한다.
 
 | 변수 | 기본값 | 설명 |
 |---|---|---|
@@ -158,8 +159,8 @@ REPO_FULL_NAME=owner/repo PR_NUMBER=1 INSTALLATION_ID=1234567 \
 | `GITHUB_WEBHOOK_SECRET` | — | HMAC 서명 검증용 비밀 (필수) |
 | `CODEX_BIN` | `codex` | Codex CLI 실행 파일 |
 | `CODEX_MODEL` | `gpt-5.6-sol` | 1순위 리뷰 모델 |
-| `CODEX_MODEL_FALLBACKS` | `gpt-reserve,gpt-5.3-codex-spark` | 쉼표로 구분한 fallback 모델 목록. 기본 순서는 Sol `xhigh` → Reserve `xhigh` → Spark `xhigh`. 비우면 fallback 없이 `CODEX_MODEL`만 사용 |
-| `CODEX_REASONING_EFFORT` | `xhigh` | `low`/`medium`/`high`/`xhigh`/`max`/`ultra`. 대소문자와 주변 공백을 정규화하고 알려진 모델 시퀀스의 호환성을 검증 |
+| `CODEX_MODEL_FALLBACKS` | `gpt-reserve,gpt-5.3-codex-spark` | 쉼표로 구분한 fallback 모델 목록. 기본 순서는 Sol `max` → Reserve `max` → Spark `xhigh`. 비우면 fallback 없이 `CODEX_MODEL`만 사용 |
+| `CODEX_REASONING_EFFORT` | `max` | 요청 강도. 모델별로 요청값 이하의 최고 지원 강도를 사용합니다. 기본 fallback에서는 Reserve가 `max`, Spark가 `xhigh`로 실행됩니다. |
 | `CODEX_MODEL_CONTEXT_WINDOW` | `(모델별 자동)` | 1순위 모델에 전달할 Codex CLI `model_context_window`. 기본 Sol은 확장 `872000`; 다른 내장 모델은 CLI 기본값. 명시값은 모델별 카탈로그 최대값 이하로 제한 |
 | `CODEX_MAX_INPUT_TOKENS` | `(모델 윈도우의 95%)` | 모델 입력 프롬프트 토큰 예산. Sol은 `828400`, 일반 272K 모델은 `258400`, Spark는 `121600`. 실제 수집 입력은 Codex CLI 제한에 맞춰 최대 1,000,000자로 제한 |
 | `CODEX_TIMEOUT_SEC` | `600` | 호출 타임아웃 |
