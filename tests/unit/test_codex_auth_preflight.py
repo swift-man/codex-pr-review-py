@@ -44,8 +44,14 @@ class _FakeProc:
         pass
 
 
-def _patch_subprocess(monkeypatch: pytest.MonkeyPatch, result: Any) -> None:
-    async def fake_create(*_args: Any, **_kwargs: Any) -> Any:
+def _patch_subprocess(
+    monkeypatch: pytest.MonkeyPatch,
+    result: Any,
+    captured_kwargs: list[dict[str, Any]] | None = None,
+) -> None:
+    async def fake_create(*_args: Any, **kwargs: Any) -> Any:
+        if captured_kwargs is not None:
+            captured_kwargs.append(kwargs)
         if isinstance(result, Exception):
             raise result
         return result
@@ -157,6 +163,30 @@ async def test_verify_auth_raises_on_unexpected_stdout(monkeypatch: pytest.Monke
     _patch_subprocess(monkeypatch, _FakeProc(0, stdout=b"Some unrelated output\n"))
     with pytest.raises(CodexAuthError):
         await _engine().verify_auth()
+
+
+async def test_auth_and_review_start_in_new_process_sessions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    auth_kwargs: list[dict[str, Any]] = []
+    _patch_subprocess(
+        monkeypatch,
+        _FakeProc(0, stdout=b"Logged in using ChatGPT\n"),
+        auth_kwargs,
+    )
+    await _engine().verify_auth()
+
+    pr, dump = _sample_review_input()
+    review_kwargs: list[dict[str, Any]] = []
+    _patch_subprocess(
+        monkeypatch,
+        _FakeProc(0, stdout=b'{"summary":"ok","event":"COMMENT","comments":[]}\n'),
+        review_kwargs,
+    )
+    await _engine().review(pr, dump)
+
+    assert auth_kwargs[0]["start_new_session"] is True
+    assert review_kwargs[0]["start_new_session"] is True
 
 
 async def test_verify_auth_raises_when_binary_missing(monkeypatch: pytest.MonkeyPatch) -> None:
