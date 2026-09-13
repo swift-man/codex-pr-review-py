@@ -6,6 +6,8 @@
 
 import asyncio
 import logging
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -85,3 +87,25 @@ async def test_kill_and_reap_propagates_cancellation() -> None:
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+async def test_kill_and_reap_can_terminate_the_entire_cli_process_group(
+    tmp_path: Path,
+) -> None:
+    marker = tmp_path / "descendant-survived"
+    child = f"import time; time.sleep(0.4); open({str(marker)!r}, 'w').close()"
+    parent = (
+        "import subprocess,sys,time; "
+        f"subprocess.Popen([sys.executable, '-c', {child!r}]); time.sleep(30)"
+    )
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-c",
+        parent,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    await _subprocess.kill_and_reap(proc, timeout=1.0, process_group=True)
+    await asyncio.sleep(0.6)
+    assert not marker.exists()

@@ -14,6 +14,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
+import signal
 
 logger = logging.getLogger(__name__)
 
@@ -45,10 +47,21 @@ async def safe_reap(
 
 
 async def kill_and_reap(
-    proc: asyncio.subprocess.Process, *, timeout: float = _DEFAULT_REAP_TIMEOUT
+    proc: asyncio.subprocess.Process,
+    *,
+    timeout: float = _DEFAULT_REAP_TIMEOUT,
+    process_group: bool = False,
 ) -> None:
-    """`kill + 상한 있는 wait` 을 한 번에. 취소·타임아웃 핸들러에서 쓰기 위한 숏컷."""
+    """`kill + 상한 있는 wait` 을 한 번에. 취소·타임아웃 핸들러에서 쓰기 위한 숏컷.
+
+    `process_group=True`는 독립 세션으로 실행한 CLI의 래퍼와 네이티브 자식을 함께
+    종료한다. 일반 subprocess는 기존처럼 직접 자식만 종료한다.
+    """
     with contextlib.suppress(ProcessLookupError):
-        # race: 이미 정상 종료됐을 수 있음 — 무시하고 reap 만 수행.
-        proc.kill()
+        pid = getattr(proc, "pid", None)
+        if process_group and pid is not None:
+            os.killpg(pid, signal.SIGKILL)
+        else:
+            # race: 이미 정상 종료됐을 수 있음 — 무시하고 reap 만 수행.
+            proc.kill()
     await safe_reap(proc, timeout=timeout)

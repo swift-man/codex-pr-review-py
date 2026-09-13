@@ -66,6 +66,7 @@ class CodexCliEngine:
                 self._binary, "login", "status",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
             )
         except FileNotFoundError as exc:
             raise CodexAuthError(
@@ -78,11 +79,11 @@ class CodexCliEngine:
                 stdout, stderr = await proc.communicate()
         except TimeoutError as exc:
             # kill 후 wait 자체에도 상한을 둔다 — 수거가 지연돼도 서버 기동 경로가 붙잡히지 않도록.
-            await kill_and_reap(proc)
+            await kill_and_reap(proc, process_group=True)
             raise CodexAuthError("codex login status 가 10초 내에 응답하지 않았습니다.") from exc
         except asyncio.CancelledError:
             # 워커 취소/서버 종료 신호 시 하위 프로세스가 좀비로 남지 않도록 반드시 정리.
-            await kill_and_reap(proc)
+            await kill_and_reap(proc, process_group=True)
             raise
 
         # codex CLI 는 TTY 가 아닐 때 상태 메시지를 stderr 로 보내므로 두 스트림 모두 확인.
@@ -200,6 +201,7 @@ class CodexCliEngine:
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
         )
 
         try:
@@ -208,7 +210,7 @@ class CodexCliEngine:
         except TimeoutError as exc:
             # 하위 프로세스 수거 대기에도 상한 — 큐 동시성 상한이 `CODEX_TIMEOUT_SEC` 을
             # 훨씬 넘겨 점유되는 걸 막는다 (codex 리뷰 지적).
-            await kill_and_reap(proc)
+            await kill_and_reap(proc, process_group=True)
             # 타임아웃은 "엔진이 입력 처리에 실패" 의 한 형태이므로 ReviewEngineError 로
             # 분류 — use case 가 diff fallback 으로 재시도할 수 있다 (작은 입력으로 줄이면
             # 시간 안에 끝날 수 있음).
@@ -218,7 +220,7 @@ class CodexCliEngine:
         except asyncio.CancelledError:
             # 서버 종료/워커 취소 시 `codex exec` 하위 프로세스가 좀비로 남아 토큰·쿼터·CPU 를
             # 계속 소모하지 않도록 확실히 kill + wait 후 취소를 재전파한다.
-            await kill_and_reap(proc)
+            await kill_and_reap(proc, process_group=True)
             raise
 
         if proc.returncode != 0:
