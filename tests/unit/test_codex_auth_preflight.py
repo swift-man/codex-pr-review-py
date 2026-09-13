@@ -309,14 +309,45 @@ async def test_fallback_model_receives_snapshot_trimmed_to_its_budget(
         binary="codex",
         model="primary",
         fallback_models=("fallback",),
-        model_input_budgets={"primary": 100, "fallback": 40},
+        model_input_budgets={"primary": 100, "fallback": 50},
     )
     engine._review_with_model = fake_review  # type: ignore[method-assign]
 
     result = await engine.review(pr, dump)
 
     assert result.summary == "ok"
-    assert attempts == [("primary", 2), ("fallback", 0)]
+    assert attempts == [("primary", 2), ("fallback", 1)]
+
+
+def test_model_budget_does_not_drop_changed_entries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pr, _ = _sample_review_input()
+    dump = FileDump(
+        entries=(
+            FileEntry(path="changed.py", content="가" * 150, size_bytes=450, is_changed=True),
+            FileEntry(path="context.py", content="b" * 150, size_bytes=150, is_changed=False),
+        ),
+        total_chars=300,
+    )
+    monkeypatch.setattr(
+        "codex_review.infrastructure.codex_cli_engine.build_prompt",
+        lambda _pr, candidate, **_kwargs: "x" * (
+            20 + sum(len(item.content) for item in candidate.entries)
+        ),
+    )
+
+    engine = CodexCliEngine(
+        binary="codex",
+        model="primary",
+        model_input_budgets={"primary": 50},
+    )
+
+    candidate = engine._dump_for_model(pr, dump, "primary", history=None)
+
+    assert [entry.path for entry in candidate.entries] == ["changed.py"]
+    assert candidate.budget_trimmed == ("context.py",)
+    assert candidate.total_chars == 150
 
 
 async def test_review_tries_reserve_then_spark_when_model_limits_are_reached(

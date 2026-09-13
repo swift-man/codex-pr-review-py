@@ -193,7 +193,7 @@ def test_model_scoped_input_budgets_are_validated_and_projected(
 def test_model_scoped_input_budget_rejects_unknown_or_oversized_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    with pytest.raises(ValidationError, match="outside CODEX_MODEL_FALLBACKS"):
+    with pytest.raises(ValidationError, match="primary/fallback model sequence"):
         _settings(monkeypatch, CODEX_MODEL_INPUT_BUDGETS="unconfigured=100")
     with pytest.raises(ValidationError, match="유효 입력 한도 121600"):
         _settings(
@@ -204,6 +204,16 @@ def test_model_scoped_input_budget_rejects_unknown_or_oversized_model(
         _settings(
             monkeypatch,
             CODEX_MODEL_INPUT_BUDGETS="gpt-5.3-codex-spark=10000001",
+        )
+
+
+def test_model_scoped_input_budget_rejects_duplicate_models(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(ValidationError, match="duplicate model"):
+        _settings(
+            monkeypatch,
+            CODEX_MODEL_INPUT_BUDGETS="gpt-5.6-sol=100,gpt-5.6-sol=200",
         )
 
 
@@ -586,6 +596,10 @@ def test_create_app_wires_runtime_review_dependencies(
     # 만 남아야 한다. `_settings()` 헬퍼는 `_ALL_ALIASES` 환경 변수 정리 + 필수값 주입.
     _settings(
         monkeypatch, GITHUB_APP_SLUG="codex-review-bot[bot]",
+        CODEX_MODEL="gpt-5.3-codex-spark",
+        CODEX_MODEL_FALLBACKS="gpt-reserve",
+        CODEX_MAX_INPUT_TOKENS="100000",
+        CODEX_MODEL_INPUT_BUDGETS="gpt-5.3-codex-spark=100000,gpt-reserve=258400",
         CODEX_REASONING_EFFORT="xhigh", CODEX_FALLBACK_REASONING_EFFORT="max",
     )
 
@@ -658,5 +672,6 @@ def test_create_app_wires_runtime_review_dependencies(
     assert review_captured.get("max_input_chars") == (
         codex_cli_engine.CODEX_CLI_COLLECTOR_MAX_CHARS
     )
+    assert review_captured.get("max_input_tokens") == 258400
     assert engine_captured["reasoning_effort"] == "xhigh"
     assert engine_captured["fallback_reasoning_effort"] == "max"

@@ -67,6 +67,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 data_file_max_bytes=settings.data_file_max_bytes,
                 git_timeout_sec=settings.git_timeout_sec,
             )
+            model_input_budgets = settings.codex_model_input_budgets
+            # The snapshot is collected once before model fallback begins. Use the largest
+            # configured model budget so a larger fallback model cannot lose files up front.
+            collection_input_tokens = max(
+                model_input_budgets.values(),
+                default=settings.codex_max_input_tokens,
+            )
             engine = CodexCliEngine(
                 binary=settings.codex_bin,
                 model=settings.codex_model,
@@ -74,7 +81,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 reasoning_effort=settings.codex_reasoning_effort,
                 fallback_reasoning_effort=settings.codex_fallback_reasoning_effort,
                 primary_context_window=settings.effective_codex_model_context_window,
-                model_input_budgets=settings.codex_model_input_budgets,
+                model_input_budgets=model_input_budgets,
                 timeout_sec=settings.codex_timeout_sec,
             )
 
@@ -99,7 +106,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 repo_fetcher=repo_fetcher,
                 file_collector=collector,
                 engine=engine,
-                max_input_tokens=settings.codex_max_input_tokens,
+                max_input_tokens=collection_input_tokens,
                 max_input_chars=CODEX_CLI_COLLECTOR_MAX_CHARS,
                 diff_context_collector=diff_collector,
                 bot_login=bot_login,

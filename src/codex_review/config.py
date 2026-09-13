@@ -193,7 +193,8 @@ class Settings(BaseSettings):
         unknown = set(configured).difference(sequence)
         if unknown:
             raise ValueError(
-                "CODEX_MODEL_INPUT_BUDGETS contains models outside CODEX_MODEL_FALLBACKS"
+                "CODEX_MODEL_INPUT_BUDGETS contains models outside the configured "
+                "primary/fallback model sequence"
             )
         for index, model in enumerate(sequence):
             value = configured.get(model)
@@ -277,9 +278,10 @@ def _parse_model_input_budgets(raw: str | None) -> dict[str, int]:
     for item in raw.split(","):
         model, separator, tokens = item.partition("=")
         model, tokens = model.strip(), tokens.strip()
-        if (not separator or model in result or not model
-                or not tokens.isascii() or not tokens.isdecimal()):
+        if (not separator or not model or not tokens.isascii() or not tokens.isdecimal()):
             raise ValueError("CODEX_MODEL_INPUT_BUDGETS must use model=tokens pairs")
+        if model in result:
+            raise ValueError(f"CODEX_MODEL_INPUT_BUDGETS contains duplicate model: {model}")
         value = int(tokens)
         if not 0 < value <= _MAX_MODEL_INPUT_BUDGET:
             raise ValueError("CODEX_MODEL_INPUT_BUDGETS values must be between 1 and 10000000")

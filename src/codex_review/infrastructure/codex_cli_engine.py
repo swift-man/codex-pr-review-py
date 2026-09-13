@@ -176,30 +176,52 @@ class CodexCliEngine:
         configured = self._model_input_budgets.get(model)
         if configured is None:
             return dump
-        max_bytes = min(configured * 4, CODEX_CLI_MAX_INPUT_CHARS)
+        max_chars = min(configured * 4, CODEX_CLI_MAX_INPUT_CHARS)
         entries = list(dump.entries)
-        excluded = list(dump.excluded)
-        candidate = dump
-        while (len(build_prompt(pr, candidate, history=history).encode("utf-8")) > max_bytes
-               and entries):
-            removed = entries.pop()
-            if removed.path not in excluded:
-                excluded.append(removed.path)
-            candidate = replace(
+        removable = [entry for entry in entries if not entry.is_changed]
+
+        def candidate_for(remove_count: int) -> FileDump:
+            removed_entries = removable[-remove_count:] if remove_count else []
+            removed_paths = {entry.path for entry in removed_entries}
+            kept_entries = tuple(entry for entry in entries if entry.path not in removed_paths)
+            excluded = list(dump.excluded)
+            for entry in removed_entries:
+                if entry.path not in excluded:
+                    excluded.append(entry.path)
+            return replace(
                 dump,
-                entries=tuple(entries),
-                total_chars=sum(entry.size_bytes for entry in entries),
+                entries=kept_entries,
+                # `size_bytes` is UTF-8 bytes; this field is a character count.
+                total_chars=sum(len(entry.content) for entry in kept_entries),
                 excluded=tuple(excluded),
-                exceeded_budget=True,
+                exceeded_budget=dump.exceeded_budget or bool(removed_entries),
                 budget=dump.budget,
             )
-        prompt_bytes = len(build_prompt(pr, candidate, history=history).encode("utf-8"))
-        if prompt_bytes > max_bytes:
+
+        if len(build_prompt(pr, dump, history=history)) <= max_chars:
+            return dump
+
+        # Changed files are the review target and must never be silently discarded. If even
+        # those files cannot fit, the use case will raise and switch to its diff-only fallback.
+        changed_only = candidate_for(len(removable))
+        changed_only_chars = len(build_prompt(pr, changed_only, history=history))
+        if changed_only_chars > max_chars:
             raise ReviewEngineError(
                 f"codex input budget is too small for model={model} "
-                f"(max_bytes={max_bytes}, actual_bytes={prompt_bytes})"
+                f"(max_chars={max_chars}, actual_chars={changed_only_chars})"
             )
-        return candidate
+
+        # Removing one file at a time rebuilds the full prompt O(N^2) times. Find the smallest
+        # suffix of low-priority, unchanged files that makes the prompt fit instead.
+        low, high = 0, len(removable)
+        while low < high:
+            middle = (low + high) // 2
+            candidate = candidate_for(middle)
+            if len(build_prompt(pr, candidate, history=history)) <= max_chars:
+                high = middle
+            else:
+                low = middle + 1
+        return candidate_for(low)
 
     async def _review_with_model(
         self,
