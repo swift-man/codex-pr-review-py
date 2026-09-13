@@ -167,7 +167,8 @@ REPO_FULL_NAME=owner/repo PR_NUMBER=1 INSTALLATION_ID=1234567 \
 | `CODEX_MODEL_FALLBACKS` | `gpt-reserve,gpt-5.3-codex-spark` | 쉼표로 구분한 fallback 모델 목록. 기본 순서는 Sol `max` → Reserve `max` → Spark `xhigh`. 비우면 fallback 없이 `CODEX_MODEL`만 사용 |
 | `CODEX_REASONING_EFFORT` | `max` | 요청 강도. 모델별로 요청값 이하의 최고 지원 강도를 사용합니다. 기본 fallback에서는 Reserve가 `max`, Spark가 `xhigh`로 실행됩니다. |
 | `CODEX_MODEL_CONTEXT_WINDOW` | `(모델별 자동)` | 1순위 모델에 전달할 Codex CLI `model_context_window`. 기본 Sol은 확장 `872000`; 다른 내장 모델은 CLI 기본값. 명시값은 모델별 카탈로그 최대값 이하로 제한 |
-| `CODEX_MAX_INPUT_TOKENS` | `(모델 윈도우의 95%)` | 모델 입력 프롬프트 토큰 예산. Sol은 `828400`, 일반 272K 모델은 `258400`, Spark는 `121600`. 실제 수집 입력은 Codex CLI 제한에 맞춰 최대 1,000,000자로 제한 |
+| `CODEX_MAX_INPUT_TOKENS` | `(모델 윈도우의 95%)` | 기존 primary 입력 예산. `CODEX_MODEL_INPUT_BUDGETS`를 지정하면 primary 항목의 기본값으로 사용 |
+| `CODEX_MODEL_INPUT_BUDGETS` | `(모델별 CLI 기본값)` | `model=tokens`를 쉼표로 구분한 모델별 입력 예산. fallback 시 해당 예산에 맞춰 수집 스냅샷을 축소하며, 누락된 알려진 모델은 CLI 기본 컨텍스트의 95%를 사용 |
 | `CODEX_TIMEOUT_SEC` | `600` | 호출 타임아웃 |
 | `REPO_CACHE_DIR` | `~/.codex-review/repos` | clone 캐시 위치 |
 | `GIT_TIMEOUT_SEC` | `120` | git clone/fetch/checkout/ls-files 호출 타임아웃 |

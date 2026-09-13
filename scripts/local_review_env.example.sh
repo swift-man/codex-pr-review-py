@@ -25,6 +25,8 @@ export CODEX_REASONING_EFFORT="max"  # Reserve=max, Spark는 지원 범위에 �
 # 카탈로그 기본 윈도우를 유지하며, 큰 입력을 못 받으면 diff-only 로 재시도한다.
 export CODEX_MODEL_CONTEXT_WINDOW="872000"
 export CODEX_MAX_INPUT_TOKENS="828400"
+# Per-model input budgets. Fallback attempts trim the immutable snapshot to each value.
+export CODEX_MODEL_INPUT_BUDGETS="gpt-5.6-sol=828400,gpt-reserve=258400,gpt-5.3-codex-spark=121600"
 export CODEX_TIMEOUT_SEC="600"
 # npm 또는 Homebrew로 설치한 CLI를 쓴다면:
 #   export CODEX_BIN="/opt/homebrew/bin/codex"

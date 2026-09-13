@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 
 from codex_review.domain import FileDump, PullRequest, ReviewHistory, ReviewResult
@@ -45,6 +45,7 @@ class CodexCliEngine:
         primary_context_window: int | None = None,
         timeout_sec: int = 600,
         fallback_reasoning_effort: ReasoningEffort | None = None,
+        model_input_budgets: Mapping[str, int] | None = None,
     ) -> None:
         if primary_context_window is not None and primary_context_window <= 0:
             raise ValueError("primary_context_window must be positive")
@@ -53,6 +54,7 @@ class CodexCliEngine:
         self._reasoning_effort = reasoning_effort
         self._fallback_reasoning_effort = fallback_reasoning_effort or reasoning_effort
         self._primary_context_window = primary_context_window
+        self._model_input_budgets = dict(model_input_budgets or {})
         self._timeout_sec = timeout_sec
 
     async def verify_auth(self) -> str:
@@ -103,13 +105,6 @@ class CodexCliEngine:
         *,
         history: ReviewHistory | None = None,
     ) -> ReviewResult:
-        prompt = build_prompt(pr, dump, history=history)
-        prompt_chars = len(prompt)
-        if prompt_chars > CODEX_CLI_MAX_INPUT_CHARS:
-            raise ReviewEngineError(
-                "codex turn/start input is too long "
-                f"(max_chars={CODEX_CLI_MAX_INPUT_CHARS}, actual_chars={prompt_chars})"
-            )
         last_error: ReviewEngineError | None = None
         attempted_models: list[str] = []
         deadline = asyncio.get_running_loop().time() + self._timeout_sec
@@ -119,9 +114,16 @@ class CodexCliEngine:
                 break
             attempted_models.append(model)
             try:
+                attempt_dump = self._dump_for_model(pr, dump, model, history=history)
+                prompt = build_prompt(pr, attempt_dump, history=history)
+                if len(prompt) > CODEX_CLI_MAX_INPUT_CHARS:
+                    raise ReviewEngineError(
+                        "codex turn/start input is too long "
+                        f"(max_chars={CODEX_CLI_MAX_INPUT_CHARS}, actual_chars={len(prompt)})"
+                    )
                 return await self._review_with_model(
                     prompt,
-                    dump,
+                    attempt_dump,
                     model=model,
                     timeout_sec=remaining_sec,
                 )
@@ -157,6 +159,69 @@ class CodexCliEngine:
             f"last error: {last_error}",
             returncode=last_error.returncode,
         ) from last_error
+
+    def _dump_for_model(
+        self,
+        pr: PullRequest,
+        dump: FileDump,
+        model: str,
+        *,
+        history: ReviewHistory | None,
+    ) -> FileDump:
+        """Trim the in-memory snapshot to the selected model's input budget.
+
+        The collector runs once under the repository snapshot lock. Fallback attempts therefore
+        trim entries from that immutable snapshot instead of rereading a moving checkout.
+        """
+        configured = self._model_input_budgets.get(model)
+        if configured is None:
+            return dump
+        max_chars = min(configured * 4, CODEX_CLI_MAX_INPUT_CHARS)
+        entries = list(dump.entries)
+        removable = [entry for entry in entries if not entry.is_changed]
+
+        def candidate_for(remove_count: int) -> FileDump:
+            removed_entries = removable[-remove_count:] if remove_count else []
+            removed_paths = {entry.path for entry in removed_entries}
+            kept_entries = tuple(entry for entry in entries if entry.path not in removed_paths)
+            excluded = list(dump.excluded)
+            for entry in removed_entries:
+                if entry.path not in excluded:
+                    excluded.append(entry.path)
+            return replace(
+                dump,
+                entries=kept_entries,
+                # `size_bytes` is UTF-8 bytes; this field is a character count.
+                total_chars=sum(len(entry.content) for entry in kept_entries),
+                excluded=tuple(excluded),
+                exceeded_budget=dump.exceeded_budget or bool(removed_entries),
+                budget=dump.budget,
+            )
+
+        if len(build_prompt(pr, dump, history=history)) <= max_chars:
+            return dump
+
+        # Changed files are the review target and must never be silently discarded. If even
+        # those files cannot fit, the use case will raise and switch to its diff-only fallback.
+        changed_only = candidate_for(len(removable))
+        changed_only_chars = len(build_prompt(pr, changed_only, history=history))
+        if changed_only_chars > max_chars:
+            raise ReviewEngineError(
+                f"codex input budget is too small for model={model} "
+                f"(max_chars={max_chars}, actual_chars={changed_only_chars})"
+            )
+
+        # Removing one file at a time rebuilds the full prompt O(N^2) times. Find the smallest
+        # suffix of low-priority, unchanged files that makes the prompt fit instead.
+        low, high = 0, len(removable)
+        while low < high:
+            middle = (low + high) // 2
+            candidate = candidate_for(middle)
+            if len(build_prompt(pr, candidate, history=history)) <= max_chars:
+                high = middle
+            else:
+                low = middle + 1
+        return candidate_for(low)
 
     async def _review_with_model(
         self,

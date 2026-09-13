@@ -95,3 +95,10 @@ def known_model_max_context_window(model: str) -> int | None:
     """Return the maximum context window exposed by the Codex CLI catalog."""
     config = _KNOWN_MODELS.get(model)
     return config.max_context_window if config is not None else None
+
+
+def known_model_input_budget(model: str, context_window: int | None = None) -> int | None:
+    """Return the conservative 95% input budget for a known CLI model."""
+    window = (context_window if context_window is not None
+              else known_model_default_context_window(model))
+    return window * 95 // 100 if window is not None else None

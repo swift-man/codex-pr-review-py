@@ -2,6 +2,18 @@
 
 이 프로젝트의 주요 변경 사항을 기록합니다. 버전은 [Semantic Versioning](https://semver.org/)을 따릅니다.
 
+## [0.1.9] - 2026-09-14
+
+### 추가
+
+- Codex primary와 fallback 모델별 입력 예산을 설정하고, fallback 전환 시 해당 모델의
+  예산에 맞춰 동일한 리뷰 스냅샷을 축소합니다.
+
+### 변경
+
+- `CODEX_MODEL_INPUT_BUDGETS` 환경 설정을 추가해 모델별 입력 예산을 명시할 수 있으며,
+  설정이 없는 알려진 fallback은 CLI 기본 컨텍스트의 95%를 사용합니다.
+
 ## [Unreleased]
 
 ### 수정
