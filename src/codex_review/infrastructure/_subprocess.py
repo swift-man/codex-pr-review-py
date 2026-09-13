@@ -59,7 +59,7 @@ async def kill_and_reap(
     """
     pid = getattr(proc, "pid", None)
     group_killed = False
-    if process_group and isinstance(pid, int) and pid > 0 and hasattr(os, "killpg"):
+    if process_group and type(pid) is int and pid > 0 and hasattr(os, "killpg"):
         try:
             os.killpg(pid, signal.SIGKILL)
             group_killed = True

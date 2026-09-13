@@ -21,10 +21,18 @@ from codex_review.model_utils import ReasoningEffort
 
 
 class _FakeProc:
-    def __init__(self, returncode: int, stdout: bytes = b"", stderr: bytes = b"") -> None:
+    def __init__(
+        self,
+        returncode: int,
+        stdout: bytes = b"",
+        stderr: bytes = b"",
+        *,
+        pid: int | None = None,
+    ) -> None:
         self.returncode = returncode
         self._stdout = stdout
         self._stderr = stderr
+        self.pid = pid
 
     async def communicate(self, input: bytes | None = None) -> tuple[bytes, bytes]:
         return self._stdout, self._stderr
@@ -120,6 +128,7 @@ async def test_verify_auth_passes_when_logged_in_on_stderr(monkeypatch: pytest.M
 
 async def test_verify_auth_raises_when_not_logged_in(monkeypatch: pytest.MonkeyPatch) -> None:
     events: list[str] = []
+    group_kills: list[int] = []
 
     class _FailedAuthProc(_FakeProc):
         def kill(self) -> None:
@@ -129,11 +138,19 @@ async def test_verify_auth_raises_when_not_logged_in(monkeypatch: pytest.MonkeyP
             events.append("wait")
             return -9
 
-    _patch_subprocess(monkeypatch, _FailedAuthProc(1, stderr=b"Not logged in"))
+    monkeypatch.setattr(
+        "codex_review.infrastructure._subprocess.os.killpg",
+        lambda pid, _sig: group_kills.append(pid),
+    )
+    _patch_subprocess(
+        monkeypatch,
+        _FailedAuthProc(1, stderr=b"Not logged in", pid=1234),
+    )
     with pytest.raises(CodexAuthError) as exc:
         await _engine().verify_auth()
     assert "codex login" in str(exc.value)
-    assert events == ["kill", "wait"]
+    assert events == ["wait"]
+    assert group_kills == [1234]
 
 
 async def test_verify_auth_raises_on_unexpected_stdout(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -256,6 +273,7 @@ async def test_review_kills_subprocess_before_raising_on_nonzero_exit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     events: list[str] = []
+    group_kills: list[int] = []
 
     class _FailedReviewProc(_FakeProc):
         def kill(self) -> None:
@@ -267,14 +285,19 @@ async def test_review_kills_subprocess_before_raising_on_nonzero_exit(
 
     _patch_subprocess(
         monkeypatch,
-        _FailedReviewProc(1, stderr=b"Error: model unavailable\n"),
+        _FailedReviewProc(1, stderr=b"Error: model unavailable\n", pid=1234),
+    )
+    monkeypatch.setattr(
+        "codex_review.infrastructure._subprocess.os.killpg",
+        lambda pid, _sig: group_kills.append(pid),
     )
     pr, dump = _sample_review_input()
 
     with pytest.raises(ReviewEngineError):
         await CodexCliEngine(binary="codex", model="gpt-5.5").review(pr, dump)
 
-    assert events == ["kill", "wait"]
+    assert events == ["wait"]
+    assert group_kills == [1234]
 
 
 async def test_review_tries_fallback_model_after_primary_failure(
