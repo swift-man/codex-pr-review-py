@@ -85,6 +85,10 @@ class CodexCliEngine:
             # 워커 취소/서버 종료 신호 시 하위 프로세스가 좀비로 남지 않도록 반드시 정리.
             await kill_and_reap(proc, process_group=True)
             raise
+        except BaseException:
+            # 예상하지 못한 예외도 자식 프로세스 누수로 이어지지 않도록 정리 후 재전파.
+            await kill_and_reap(proc, process_group=True)
+            raise
 
         # codex CLI 는 TTY 가 아닐 때 상태 메시지를 stderr 로 보내므로 두 스트림 모두 확인.
         combined = (stdout.decode(errors="replace") + stderr.decode(errors="replace")).strip()
@@ -221,6 +225,10 @@ class CodexCliEngine:
         except asyncio.CancelledError:
             # 서버 종료/워커 취소 시 `codex exec` 하위 프로세스가 좀비로 남아 토큰·쿼터·CPU 를
             # 계속 소모하지 않도록 확실히 kill + wait 후 취소를 재전파한다.
+            await kill_and_reap(proc, process_group=True)
+            raise
+        except BaseException:
+            # 인코딩/communicate 중 예상하지 못한 예외에서도 고아 프로세스가 남지 않게 정리.
             await kill_and_reap(proc, process_group=True)
             raise
 

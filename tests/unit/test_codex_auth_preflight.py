@@ -237,6 +237,30 @@ async def test_verify_auth_kills_subprocess_on_cancellation(
     assert events == ["kill", "wait"], "취소 시 kill → wait 순으로 정리돼야 한다"
 
 
+async def test_verify_auth_kills_subprocess_on_unexpected_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    class _UnexpectedErrorProc(_FakeProc):
+        async def communicate(self, input: bytes | None = None) -> tuple[bytes, bytes]:
+            raise MemoryError("simulated allocation failure")
+
+        def kill(self) -> None:
+            events.append("kill")
+
+        async def wait(self) -> int:
+            events.append("wait")
+            return -9
+
+    _patch_subprocess(monkeypatch, _UnexpectedErrorProc(0))
+
+    with pytest.raises(MemoryError):
+        await _engine().verify_auth()
+
+    assert events == ["kill", "wait"]
+
+
 # ---------------------------------------------------------------------------
 # review() error logging contract — full stderr to logger, concise summary in exception
 # ---------------------------------------------------------------------------
@@ -328,6 +352,31 @@ async def test_review_kills_subprocess_before_raising_on_nonzero_exit(
 
     assert events == ["wait"]
     assert group_kills == [1234]
+
+
+async def test_review_kills_subprocess_on_unexpected_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    class _UnexpectedErrorProc(_FakeProc):
+        async def communicate(self, input: bytes | None = None) -> tuple[bytes, bytes]:
+            raise RuntimeError("simulated communicate failure")
+
+        def kill(self) -> None:
+            events.append("kill")
+
+        async def wait(self) -> int:
+            events.append("wait")
+            return -9
+
+    _patch_subprocess(monkeypatch, _UnexpectedErrorProc(0))
+    pr, dump = _sample_review_input()
+
+    with pytest.raises(RuntimeError):
+        await CodexCliEngine(binary="codex", model="gpt-5.5").review(pr, dump)
+
+    assert events == ["kill", "wait"]
 
 
 async def test_review_tries_fallback_model_after_primary_failure(
