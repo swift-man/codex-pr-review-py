@@ -57,11 +57,18 @@ async def kill_and_reap(
     `process_group=True`는 독립 세션으로 실행한 CLI의 래퍼와 네이티브 자식을 함께
     종료한다. 일반 subprocess는 기존처럼 직접 자식만 종료한다.
     """
-    with contextlib.suppress(ProcessLookupError):
-        pid = getattr(proc, "pid", None)
-        if process_group and pid is not None:
+    pid = getattr(proc, "pid", None)
+    group_killed = False
+    if process_group and isinstance(pid, int) and pid > 0 and hasattr(os, "killpg"):
+        try:
             os.killpg(pid, signal.SIGKILL)
-        else:
+            group_killed = True
+        except (AttributeError, OSError):
+            # killpg가 없는 플랫폼이나 이미 사라진 그룹에서는 직접 자식을 종료한다.
+            logger.debug("could not kill subprocess process group pid=%s", pid)
+
+    if not group_killed:
+        with contextlib.suppress(ProcessLookupError):
             # race: 이미 정상 종료됐을 수 있음 — 무시하고 reap 만 수행.
             proc.kill()
     await safe_reap(proc, timeout=timeout)

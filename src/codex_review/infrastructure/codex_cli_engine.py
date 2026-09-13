@@ -89,6 +89,7 @@ class CodexCliEngine:
         # codex CLI 는 TTY 가 아닐 때 상태 메시지를 stderr 로 보내므로 두 스트림 모두 확인.
         combined = (stdout.decode(errors="replace") + stderr.decode(errors="replace")).strip()
         if proc.returncode != 0 or "Logged in" not in combined:
+            await kill_and_reap(proc, process_group=True)
             raise CodexAuthError(
                 "Codex CLI 가 로그인되어 있지 않습니다.\n"
                 f"출력: {combined or '(empty)'}\n"
@@ -224,6 +225,7 @@ class CodexCliEngine:
             raise
 
         if proc.returncode != 0:
+            await kill_and_reap(proc, process_group=True)
             err = stderr.decode(errors="replace").strip()
             # 전체 stderr 는 별도 ERROR 로그로 — multi-line 그대로 보존되어 운영 진단이
             # 즉시 가능하다. 이전엔 stderr 가 RuntimeError 메시지에 들어가 traceback
