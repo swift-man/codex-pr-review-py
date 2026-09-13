@@ -273,6 +273,52 @@ async def test_review_tries_fallback_model_after_primary_failure(
     ]
 
 
+async def test_fallback_model_receives_snapshot_trimmed_to_its_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts: list[tuple[str, int]] = []
+    pr, _ = _sample_review_input()
+    dump = FileDump(
+        entries=(
+            FileEntry(path="a.py", content="a" * 150, size_bytes=150, is_changed=True),
+            FileEntry(path="b.py", content="b" * 150, size_bytes=150, is_changed=False),
+        ),
+        total_chars=300,
+    )
+
+    monkeypatch.setattr(
+        "codex_review.infrastructure.codex_cli_engine.build_prompt",
+        lambda _pr, candidate, **_kwargs: "x" * (
+            20 + sum(item.size_bytes for item in candidate.entries)
+        ),
+    )
+
+    async def fake_review(
+        _prompt: str,
+        candidate: FileDump,
+        *,
+        model: str,
+        timeout_sec: float,
+    ) -> ReviewResult:
+        attempts.append((model, len(candidate.entries)))
+        if model == "primary":
+            raise ReviewEngineError("primary unavailable")
+        return ReviewResult(summary="ok", event=ReviewEvent.COMMENT)
+
+    engine = CodexCliEngine(
+        binary="codex",
+        model="primary",
+        fallback_models=("fallback",),
+        model_input_budgets={"primary": 100, "fallback": 40},
+    )
+    engine._review_with_model = fake_review  # type: ignore[method-assign]
+
+    result = await engine.review(pr, dump)
+
+    assert result.summary == "ok"
+    assert attempts == [("primary", 2), ("fallback", 0)]
+
+
 async def test_review_tries_reserve_then_spark_when_model_limits_are_reached(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

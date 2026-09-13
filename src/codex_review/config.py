@@ -9,6 +9,7 @@ from codex_review.model_utils import (
     ReasoningEffort,
     dedupe_models,
     known_model_default_context_window,
+    known_model_input_budget,
     known_model_max_context_window,
 )
 
@@ -20,6 +21,7 @@ _DEFAULT_CODEX_MODEL = "gpt-5.6-sol"
 _DEFAULT_CODEX_MODEL_FALLBACKS = "gpt-reserve,gpt-5.3-codex-spark"
 _DEFAULT_CODEX_MAX_INPUT_TOKENS = 828_400
 _CONTEXT_WINDOW_BUDGET_PERCENT = 95
+_MAX_MODEL_INPUT_BUDGET = 10_000_000
 
 
 def _default_codex_max_input_tokens(validated_data: dict[str, object]) -> int:
@@ -109,6 +111,11 @@ class Settings(BaseSettings):
         gt=0,
         alias="CODEX_MAX_INPUT_TOKENS",
     )
+    # Optional model-scoped budgets (`model=tokens,model=tokens`). When omitted, the
+    # primary keeps CODEX_MAX_INPUT_TOKENS and known fallbacks use their CLI defaults.
+    codex_model_input_budgets_raw: str | None = Field(
+        default=None, alias="CODEX_MODEL_INPUT_BUDGETS"
+    )
     # 예산 초과 시 diff-only 모드 자동 fallback 활성화 여부 (기본 True).
     # False 로 내리면 기존 "리뷰 스킵 + 안내 코멘트" 경로만 남는다 — 리뷰 품질을
     # 보수적으로 보장하고 싶은 운영 환경 대비 옵트아웃. (gemini PR #17 제안)
@@ -180,6 +187,32 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
+    def validate_model_input_budgets(self) -> Self:
+        configured = _parse_model_input_budgets(self.codex_model_input_budgets_raw)
+        sequence = self.codex_model_sequence
+        unknown = set(configured).difference(sequence)
+        if unknown:
+            raise ValueError(
+                "CODEX_MODEL_INPUT_BUDGETS contains models outside CODEX_MODEL_FALLBACKS"
+            )
+        for index, model in enumerate(sequence):
+            value = configured.get(model)
+            if value is None:
+                continue
+            context = (
+                self.effective_codex_model_context_window
+                if index == 0
+                else known_model_default_context_window(model)
+            )
+            maximum = known_model_input_budget(model, context)
+            if maximum is not None and value > maximum:
+                raise ValueError(
+                    f"CODEX_MODEL_INPUT_BUDGETS의 {model} 예산이 유효 입력 한도 "
+                    f"{maximum}을 초과합니다."
+                )
+        return self
+
+    @model_validator(mode="after")
     def require_single_private_key_source(self) -> Self:
         """Require exactly one GitHub App private key source."""
         if self.github_app_private_key is None and self.github_app_private_key_path is None:
@@ -216,6 +249,39 @@ class Settings(BaseSettings):
             return self.codex_model_context_window
         return known_model_default_context_window(self.codex_model)
 
+    @property
+    def codex_model_input_budgets(self) -> dict[str, int]:
+        configured = _parse_model_input_budgets(self.codex_model_input_budgets_raw)
+        result: dict[str, int] = {}
+        for index, model in enumerate(self.codex_model_sequence):
+            if model in configured:
+                result[model] = configured[model]
+                continue
+            if index == 0:
+                result[model] = self.codex_max_input_tokens
+                continue
+            default = known_model_input_budget(model)
+            if default is not None:
+                result[model] = default
+        return result
+
 
 def _split_model_list(raw: str) -> tuple[str, ...]:
     return tuple(part for part in (item.strip() for item in raw.split(",")) if part)
+
+
+def _parse_model_input_budgets(raw: str | None) -> dict[str, int]:
+    if raw is None or not raw.strip():
+        return {}
+    result: dict[str, int] = {}
+    for item in raw.split(","):
+        model, separator, tokens = item.partition("=")
+        model, tokens = model.strip(), tokens.strip()
+        if (not separator or model in result or not model
+                or not tokens.isascii() or not tokens.isdecimal()):
+            raise ValueError("CODEX_MODEL_INPUT_BUDGETS must use model=tokens pairs")
+        value = int(tokens)
+        if not 0 < value <= _MAX_MODEL_INPUT_BUDGET:
+            raise ValueError("CODEX_MODEL_INPUT_BUDGETS values must be between 1 and 10000000")
+        result[model] = value
+    return result

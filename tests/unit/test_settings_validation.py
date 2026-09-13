@@ -38,6 +38,7 @@ _ALL_ALIASES = (
     "CODEX_MODEL_CONTEXT_WINDOW",
     "CODEX_TIMEOUT_SEC",
     "CODEX_MAX_INPUT_TOKENS",
+    "CODEX_MODEL_INPUT_BUDGETS",
     "REPO_CACHE_DIR",
     "FILE_MAX_BYTES",
     "DATA_FILE_MAX_BYTES",
@@ -86,6 +87,11 @@ def test_defaults_are_all_valid(monkeypatch: pytest.MonkeyPatch) -> None:
     assert s.codex_timeout_sec == 600
     assert s.git_timeout_sec == 120
     assert s.codex_max_input_tokens == 828_400
+    assert s.codex_model_input_budgets == {
+        "gpt-5.6-sol": 828_400,
+        "gpt-reserve": 258_400,
+        "gpt-5.3-codex-spark": 121_600,
+    }
     assert s.review_queue_maxsize is None
 
 
@@ -166,6 +172,39 @@ def test_codex_input_budget_defaults_to_primary_context(
     )
 
     assert settings.codex_max_input_tokens == 121_600
+
+
+def test_model_scoped_input_budgets_are_validated_and_projected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings(
+        monkeypatch,
+        CODEX_MODEL="gpt-6-astra",
+        CODEX_MODEL_FALLBACKS="gpt-reserve,gpt-5.3-codex-spark",
+        CODEX_MODEL_CONTEXT_WINDOW="872000",
+        CODEX_MAX_INPUT_TOKENS="828400",
+        CODEX_MODEL_INPUT_BUDGETS=(
+            "gpt-6-astra=828400,gpt-reserve=258400,gpt-5.3-codex-spark=121600"
+        ),
+    )
+    assert settings.codex_model_input_budgets["gpt-reserve"] == 258400
+
+
+def test_model_scoped_input_budget_rejects_unknown_or_oversized_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(ValidationError, match="outside CODEX_MODEL_FALLBACKS"):
+        _settings(monkeypatch, CODEX_MODEL_INPUT_BUDGETS="unconfigured=100")
+    with pytest.raises(ValidationError, match="유효 입력 한도 121600"):
+        _settings(
+            monkeypatch,
+            CODEX_MODEL_INPUT_BUDGETS="gpt-5.3-codex-spark=121601",
+        )
+    with pytest.raises(ValidationError, match="between 1 and 10000000"):
+        _settings(
+            monkeypatch,
+            CODEX_MODEL_INPUT_BUDGETS="gpt-5.3-codex-spark=10000001",
+        )
 
 
 def test_explicit_codex_input_budget_cannot_exceed_primary_context(
