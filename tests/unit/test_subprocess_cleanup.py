@@ -6,6 +6,9 @@
 
 import asyncio
 import logging
+import os
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -20,7 +23,7 @@ class _FakeProc:
         *,
         wait_delay: float = 0.0,
         kill_raises: type[BaseException] | None = None,
-        pid: int = 1234,
+        pid: int | None = 1234,
     ) -> None:
         self._wait_delay = wait_delay
         self._kill_raises = kill_raises
@@ -85,3 +88,66 @@ async def test_kill_and_reap_propagates_cancellation() -> None:
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+async def test_kill_and_reap_falls_back_to_direct_kill_when_group_kill_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proc = _FakeProc()
+
+    def fail_killpg(_pid: int, _sig: int) -> None:
+        raise OSError("process groups are unavailable")
+
+    monkeypatch.setattr(_subprocess.os, "killpg", fail_killpg, raising=False)
+    await _subprocess.kill_and_reap(proc, process_group=True)
+
+    assert proc.kill_called == 1
+
+
+@pytest.mark.parametrize("pid", [None, 0, -1, True])
+async def test_kill_and_reap_never_targets_an_invalid_process_group_pid(
+    pid: int | None,
+) -> None:
+    proc = _FakeProc(pid=pid)
+
+    await _subprocess.kill_and_reap(proc, process_group=True)
+
+    assert proc.kill_called == 1
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "killpg"), reason="os.killpg is required for process group termination test"
+)
+async def test_kill_and_reap_can_terminate_the_entire_cli_process_group(
+    tmp_path: Path,
+) -> None:
+    marker = tmp_path / "descendant-survived"
+    started_marker = tmp_path / "descendant-started"
+    child = (
+        f"import time; open({str(started_marker)!r}, 'w').close(); "
+        f"time.sleep(0.8); open({str(marker)!r}, 'w').close()"
+    )
+    parent = (
+        "import subprocess,sys,time; "
+        f"subprocess.Popen([sys.executable, '-c', {child!r}]); time.sleep(30)"
+    )
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-c",
+        parent,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    cleanup_complete = False
+    try:
+        async with asyncio.timeout(2.0):
+            while not started_marker.exists():
+                await asyncio.sleep(0.01)
+        await _subprocess.kill_and_reap(proc, timeout=1.0, process_group=True)
+        cleanup_complete = True
+        await asyncio.sleep(1.0)
+    finally:
+        if not cleanup_complete:
+            await _subprocess.kill_and_reap(proc, timeout=1.0, process_group=True)
+    assert not marker.exists()
