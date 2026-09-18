@@ -3,7 +3,14 @@ import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 
-from codex_review.domain import FileDump, PullRequest, ReviewHistory, ReviewResult
+from codex_review.domain import (
+    DUMP_MODE_DIFF,
+    FileDump,
+    FileEntry,
+    PullRequest,
+    ReviewHistory,
+    ReviewResult,
+)
 from codex_review.interfaces import ReviewEngineError
 from codex_review.logging_utils import redact_text
 from codex_review.model_utils import (
@@ -16,6 +23,7 @@ from codex_review.model_utils import (
 from ._subprocess import kill_and_reap
 from .codex_parser import parse_review
 from .codex_prompt import build_prompt
+from .file_dump_collector import estimate_full_prompt_file_chars
 
 logger = logging.getLogger(__name__)
 
@@ -114,7 +122,15 @@ class CodexCliEngine:
                 break
             attempted_models.append(model)
             try:
-                attempt_dump = self._dump_for_model(pr, dump, model, history=history)
+                attempt_dump = self._dump_for_model(
+                    pr,
+                    dump,
+                    model,
+                    history=history,
+                    # 뒤에 시도할 모델이 남아 있을 때만 예산 초과를 이유로 이 모델을
+                    # 건너뛴다. 마지막 모델까지 건너뛰면 리뷰 경로가 통째로 사라진다.
+                    allow_skip=idx + 1 < len(self._models),
+                )
                 prompt = build_prompt(pr, attempt_dump, history=history)
                 if len(prompt) > CODEX_CLI_MAX_INPUT_CHARS:
                     raise ReviewEngineError(
@@ -167,11 +183,17 @@ class CodexCliEngine:
         model: str,
         *,
         history: ReviewHistory | None,
+        allow_skip: bool = True,
     ) -> FileDump:
         """Trim the in-memory snapshot to the selected model's input budget.
 
         The collector runs once under the repository snapshot lock. Fallback attempts therefore
         trim entries from that immutable snapshot instead of rereading a moving checkout.
+
+        `allow_skip` 는 "예산에 못 맞추면 이 모델을 건너뛰어도 되는가" — 뒤에 시도할 모델이
+        남아 있을 때만 True 다. 마지막 모델에서는 예산을 못 맞춰도 최대한 줄인 입력으로
+        실제 호출을 시도한다. 우리 예산(4 chars/token) 은 보수적 추정일 뿐이라, 여기서
+        포기하면 CLI 가 받아들였을 입력까지 버리고 리뷰를 통째로 잃는다.
         """
         configured = self._model_input_budgets.get(model)
         if configured is None:
@@ -185,14 +207,15 @@ class CodexCliEngine:
             removed_paths = {entry.path for entry in removed_entries}
             kept_entries = tuple(entry for entry in entries if entry.path not in removed_paths)
             excluded = list(dump.excluded)
+            known = set(excluded)
             for entry in removed_entries:
-                if entry.path not in excluded:
+                if entry.path not in known:
                     excluded.append(entry.path)
+                    known.add(entry.path)
             return replace(
                 dump,
                 entries=kept_entries,
-                # `size_bytes` is UTF-8 bytes; this field is a character count.
-                total_chars=sum(len(entry.content) for entry in kept_entries),
+                total_chars=_dump_total_chars(dump.mode, kept_entries),
                 excluded=tuple(excluded),
                 exceeded_budget=dump.exceeded_budget or bool(removed_entries),
                 budget=dump.budget,
@@ -201,15 +224,23 @@ class CodexCliEngine:
         if len(build_prompt(pr, dump, history=history)) <= max_chars:
             return dump
 
-        # Changed files are the review target and must never be silently discarded. If even
-        # those files cannot fit, the use case will raise and switch to its diff-only fallback.
+        # Changed files are the review target and must never be silently discarded. In diff
+        # mode every entry is a changed file, so `changed_only` is the original dump — there is
+        # nothing this method can trim and the budget can only be enforced by skipping.
         changed_only = candidate_for(len(removable))
         changed_only_chars = len(build_prompt(pr, changed_only, history=history))
         if changed_only_chars > max_chars:
-            raise ReviewEngineError(
-                f"codex input budget is too small for model={model} "
-                f"(max_chars={max_chars}, actual_chars={changed_only_chars})"
+            if allow_skip:
+                raise ReviewEngineError(
+                    f"codex input exceeds the model={model} token limit "
+                    f"(max_chars={max_chars}, actual_chars={changed_only_chars})"
+                )
+            logger.warning(
+                "codex input still over budget on last model=%s after dropping %d unchanged "
+                "files (max_chars=%d, actual_chars=%d) — attempting anyway",
+                model, len(removable), max_chars, changed_only_chars,
             )
+            return changed_only
 
         # Removing one file at a time rebuilds the full prompt O(N^2) times. Find the smallest
         # suffix of low-priority, unchanged files that makes the prompt fit instead.
@@ -221,7 +252,14 @@ class CodexCliEngine:
                 high = middle
             else:
                 low = middle + 1
-        return candidate_for(low)
+        trimmed = candidate_for(low)
+        if low:
+            logger.warning(
+                "trimmed review snapshot for model=%s: dropped %d unchanged files "
+                "(files %d -> %d, max_chars=%d)",
+                model, low, len(entries), len(trimmed.entries), max_chars,
+            )
+        return trimmed
 
     async def _review_with_model(
         self,
@@ -351,3 +389,20 @@ def _is_codex_stderr_footer_line(line: str) -> bool:
         return False
     token_count = suffix[1:].strip().replace(",", "")
     return token_count.isdecimal()
+
+
+def _dump_total_chars(mode: str, entries: Sequence[FileEntry]) -> int:
+    """Recompute `FileDump.total_chars` with the same unit the producing collector used.
+
+    full 모드는 `FileDumpCollector` 와 동일한 프롬프트 문자 추정치, diff 모드는
+    `DiffContextCollector` 와 동일한 UTF-8 바이트 합계다. 여기서 단위가 어긋나면
+    "invoking codex: chars=..." 로그가 축소 여부에 따라 조용히 다른 값을 가리킨다.
+    """
+    if mode == DUMP_MODE_DIFF:
+        return sum(entry.size_bytes for entry in entries)
+    return sum(
+        estimate_full_prompt_file_chars(
+            entry.path, entry.content, is_changed=entry.is_changed
+        )
+        for entry in entries
+    )

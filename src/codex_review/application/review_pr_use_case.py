@@ -554,8 +554,12 @@ def _prepend_diff_scope_badge(
         )
     else:
         # 기본: 사전 예산 fallback. 전체 코드베이스 합산이 우리 추정 예산을 넘었다.
+        # 실효 수집 예산은 `CODEX_MODEL_INPUT_BUDGETS` 가 설정돼 있으면 그 최댓값이고,
+        # 없을 때만 `CODEX_MAX_INPUT_TOKENS` 다. 한쪽만 안내하면 운영자가 효과 없는
+        # 값을 올리며 시간을 버린다.
         reason_text = (
-            "> 전체 코드베이스가 파일 크기 또는 입력 예산(`CODEX_MAX_INPUT_TOKENS`)을 초과하여 "
+            "> 전체 코드베이스가 파일 크기 또는 입력 예산(`CODEX_MODEL_INPUT_BUDGETS` 의 "
+            "최댓값, 미설정 시 `CODEX_MAX_INPUT_TOKENS`)을 초과하여 "
             "PR 의 unified patch 만 근거로 리뷰했습니다."
         )
     lines = [
@@ -687,8 +691,8 @@ def _engine_failure_message(
 
     mode_desc = _FAILURE_MODE_DESCRIPTIONS.get(failure_mode, failure_mode)
     advice = (
-        "1. `CODEX_MAX_INPUT_TOKENS` 를 모델 실제 윈도우보다 작게 조정 "
-        "(예: 150000) → 큰 PR 은 자동 diff 모드로 떨어집니다.\n"
+        "1. `CODEX_MODEL_INPUT_BUDGETS`(미설정 시 `CODEX_MAX_INPUT_TOKENS`) 를 모델 실제 "
+        "윈도우보다 작게 조정 (예: 150000) → 큰 PR 은 자동 diff 모드로 떨어집니다.\n"
         "2. 더 큰 컨텍스트 윈도우의 모델을 `CODEX_MODEL` 또는 "
         "`CODEX_MODEL_FALLBACKS` 에 배치.\n"
         "3. 서버 로그(stderr 전체) 를 확인해 모델/CLI 측 메시지 검증.\n"
@@ -718,12 +722,13 @@ def _budget_exceeded_message(pr: PullRequest, dump: FileDump) -> str:
     excluded = len(dump.excluded)
     return (
         "⚠️ **Codex Review — 컨텍스트 예산 초과**\n\n"
-        f"본 저장소의 전체 코드 크기가 설정된 입력 한도(`CODEX_MAX_INPUT_TOKENS={max_tokens}`)"
+        f"본 저장소의 전체 코드 크기가 설정된 수집 입력 한도({max_tokens} tokens)"
         "를 초과하여 리뷰를 수행하지 않았습니다.\n\n"
         f"- 포함된 파일: {included}개\n"
         f"- 제외된 파일: {excluded}개 (변경 파일 일부 포함)\n\n"
         "다음 중 하나를 조치해 주세요:\n"
         "1. PR 범위를 줄여 변경 파일이 컨텍스트에 들어가도록 분할\n"
         "2. `.codex-reviewignore` 등으로 제외 규칙 확장\n"
-        "3. `CODEX_MAX_INPUT_TOKENS` 값을 상향 조정 (모델 컨텍스트 허용 범위 내)\n"
+        "3. `CODEX_MODEL_INPUT_BUDGETS`(미설정 시 `CODEX_MAX_INPUT_TOKENS`) 값을 "
+        "상향 조정 (모델 컨텍스트 허용 범위 내)\n"
     )

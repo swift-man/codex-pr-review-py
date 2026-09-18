@@ -306,7 +306,7 @@ def _build_dump_sync(
                 filter_excluded_set.add(rel_path)
             continue
 
-        entry_chars = _estimate_full_prompt_file_chars(
+        entry_chars = estimate_full_prompt_file_chars(
             rel_path,
             content,
             is_changed=rel_path in changed_set,
@@ -368,7 +368,7 @@ def _full_dump_file_budget_chars(budget: TokenBudget) -> int:
     return max(0, int((raw_limit - overhead) * _FULL_DUMP_FILE_BUDGET_RATIO))
 
 
-def _estimate_full_prompt_file_chars(
+def estimate_full_prompt_file_chars(
     rel_path: str,
     content: str,
     *,
