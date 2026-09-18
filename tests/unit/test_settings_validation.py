@@ -11,7 +11,13 @@ from typing import cast
 import pytest
 from pydantic import ValidationError
 
+from codex_review.application.review_pr_use_case import (
+    _MODEL_LIMIT_ERROR_PHRASES,
+    _is_model_limit_error,
+    _unsupported_models,
+)
 from codex_review.config import Settings
+from codex_review.interfaces import ReviewEngineError
 from codex_review.model_utils import ReasoningEffort, effective_reasoning_effort
 
 _REQUIRED_ENV = {
@@ -73,13 +79,10 @@ def _settings(
 def test_defaults_are_all_valid(monkeypatch: pytest.MonkeyPatch) -> None:
     s = _settings(monkeypatch)
     assert s.codex_model == "gpt-5.6-sol"
-    assert s.codex_model_fallbacks == ("gpt-reserve", "gpt-5.3-codex-spark")
-    assert s.codex_model_sequence == (
-        "gpt-5.6-sol",
-        "gpt-reserve",
-        "gpt-5.3-codex-spark",
-    )
-    assert s.codex_model_label == "gpt-5.6-sol -> gpt-reserve -> gpt-5.3-codex-spark"
+    # Spark 는 ChatGPT 계정 인증에서 API 가 거부하므로 기본 체인에 없다.
+    assert s.codex_model_fallbacks == ("gpt-reserve",)
+    assert s.codex_model_sequence == ("gpt-5.6-sol", "gpt-reserve")
+    assert s.codex_model_label == "gpt-5.6-sol -> gpt-reserve"
     assert s.codex_reasoning_effort == "max"
     assert s.codex_fallback_reasoning_effort is None
     assert s.effective_codex_model_context_window == 872_000
@@ -90,7 +93,6 @@ def test_defaults_are_all_valid(monkeypatch: pytest.MonkeyPatch) -> None:
     assert s.codex_model_input_budgets == {
         "gpt-5.6-sol": 828_400,
         "gpt-reserve": 258_400,
-        "gpt-5.3-codex-spark": 121_600,
     }
     assert s.review_queue_maxsize is None
 
@@ -100,9 +102,13 @@ def test_local_review_env_example_prefers_gpt_56_sol_budget() -> None:
     text = example.read_text(encoding="utf-8")
 
     assert 'export CODEX_MODEL="gpt-5.6-sol"' in text
-    assert (
-        'export CODEX_MODEL_FALLBACKS="gpt-reserve,gpt-5.3-codex-spark"' in text
-    )
+    assert 'export CODEX_MODEL_FALLBACKS="gpt-reserve"' in text
+    # 기본 체인에 미지원 모델이 다시 들어오지 않도록 예시 스크립트도 함께 고정한다.
+    # (주석의 카탈로그 나열은 허용 — 실제로 export 하는 줄만 본다.)
+    exported = [
+        line for line in text.splitlines() if line.startswith("export CODEX_MODEL")
+    ]
+    assert not any("gpt-5.3-codex-spark" in line for line in exported)
     assert 'export CODEX_REASONING_EFFORT="max"' in text
     assert 'export CODEX_MODEL_CONTEXT_WINDOW="872000"' in text
     assert 'export CODEX_MAX_INPUT_TOKENS="828400"' in text
@@ -216,11 +222,13 @@ def test_model_scoped_input_budget_rejects_unknown_or_oversized_model(
     with pytest.raises(ValidationError, match="유효 입력 한도 121600"):
         _settings(
             monkeypatch,
+            CODEX_MODEL_FALLBACKS="gpt-5.3-codex-spark",
             CODEX_MODEL_INPUT_BUDGETS="gpt-5.3-codex-spark=121601",
         )
     with pytest.raises(ValidationError, match="between 1 and 10000000"):
         _settings(
             monkeypatch,
+            CODEX_MODEL_FALLBACKS="gpt-5.3-codex-spark",
             CODEX_MODEL_INPUT_BUDGETS="gpt-5.3-codex-spark=10000001",
         )
 
@@ -481,7 +489,6 @@ def test_extended_reasoning_effort_allows_model_specific_fallback_downgrade(
     ) == (
         "max" if effort == "max" else "ultra",
         "max",
-        "xhigh",
     )
 
 
@@ -693,3 +700,122 @@ def test_create_app_wires_runtime_review_dependencies(
     assert review_captured.get("max_input_tokens") == 258400
     assert engine_captured["reasoning_effort"] == "xhigh"
     assert engine_captured["fallback_reasoning_effort"] == "max"
+
+
+def test_unsupported_model_is_named_from_the_structured_failure_list() -> None:
+    """체인 끝 미지원 모델을 정확히 집어내고, 앞 모델의 한도 신호는 살아 있어야 한다.
+
+    실제 운영에서 관측된 오류 형태 그대로 검증한다 — 마지막 모델의 "not supported" 가
+    앞 모델의 진짜 실패 사유를 덮어 버리던 문제의 회귀 가드.
+    """
+    exc = ReviewEngineError(
+        "codex exec fallback exhausted "
+        "(models=gpt-6-astra -> gpt-reserve -> gpt-5.3-codex-spark); errors: "
+        "[gpt-6-astra] context length exceeded | [gpt-reserve] rate limited | "
+        "[gpt-5.3-codex-spark] model is not supported",
+        model_failures=(
+            ("gpt-6-astra", "codex exec failed (rc=1): context length exceeded"),
+            ("gpt-reserve", "codex exec failed (rc=1): rate limited"),
+            (
+                "gpt-5.3-codex-spark",
+                "codex exec failed (rc=1): ERROR: The 'gpt-5.3-codex-spark' model is "
+                "not supported when using Codex with a ChatGPT account.",
+            ),
+        ),
+    )
+
+    assert _unsupported_models(exc) == ("gpt-5.3-codex-spark",)
+    # 체인 끝 미지원 모델이 있어도 앞 모델의 한도 신호는 분류에 살아 있어야 한다.
+    assert _is_model_limit_error(exc)
+
+
+def test_unsupported_model_detection_ignores_bracket_tokens_in_stderr() -> None:
+    """사유 본문의 `[ERROR]` 같은 대괄호 토큰을 모델명으로 오추출하면 안 된다.
+
+    메시지 문자열을 정규식으로 되파싱하던 구현의 회귀 가드.
+    """
+    exc = ReviewEngineError(
+        "codex exec failed (rc=1, model=gpt-5.5): [ERROR] model is not supported",
+        model_failures=(("gpt-5.5", "[ERROR] model is not supported"),),
+    )
+
+    assert _unsupported_models(exc) == ("gpt-5.5",)
+
+
+def test_ordinary_limit_failure_is_not_reported_as_an_unsupported_model() -> None:
+    exc = ReviewEngineError(
+        "codex exec failed (rc=1, model=gpt-5.5): context length exceeded",
+        model_failures=(("gpt-5.5", "context length exceeded"),),
+    )
+
+    assert _unsupported_models(exc) == ()
+
+
+def test_failure_without_structured_metadata_is_not_misdiagnosed() -> None:
+    assert _unsupported_models(RuntimeError("model is not supported")) == ()
+
+
+def test_model_input_budgets_tolerates_trailing_commas(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """후행 쉼표 같은 사소한 오타로 서버 기동이 막히면 안 된다."""
+    settings = _settings(
+        monkeypatch,
+        CODEX_MODEL_INPUT_BUDGETS="gpt-5.6-sol=828400, gpt-reserve=258400, ",
+    )
+
+    assert settings.codex_model_input_budgets == {
+        "gpt-5.6-sol": 828_400,
+        "gpt-reserve": 258_400,
+    }
+
+
+def test_limit_keyword_past_the_message_truncation_is_still_classified() -> None:
+    """표시용 메시지는 사유를 잘라 내므로, 한도 판정은 원문도 함께 봐야 한다.
+
+    오분류되면 중복 게시 방지 마커까지 빠져 같은 코멘트가 재전달마다 쌓인다.
+    """
+    detail = "codex exec failed (rc=1): " + "x" * 400 + " exceeds the maximum context"
+    exc = ReviewEngineError(
+        "codex exec fallback exhausted (models=a -> b); errors: [a] codex exec failed …",
+        model_failures=(("gpt-6-astra", detail),),
+    )
+
+    assert not any(p in str(exc).casefold() for p in _MODEL_LIMIT_ERROR_PHRASES)
+    assert _is_model_limit_error(exc)
+
+
+def test_single_model_unsupported_advice_omits_the_other_models_hint() -> None:
+    """모델을 하나만 시도했으면 "다른 모델의 실패 사유" 라는 안내는 성립하지 않는다."""
+    from codex_review.application.review_pr_use_case import (
+        _FAILURE_FULL_ONLY,
+        _engine_failure_comment_body,
+    )
+    from codex_review.domain import FileDump, FileEntry, PullRequest, RepoRef
+
+    pr = PullRequest(
+        repo=RepoRef("o", "r"), number=1, title="t", body="", head_sha="abc",
+        head_ref="f", base_sha="d", base_ref="main", clone_url="https://e/x.git",
+        changed_files=("a.py",), installation_id=7, is_draft=False,
+    )
+    dump = FileDump(
+        entries=(FileEntry(path="a.py", content="x", size_bytes=1, is_changed=True),),
+        total_chars=1,
+    )
+    single = ReviewEngineError(
+        "codex exec failed (rc=1, model=solo): ERROR: model is not supported",
+        model_failures=(("solo", "ERROR: model is not supported"),),
+    )
+    multi = ReviewEngineError(
+        "codex exec fallback exhausted (models=first -> solo); errors: …",
+        model_failures=(
+            ("first", "rate limited"),
+            ("solo", "ERROR: model is not supported"),
+        ),
+    )
+
+    body_single = _engine_failure_comment_body(pr, dump, single, _FAILURE_FULL_ONLY, True)
+    body_multi = _engine_failure_comment_body(pr, dump, multi, _FAILURE_FULL_ONLY, True)
+
+    assert "다른 모델의 실패 사유" not in body_single
+    assert "다른 모델의 실패 사유" in body_multi

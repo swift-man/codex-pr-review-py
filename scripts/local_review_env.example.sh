@@ -16,8 +16,9 @@ export GITHUB_WEBHOOK_SECRET="change-me-long-random"
 #   gpt-6-astra, gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, gpt-reserve, gpt-5.5, gpt-5.4,
 #   gpt-5.4-mini, gpt-5.3-codex-spark, codex-auto-review
 export CODEX_MODEL="gpt-5.6-sol"
-export CODEX_MODEL_FALLBACKS="gpt-reserve,gpt-5.3-codex-spark"
-export CODEX_REASONING_EFFORT="max"  # Reserve=max, Spark는 지원 범위에 맞춰 xhigh로 자동 조정
+# gpt-5.3-codex-spark 는 ChatGPT 계정 인증에서 지원되지 않는다 — 기본 체인에서 제외.
+export CODEX_MODEL_FALLBACKS="gpt-reserve"
+export CODEX_REASONING_EFFORT="max"  # 모델별 지원 상한에 맞춰 자동 조정된다 (Reserve=max)
 # To run primary at xhigh and Reserve/Luna at max:
 # export CODEX_REASONING_EFFORT="xhigh"
 # export CODEX_FALLBACK_REASONING_EFFORT="max"
@@ -26,7 +27,7 @@ export CODEX_REASONING_EFFORT="max"  # Reserve=max, Spark는 지원 범위에 �
 export CODEX_MODEL_CONTEXT_WINDOW="872000"
 export CODEX_MAX_INPUT_TOKENS="828400"
 # Per-model input budgets. Fallback attempts trim the immutable snapshot to each value.
-export CODEX_MODEL_INPUT_BUDGETS="gpt-5.6-sol=828400,gpt-reserve=258400,gpt-5.3-codex-spark=121600"
+export CODEX_MODEL_INPUT_BUDGETS="gpt-5.6-sol=828400,gpt-reserve=258400"
 export CODEX_TIMEOUT_SEC="600"
 # npm 또는 Homebrew로 설치한 CLI를 쓴다면:
 #   export CODEX_BIN="/opt/homebrew/bin/codex"

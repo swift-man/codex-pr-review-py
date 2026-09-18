@@ -334,10 +334,13 @@ class ReviewPullRequestUseCase:
         history: ReviewHistory | None,
     ) -> None:
         is_model_limit = _is_model_limit_error(exc)
-        if not is_model_limit or self._bot_login is None:
+        # 미지원 모델도 같은 head 에서는 결정론적으로 똑같이 실패한다. 한도 초과와 함께
+        # 중복 게시 방지를 태워야 재전달마다 같은 코멘트가 쌓이지 않는다 (gemini PR #58).
+        is_deterministic = is_model_limit or bool(_unsupported_models(exc))
+        if not is_deterministic or self._bot_login is None:
             await self._github.post_comment(
                 pr,
-                _engine_failure_comment_body(pr, dump, exc, failure_mode, is_model_limit),
+                _engine_failure_comment_body(pr, dump, exc, failure_mode, is_deterministic),
             )
             return
 
@@ -365,7 +368,7 @@ class ReviewPullRequestUseCase:
 
             await self._github.post_comment(
                 pr,
-                _engine_failure_comment_body(pr, dump, exc, failure_mode, is_model_limit),
+                _engine_failure_comment_body(pr, dump, exc, failure_mode, is_deterministic),
             )
 
     async def _model_limit_comment_lock(self, pr: PullRequest) -> asyncio.Lock:
@@ -588,6 +591,16 @@ def _make_code_fence_safe(text: str) -> str:
 
 _MODEL_LIMIT_COMMENT_MARKER_PREFIX = "<!-- codex-review:model-limit"
 
+# 모델이 "쓸 수 없는" 상태 — 한도 초과와 달리 입력을 줄여도 절대 성공하지 않는다.
+# 설정에서 빼야만 해결되므로 조치 안내를 따로 준다.
+_MODEL_UNSUPPORTED_ERROR_PHRASES = (
+    "is not supported",
+    "not supported when using codex",
+    "model_not_found",
+    "unknown model",
+    "does not exist or you do not have access",
+)
+
 _MODEL_LIMIT_ERROR_PHRASES = (
     "context window",
     "context length",
@@ -602,9 +615,37 @@ _MODEL_LIMIT_ERROR_PHRASES = (
 )
 
 
-def _is_model_limit_error(exc: Exception) -> bool:
-    message = str(exc).casefold()
-    return any(phrase in message for phrase in _MODEL_LIMIT_ERROR_PHRASES)
+def _is_model_limit_error(exc: BaseException) -> bool:
+    """한도 초과 실패인지 판정한다.
+
+    `str(exc)` 만 보면 안 된다 — 엔진이 표시용 메시지를 만들 때 모델별 사유를 길이
+    상한으로 자르므로, 한도 문구가 그 뒤에 있으면 통째로 사라진다. 잘리지 않은
+    `model_failures` 원문을 함께 훑어야 오분류로 중복 게시 방지까지 놓치지 않는다
+    (gemini PR #58).
+    """
+    haystacks = [str(exc).casefold()]
+    haystacks.extend(detail.casefold() for _, detail in getattr(exc, "model_failures", ()))
+    return any(
+        phrase in haystack
+        for haystack in haystacks
+        for phrase in _MODEL_LIMIT_ERROR_PHRASES
+    )
+
+
+def _unsupported_models(exc: BaseException) -> tuple[str, ...]:
+    """영구 사용 불가로 판정된 모델명을 뽑는다.
+
+    엔진이 `(모델, 사유)` 를 구조화해 실어 주므로 그대로 읽는다. 메시지 문자열을
+    되파싱하면 stderr 에 섞인 대괄호 토큰(`[ERROR]` 등)을 모델명으로 오추출하고,
+    단일 모델 구성처럼 포맷이 다른 경로에서는 아예 못 찾는다 (gemini PR #58 Major).
+    """
+    found: list[str] = []
+    for model, detail in getattr(exc, "model_failures", ()):
+        if not any(p in detail.casefold() for p in _MODEL_UNSUPPORTED_ERROR_PHRASES):
+            continue
+        if model not in found:
+            found.append(model)
+    return tuple(found)
 
 
 def _model_limit_comment_marker(pr: PullRequest) -> str:
@@ -620,10 +661,15 @@ def _engine_failure_comment_body(
     dump: FileDump,
     exc: Exception,
     failure_mode: str,
-    is_model_limit: bool,
+    is_deterministic: bool,
 ) -> str:
+    """`is_deterministic` 은 "같은 head 로 재시도해도 똑같이 실패" 를 뜻한다.
+
+    한도 초과와 미지원 모델이 여기 해당한다. 마커가 붙어야 재전달마다 같은 진단
+    코멘트가 쌓이는 걸 막을 수 있다.
+    """
     body = _engine_failure_message(pr, dump, exc, failure_mode=failure_mode)
-    if is_model_limit:
+    if is_deterministic:
         body = _append_model_limit_comment_marker(body, pr)
     return body
 
@@ -690,6 +736,30 @@ def _engine_failure_message(
     detail = _make_code_fence_safe(detail)
 
     mode_desc = _FAILURE_MODE_DESCRIPTIONS.get(failure_mode, failure_mode)
+    unsupported = _unsupported_models(exc)
+    if unsupported:
+        # 입력을 줄이는 조치는 이 경우 전부 무의미하다. 설정에서 빼라는 안내를 맨 앞에.
+        joined = ", ".join(f"`{m}`" for m in unsupported)
+        return (
+            "⚠️ **Codex Review — 사용할 수 없는 모델**\n\n"
+            f"이 PR 은 자동 리뷰를 완료하지 못했습니다 ({mode_desc}).\n\n"
+            f"{joined} 모델을 현재 인증 방식으로 사용할 수 없습니다. 입력 크기를 줄여도 "
+            "해결되지 않으므로 설정에서 제외해야 합니다.\n\n"
+            f"- 마지막 시도 모드: `{dump.mode}`\n"
+            f"- 컨텍스트 파일 수: {len(dump.entries)}\n"
+            f"- 실패 원인:\n"
+            f"```\n{detail}\n```\n\n"
+            "**조치 제안**\n"
+            f"1. `CODEX_MODEL` / `CODEX_MODEL_FALLBACKS` 에서 {joined} 제거 후 재기동.\n"
+            "2. 해당 모델이 꼭 필요하면 그 모델을 지원하는 인증 방식으로 전환.\n"
+            # 시도한 모델이 하나뿐이면 "다른 모델의 사유" 라는 게 존재하지 않는다.
+            + (
+                "3. 위 오류 목록에서 **다른 모델의 실패 사유** 도 함께 확인 "
+                "(미지원 모델이 체인 끝에 있으면 앞 모델의 진짜 원인이 가려집니다).\n"
+                if len(getattr(exc, "model_failures", ())) > 1
+                else ""
+            )
+        )
     advice = (
         "1. `CODEX_MODEL_INPUT_BUDGETS`(미설정 시 `CODEX_MAX_INPUT_TOKENS`) 를 모델 실제 "
         "윈도우보다 작게 조정 (예: 150000) → 큰 PR 은 자동 diff 모드로 떨어집니다.\n"

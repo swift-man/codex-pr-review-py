@@ -8,7 +8,7 @@ GitHub App 웹훅으로 PR 이벤트를 받아, 레포를 체크아웃하고 전
 
 - GitHub App 설치 토큰 기반 인증 (PAT 불필요)
 - diff가 아닌 **전체 코드베이스**를 컨텍스트로 사용
-- Codex CLI를 `subprocess`로 호출 → 로그인된 ChatGPT 계정의 OAuth 토큰 사용 (기본 리뷰 순서 `gpt-5.6-sol` → `gpt-reserve` → `gpt-5.3-codex-spark`; Reserve는 `max`, Spark는 `xhigh`)
+- Codex CLI를 `subprocess`로 호출 → 로그인된 ChatGPT 계정의 OAuth 토큰 사용 (기본 리뷰 순서 `gpt-5.6-sol` → `gpt-reserve`, 둘 다 `max`)
 - 한국어 리뷰 고정 출력 (JSON 스키마 강제)
 - **리뷰 4섹션**: `좋은 점` / `🔴 반드시 수정할 사항` / `💡 권장 개선 사항` / `기술 단위 코멘트(라인 고정)`
 - 라인 코멘트는 **4단계 등급**(`Critical` / `Major` / `Minor` / `Suggestion`) 으로 분류되고, PR 화면에서 각 코멘트 본문 최상단에 `[Critical] …` 형태의 대괄호 접두로 표기
@@ -164,7 +164,7 @@ REPO_FULL_NAME=owner/repo PR_NUMBER=1 INSTALLATION_ID=1234567 \
 | `CODEX_BIN` | `codex` | Codex CLI 실행 파일 |
 | `CODEX_MODEL` | `gpt-5.6-sol` | 1순위 리뷰 모델 |
 | `CODEX_FALLBACK_REASONING_EFFORT` | `(1순위 강도 사용)` | fallback 전용 요청 강도. Astra `xhigh`, Reserve/Luna `max` 구성은 `CODEX_REASONING_EFFORT=xhigh`, 이 값을 `max`로 지정. Spark는 지원 상한 `xhigh`로 조정됩니다. |
-| `CODEX_MODEL_FALLBACKS` | `gpt-reserve,gpt-5.3-codex-spark` | 쉼표로 구분한 fallback 모델 목록. 기본 순서는 Sol `max` → Reserve `max` → Spark `xhigh`. 비우면 fallback 없이 `CODEX_MODEL`만 사용 |
+| `CODEX_MODEL_FALLBACKS` | `gpt-reserve` | 쉼표로 구분한 fallback 모델 목록. 기본 순서는 Sol `max` → Reserve `max`. 비우면 fallback 없이 `CODEX_MODEL`만 사용. `gpt-5.3-codex-spark`는 ChatGPT 계정 인증에서 지원되지 않아 기본값에서 제외했습니다 |
 | `CODEX_REASONING_EFFORT` | `max` | 요청 강도. 모델별로 요청값 이하의 최고 지원 강도를 사용합니다. 기본 fallback에서는 Reserve가 `max`, Spark가 `xhigh`로 실행됩니다. |
 | `CODEX_MODEL_CONTEXT_WINDOW` | `(모델별 자동)` | 1순위 모델에 전달할 Codex CLI `model_context_window`. 기본 Sol은 확장 `872000`; 다른 내장 모델은 CLI 기본값. 명시값은 모델별 카탈로그 최대값 이하로 제한 |
 | `CODEX_MAX_INPUT_TOKENS` | `(모델 윈도우의 95%)` | 기존 primary 입력 예산. `CODEX_MODEL_INPUT_BUDGETS`를 지정하면 primary 항목의 기본값으로 사용 |

@@ -3,7 +3,7 @@ from typing import Any
 
 import pytest
 
-from codex_review.application.review_pr_use_case import _is_model_limit_error
+from codex_review.application.review_pr_use_case import _is_model_limit_error, _unsupported_models
 from codex_review.domain import (
     DUMP_MODE_DIFF,
     FileDump,
@@ -845,13 +845,76 @@ async def test_review_reports_attempted_models_when_fallbacks_exhausted(
 
     msg = str(exc_info.value)
     assert "gpt-5.3-codex-spark -> gpt-5.5" in msg
-    assert "last error" in msg
+    # 마지막 모델의 오류만이 아니라 **모든** 모델의 사유가 실려야 한다. 체인 끝에 영구
+    # 사용 불가 모델이 있으면 그 오류가 앞 모델의 진짜 원인을 덮어 버리기 때문이다.
+    assert "spark unavailable" in msg
     assert "gpt quota exhausted" in msg
     assert exc_info.value.returncode == 1
     assert [call[call.index("--model") + 1] for call in calls] == [
         "gpt-5.3-codex-spark",
         "gpt-5.5",
     ]
+
+
+async def test_single_model_failure_still_carries_structured_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """fallback 없이 단일 모델만 쓰는 구성에서도 모델별 사유가 구조화돼 실려야 한다.
+
+    이전에는 `len(self._models) == 1` 경로가 last_error 를 그대로 던져, 상위 계층이
+    "이 모델은 못 쓴다" 진단을 아예 낼 수 없었다 (gemini PR #58 Major).
+    """
+    _patch_subprocess(
+        monkeypatch,
+        _FakeProc(1, stderr=b"ERROR: model is not supported with a ChatGPT account\n"),
+    )
+    pr, dump = _sample_review_input()
+
+    with pytest.raises(ReviewEngineError) as exc_info:
+        await CodexCliEngine(binary="codex", model="gpt-5.3-codex-spark").review(pr, dump)
+
+    assert [m for m, _ in exc_info.value.model_failures] == ["gpt-5.3-codex-spark"]
+    assert _unsupported_models(exc_info.value) == ("gpt-5.3-codex-spark",)
+
+
+async def test_timeout_budget_exhaustion_keeps_earlier_model_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """타임아웃 예산 소진 경로도 앞 모델의 실패 사유를 잃으면 안 된다."""
+    pr, dump = _sample_review_input()
+
+    class _FakeLoop:
+        def __init__(self) -> None:
+            self._time = 0.0
+
+        def time(self) -> float:
+            return self._time
+
+    fake_loop = _FakeLoop()
+
+    async def fake_review(
+        _prompt: str,
+        _dump: FileDump,
+        *,
+        model: str,
+        timeout_sec: float,
+    ) -> ReviewResult:
+        # 첫 모델이 예산을 다 써 버리게 만들어, 두 번째 모델을 시도하기 전에 타임아웃
+        # 예산 소진 경로로 빠지도록 한다. 실제 sleep 없이 가상 시계만 앞당긴다.
+        fake_loop._time = 9.0
+        raise ReviewEngineError(f"{model} hit its context window")
+
+    engine = CodexCliEngine(
+        binary="codex", model="first", fallback_models=("second",), timeout_sec=5
+    )
+    monkeypatch.setattr(asyncio, "get_running_loop", lambda: fake_loop)
+    engine._review_with_model = fake_review  # type: ignore[method-assign]
+
+    with pytest.raises(ReviewEngineError) as exc_info:
+        await engine.review(pr, dump)
+
+    assert "hit its context window" in str(exc_info.value)
+    assert exc_info.value.model_failures
 
 
 async def test_review_masks_credentials_in_review_engine_error_message(
