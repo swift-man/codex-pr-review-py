@@ -10,6 +10,7 @@ from codex_review.domain import (
     PullRequest,
     ReviewHistory,
     ReviewResult,
+    TokenBudget,
 )
 from codex_review.interfaces import ReviewEngineError
 from codex_review.logging_utils import redact_text
@@ -218,7 +219,11 @@ class CodexCliEngine:
                 total_chars=_dump_total_chars(dump.mode, kept_entries),
                 excluded=tuple(excluded),
                 exceeded_budget=dump.exceeded_budget or bool(removed_entries),
-                budget=dump.budget,
+                # 수집 단계 예산이 아니라 이 시도에 실제로 적용한 모델 예산을 싣는다.
+                # `max_chars()` 가 위 `max_chars` 와 같은 값을 내도록 상한도 함께 준다.
+                budget=TokenBudget(
+                    max_tokens=configured, max_chars_limit=CODEX_CLI_MAX_INPUT_CHARS
+                ),
             )
 
         if len(build_prompt(pr, dump, history=history)) <= max_chars:

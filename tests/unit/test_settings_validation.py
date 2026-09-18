@@ -190,6 +190,24 @@ def test_model_scoped_input_budgets_are_validated_and_projected(
     assert settings.codex_model_input_budgets["gpt-reserve"] == 258400
 
 
+def test_unknown_custom_fallback_falls_back_to_the_global_input_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """카탈로그에 없는 fallback 도 예산 맵에 반드시 들어가야 한다.
+
+    비어 있으면 엔진이 축소를 건너뛰어, 수집 예산만큼 커진 스냅샷이 그대로 전달된다.
+    """
+    settings = _settings(
+        monkeypatch,
+        CODEX_MODEL_FALLBACKS="acme-internal-model",
+        CODEX_MAX_INPUT_TOKENS="300000",
+    )
+    assert settings.codex_model_input_budgets == {
+        "gpt-5.6-sol": 300_000,
+        "acme-internal-model": 300_000,
+    }
+
+
 def test_model_scoped_input_budget_rejects_unknown_or_oversized_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

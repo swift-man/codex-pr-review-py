@@ -261,9 +261,12 @@ class Settings(BaseSettings):
             if index == 0:
                 result[model] = self.codex_max_input_tokens
                 continue
+            # 카탈로그에 없는 커스텀 fallback 은 안전한 윈도우를 알 수 없다. 예산을 비워
+            # 두면 `_dump_for_model` 이 축소를 건너뛰어, 수집 예산(모델 예산 최댓값) 만큼
+            # 커진 스냅샷이 그대로 전달된다. 운영자가 명시하지 않았다면 최소한 기존 전역
+            # 예산(`CODEX_MAX_INPUT_TOKENS`) 만큼은 적용한다 (gemini PR #57 Major).
             default = known_model_input_budget(model)
-            if default is not None:
-                result[model] = default
+            result[model] = default if default is not None else self.codex_max_input_tokens
         return result
 
 
