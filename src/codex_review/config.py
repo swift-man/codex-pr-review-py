@@ -281,6 +281,10 @@ def _parse_model_input_budgets(raw: str | None) -> dict[str, int]:
         return {}
     result: dict[str, int] = {}
     for item in raw.split(","):
+        # 후행 쉼표·빈 항목은 흘려보낸다. `CODEX_MODEL_FALLBACKS` 파서와 동작을 맞춰,
+        # 사소한 오타로 서버 기동이 막히지 않게 한다 (gemini PR #58 Minor).
+        if not item.strip():
+            continue
         model, separator, tokens = item.partition("=")
         model, tokens = model.strip(), tokens.strip()
         if (not separator or not model or not tokens.isascii() or not tokens.isdecimal()):

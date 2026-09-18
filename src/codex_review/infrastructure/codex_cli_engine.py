@@ -175,20 +175,27 @@ class CodexCliEngine:
             raise ReviewEngineError(
                 "codex exec timeout budget exhausted before any model was attempted"
             )
-        attempted = "(none)" if not attempted_models else " -> ".join(attempted_models)
+        # 여기 도달했다면 루프 안에서 최소 한 번은 시도한 것이다 (`last_error` 가 그
+        # 안에서만 설정된다). 따라서 `attempted_models` 는 절대 비지 않는다.
+        attempted = " -> ".join(attempted_models)
+        model_failures = tuple((model, str(error)) for model, error in failures)
         if asyncio.get_running_loop().time() >= deadline:
             budget_error = ReviewEngineError(
-                f"codex exec timeout budget exhausted (attempted={attempted})"
+                f"codex exec timeout budget exhausted (attempted={attempted}); "
+                f"{_format_model_failures(failures)}",
+                model_failures=model_failures,
             )
             raise budget_error from last_error
         if len(self._models) == 1:
+            # 메시지는 그대로 두되 구조화 목록은 채운다 — 단일 모델 구성에서도 상위
+            # 계층이 "이 모델은 못 쓴다" 진단을 낼 수 있어야 한다 (gemini PR #58 Major).
+            last_error.model_failures = model_failures
             raise last_error
-        if not attempted:
-            attempted = " -> ".join(self._models)
         raise ReviewEngineError(
             f"codex exec fallback exhausted (models={attempted}); "
             f"{_format_model_failures(failures)}",
             returncode=last_error.returncode,
+            model_failures=model_failures,
         ) from last_error
 
     def _dump_for_model(
@@ -441,18 +448,16 @@ _MODEL_FAILURE_LINE_MAX_CHARS = 300
 
 
 def _format_model_failures(failures: Sequence[tuple[str, ReviewEngineError]]) -> str:
-    """체인의 모든 모델 실패를 한 줄씩 나열한다.
+    """체인의 모든 모델 실패를 사람이 읽을 `[모델] 사유` 줄로 나열한다.
 
     마지막 오류만 남기면 체인 끝의 영구 실패(미지원 모델 등)가 앞 모델의 실제 원인을
-    덮어 버린다. `_is_model_limit_error` 같은 상위 분류도 전체 문장을 훑으므로, 어느
-    모델에서든 한도 신호가 있었다면 정확히 분류된다.
+    덮어 버린다. 이 문자열은 **표시 전용** 이다 — 상위 계층은 되파싱하지 말고
+    `ReviewEngineError.model_failures` 를 읽어야 한다.
     """
     lines = []
     for model, error in failures:
         detail = str(error)
         if len(detail) > _MODEL_FAILURE_LINE_MAX_CHARS:
             detail = detail[:_MODEL_FAILURE_LINE_MAX_CHARS] + "…"
-        # 모델명을 `[...]` 로 감싼다. 사유 문장에 콜론이 흔해서 `model: detail` 로는
-        # 상위 계층이 모델명을 되짚어 낼 수 없다.
         lines.append(f"[{model}] {detail}")
     return "errors: " + " | ".join(lines)

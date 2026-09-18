@@ -701,7 +701,7 @@ def test_create_app_wires_runtime_review_dependencies(
     assert engine_captured["fallback_reasoning_effort"] == "max"
 
 
-def test_unsupported_model_is_named_from_the_per_model_failure_list() -> None:
+def test_unsupported_model_is_named_from_the_structured_failure_list() -> None:
     """체인 끝 미지원 모델을 정확히 집어내고, 앞 모델의 한도 신호는 살아 있어야 한다.
 
     실제 운영에서 관측된 오류 형태 그대로 검증한다 — 마지막 모델의 "not supported" 가
@@ -710,18 +710,60 @@ def test_unsupported_model_is_named_from_the_per_model_failure_list() -> None:
     exc = ReviewEngineError(
         "codex exec fallback exhausted "
         "(models=gpt-6-astra -> gpt-reserve -> gpt-5.3-codex-spark); errors: "
-        "[gpt-6-astra] codex exec failed (rc=1, model=gpt-6-astra): context length exceeded | "
-        "[gpt-reserve] codex exec failed (rc=1, model=gpt-reserve): rate limited | "
-        "[gpt-5.3-codex-spark] codex exec failed (rc=1, model=gpt-5.3-codex-spark): "
-        "ERROR: The 'gpt-5.3-codex-spark' model is not supported when using Codex "
-        "with a ChatGPT account."
+        "[gpt-6-astra] context length exceeded | [gpt-reserve] rate limited | "
+        "[gpt-5.3-codex-spark] model is not supported",
+        model_failures=(
+            ("gpt-6-astra", "codex exec failed (rc=1): context length exceeded"),
+            ("gpt-reserve", "codex exec failed (rc=1): rate limited"),
+            (
+                "gpt-5.3-codex-spark",
+                "codex exec failed (rc=1): ERROR: The 'gpt-5.3-codex-spark' model is "
+                "not supported when using Codex with a ChatGPT account.",
+            ),
+        ),
     )
 
     assert _unsupported_models(exc) == ("gpt-5.3-codex-spark",)
+    # 체인 끝 미지원 모델이 있어도 앞 모델의 한도 신호는 분류에 살아 있어야 한다.
     assert _is_model_limit_error(exc)
 
 
+def test_unsupported_model_detection_ignores_bracket_tokens_in_stderr() -> None:
+    """사유 본문의 `[ERROR]` 같은 대괄호 토큰을 모델명으로 오추출하면 안 된다.
+
+    메시지 문자열을 정규식으로 되파싱하던 구현의 회귀 가드.
+    """
+    exc = ReviewEngineError(
+        "codex exec failed (rc=1, model=gpt-5.5): [ERROR] model is not supported",
+        model_failures=(("gpt-5.5", "[ERROR] model is not supported"),),
+    )
+
+    assert _unsupported_models(exc) == ("gpt-5.5",)
+
+
 def test_ordinary_limit_failure_is_not_reported_as_an_unsupported_model() -> None:
-    exc = ReviewEngineError("codex exec failed (rc=1, model=gpt-5.5): context length exceeded")
+    exc = ReviewEngineError(
+        "codex exec failed (rc=1, model=gpt-5.5): context length exceeded",
+        model_failures=(("gpt-5.5", "context length exceeded"),),
+    )
 
     assert _unsupported_models(exc) == ()
+
+
+def test_failure_without_structured_metadata_is_not_misdiagnosed() -> None:
+    assert _unsupported_models(RuntimeError("model is not supported")) == ()
+
+
+def test_model_input_budgets_tolerates_trailing_commas(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """후행 쉼표 같은 사소한 오타로 서버 기동이 막히면 안 된다."""
+    settings = _settings(
+        monkeypatch,
+        CODEX_MODEL_INPUT_BUDGETS="gpt-5.6-sol=828400, gpt-reserve=258400, ",
+    )
+
+    assert settings.codex_model_input_budgets == {
+        "gpt-5.6-sol": 828_400,
+        "gpt-reserve": 258_400,
+    }

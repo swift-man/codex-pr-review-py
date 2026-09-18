@@ -38,6 +38,16 @@ class ReviewEngineError(RuntimeError):
     는 그대로 동작.
     """
 
-    def __init__(self, message: str, *, returncode: int | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        returncode: int | None = None,
+        model_failures: tuple[tuple[str, str], ...] = (),
+    ) -> None:
         super().__init__(message)
         self.returncode = returncode
+        # 체인에서 시도한 `(모델, 사유)` 목록. 메시지 문자열을 상위 계층이 정규식으로
+        # 되파싱하지 않도록 구조화해 싣는다 — 사유 문장에 대괄호/콜론이 섞이면 파싱이
+        # 조용히 엉뚱한 값을 집어낸다 (gemini PR #58 Major).
+        self.model_failures = model_failures

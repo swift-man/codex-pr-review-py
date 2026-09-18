@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import re
 import weakref
 from collections.abc import Mapping
 from dataclasses import replace
@@ -335,10 +334,13 @@ class ReviewPullRequestUseCase:
         history: ReviewHistory | None,
     ) -> None:
         is_model_limit = _is_model_limit_error(exc)
-        if not is_model_limit or self._bot_login is None:
+        # 미지원 모델도 같은 head 에서는 결정론적으로 똑같이 실패한다. 한도 초과와 함께
+        # 중복 게시 방지를 태워야 재전달마다 같은 코멘트가 쌓이지 않는다 (gemini PR #58).
+        is_deterministic = is_model_limit or bool(_unsupported_models(exc))
+        if not is_deterministic or self._bot_login is None:
             await self._github.post_comment(
                 pr,
-                _engine_failure_comment_body(pr, dump, exc, failure_mode, is_model_limit),
+                _engine_failure_comment_body(pr, dump, exc, failure_mode, is_deterministic),
             )
             return
 
@@ -366,7 +368,7 @@ class ReviewPullRequestUseCase:
 
             await self._github.post_comment(
                 pr,
-                _engine_failure_comment_body(pr, dump, exc, failure_mode, is_model_limit),
+                _engine_failure_comment_body(pr, dump, exc, failure_mode, is_deterministic),
             )
 
     async def _model_limit_comment_lock(self, pr: PullRequest) -> asyncio.Lock:
@@ -589,9 +591,6 @@ def _make_code_fence_safe(text: str) -> str:
 
 _MODEL_LIMIT_COMMENT_MARKER_PREFIX = "<!-- codex-review:model-limit"
 
-# `CodexCliEngine._format_model_failures` 가 각 사유 앞에 붙이는 `[모델명]` 태그.
-_MODEL_FAILURE_TAG_RE = re.compile(r"\[([A-Za-z0-9._-]+)\]")
-
 # 모델이 "쓸 수 없는" 상태 — 한도 초과와 달리 입력을 줄여도 절대 성공하지 않는다.
 # 설정에서 빼야만 해결되므로 조치 안내를 따로 준다.
 _MODEL_UNSUPPORTED_ERROR_PHRASES = (
@@ -622,21 +621,18 @@ def _is_model_limit_error(exc: Exception) -> bool:
 
 
 def _unsupported_models(exc: BaseException) -> tuple[str, ...]:
-    """오류 문장에서 "이 모델은 못 쓴다" 로 판정된 모델명을 뽑는다.
+    """영구 사용 불가로 판정된 모델명을 뽑는다.
 
-    엔진이 체인의 모델별 사유를 `model: detail` 로 나열하므로, 그 줄 단위로 훑어
-    어떤 모델이 영구 사용 불가인지 정확히 집어낼 수 있다.
+    엔진이 `(모델, 사유)` 를 구조화해 실어 주므로 그대로 읽는다. 메시지 문자열을
+    되파싱하면 stderr 에 섞인 대괄호 토큰(`[ERROR]` 등)을 모델명으로 오추출하고,
+    단일 모델 구성처럼 포맷이 다른 경로에서는 아예 못 찾는다 (gemini PR #58 Major).
     """
     found: list[str] = []
-    for segment in str(exc).split(" | "):
-        if not any(p in segment.casefold() for p in _MODEL_UNSUPPORTED_ERROR_PHRASES):
+    for model, detail in getattr(exc, "model_failures", ()):
+        if not any(p in detail.casefold() for p in _MODEL_UNSUPPORTED_ERROR_PHRASES):
             continue
-        tag = _MODEL_FAILURE_TAG_RE.search(segment)
-        if tag is None:
-            continue
-        name = tag.group(1)
-        if name not in found:
-            found.append(name)
+        if model not in found:
+            found.append(model)
     return tuple(found)
 
 
@@ -653,10 +649,15 @@ def _engine_failure_comment_body(
     dump: FileDump,
     exc: Exception,
     failure_mode: str,
-    is_model_limit: bool,
+    is_deterministic: bool,
 ) -> str:
+    """`is_deterministic` 은 "같은 head 로 재시도해도 똑같이 실패" 를 뜻한다.
+
+    한도 초과와 미지원 모델이 여기 해당한다. 마커가 붙어야 재전달마다 같은 진단
+    코멘트가 쌓이는 걸 막을 수 있다.
+    """
     body = _engine_failure_message(pr, dump, exc, failure_mode=failure_mode)
-    if is_model_limit:
+    if is_deterministic:
         body = _append_model_limit_comment_marker(body, pr)
     return body
 
