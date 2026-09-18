@@ -845,7 +845,9 @@ async def test_review_reports_attempted_models_when_fallbacks_exhausted(
 
     msg = str(exc_info.value)
     assert "gpt-5.3-codex-spark -> gpt-5.5" in msg
-    assert "last error" in msg
+    # 마지막 모델의 오류만이 아니라 **모든** 모델의 사유가 실려야 한다. 체인 끝에 영구
+    # 사용 불가 모델이 있으면 그 오류가 앞 모델의 진짜 원인을 덮어 버리기 때문이다.
+    assert "spark unavailable" in msg
     assert "gpt quota exhausted" in msg
     assert exc_info.value.returncode == 1
     assert [call[call.index("--model") + 1] for call in calls] == [

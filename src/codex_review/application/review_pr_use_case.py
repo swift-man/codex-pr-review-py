@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 import weakref
 from collections.abc import Mapping
 from dataclasses import replace
@@ -588,6 +589,19 @@ def _make_code_fence_safe(text: str) -> str:
 
 _MODEL_LIMIT_COMMENT_MARKER_PREFIX = "<!-- codex-review:model-limit"
 
+# `CodexCliEngine._format_model_failures` 가 각 사유 앞에 붙이는 `[모델명]` 태그.
+_MODEL_FAILURE_TAG_RE = re.compile(r"\[([A-Za-z0-9._-]+)\]")
+
+# 모델이 "쓸 수 없는" 상태 — 한도 초과와 달리 입력을 줄여도 절대 성공하지 않는다.
+# 설정에서 빼야만 해결되므로 조치 안내를 따로 준다.
+_MODEL_UNSUPPORTED_ERROR_PHRASES = (
+    "is not supported",
+    "not supported when using codex",
+    "model_not_found",
+    "unknown model",
+    "does not exist or you do not have access",
+)
+
 _MODEL_LIMIT_ERROR_PHRASES = (
     "context window",
     "context length",
@@ -605,6 +619,25 @@ _MODEL_LIMIT_ERROR_PHRASES = (
 def _is_model_limit_error(exc: Exception) -> bool:
     message = str(exc).casefold()
     return any(phrase in message for phrase in _MODEL_LIMIT_ERROR_PHRASES)
+
+
+def _unsupported_models(exc: BaseException) -> tuple[str, ...]:
+    """오류 문장에서 "이 모델은 못 쓴다" 로 판정된 모델명을 뽑는다.
+
+    엔진이 체인의 모델별 사유를 `model: detail` 로 나열하므로, 그 줄 단위로 훑어
+    어떤 모델이 영구 사용 불가인지 정확히 집어낼 수 있다.
+    """
+    found: list[str] = []
+    for segment in str(exc).split(" | "):
+        if not any(p in segment.casefold() for p in _MODEL_UNSUPPORTED_ERROR_PHRASES):
+            continue
+        tag = _MODEL_FAILURE_TAG_RE.search(segment)
+        if tag is None:
+            continue
+        name = tag.group(1)
+        if name not in found:
+            found.append(name)
+    return tuple(found)
 
 
 def _model_limit_comment_marker(pr: PullRequest) -> str:
@@ -690,6 +723,25 @@ def _engine_failure_message(
     detail = _make_code_fence_safe(detail)
 
     mode_desc = _FAILURE_MODE_DESCRIPTIONS.get(failure_mode, failure_mode)
+    unsupported = _unsupported_models(exc)
+    if unsupported:
+        # 입력을 줄이는 조치는 이 경우 전부 무의미하다. 설정에서 빼라는 안내를 맨 앞에.
+        joined = ", ".join(f"`{m}`" for m in unsupported)
+        return (
+            "⚠️ **Codex Review — 사용할 수 없는 모델**\n\n"
+            f"이 PR 은 자동 리뷰를 완료하지 못했습니다 ({mode_desc}).\n\n"
+            f"{joined} 모델을 현재 인증 방식으로 사용할 수 없습니다. 입력 크기를 줄여도 "
+            "해결되지 않으므로 설정에서 제외해야 합니다.\n\n"
+            f"- 마지막 시도 모드: `{dump.mode}`\n"
+            f"- 컨텍스트 파일 수: {len(dump.entries)}\n"
+            f"- 실패 원인:\n"
+            f"```\n{detail}\n```\n\n"
+            "**조치 제안**\n"
+            f"1. `CODEX_MODEL` / `CODEX_MODEL_FALLBACKS` 에서 {joined} 제거 후 재기동.\n"
+            "2. 해당 모델이 꼭 필요하면 그 모델을 지원하는 인증 방식으로 전환.\n"
+            "3. 위 오류 목록에서 **다른 모델의 실패 사유** 도 함께 확인 "
+            "(미지원 모델이 체인 끝에 있으면 앞 모델의 진짜 원인이 가려집니다).\n"
+        )
     advice = (
         "1. `CODEX_MODEL_INPUT_BUDGETS`(미설정 시 `CODEX_MAX_INPUT_TOKENS`) 를 모델 실제 "
         "윈도우보다 작게 조정 (예: 150000) → 큰 PR 은 자동 diff 모드로 떨어집니다.\n"

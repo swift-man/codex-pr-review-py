@@ -124,6 +124,10 @@ class CodexCliEngine:
         history: ReviewHistory | None = None,
     ) -> ReviewResult:
         last_error: ReviewEngineError | None = None
+        # 모델별 실패 사유를 전부 보관한다. 이전에는 마지막 모델의 오류만 예외 메시지에
+        # 실려, 체인 끝에 영구 사용 불가 모델이 있으면 그 오류가 앞 모델의 진짜 원인(한도
+        # 초과 등)을 가렸다. 운영자는 PR 진단 코멘트로만 원인을 보므로 치명적이다.
+        failures: list[tuple[str, ReviewEngineError]] = []
         attempted_models: list[str] = []
         deadline = asyncio.get_running_loop().time() + self._timeout_sec
         for idx, model in enumerate(self._models):
@@ -155,6 +159,7 @@ class CodexCliEngine:
                 )
             except ReviewEngineError as exc:
                 last_error = exc
+                failures.append((model, exc))
                 next_model = self._models[idx + 1] if idx + 1 < len(self._models) else None
                 if next_model is None:
                     break
@@ -182,7 +187,7 @@ class CodexCliEngine:
             attempted = " -> ".join(self._models)
         raise ReviewEngineError(
             f"codex exec fallback exhausted (models={attempted}); "
-            f"last error: {last_error}",
+            f"{_format_model_failures(failures)}",
             returncode=last_error.returncode,
         ) from last_error
 
@@ -429,3 +434,25 @@ def _dump_total_chars(mode: str, entries: Sequence[FileEntry]) -> int:
         )
         for entry in entries
     )
+
+
+# 모델별 사유를 한 줄씩. 한 줄이 통째로 진단 코멘트를 잡아먹지 않도록 상한을 둔다.
+_MODEL_FAILURE_LINE_MAX_CHARS = 300
+
+
+def _format_model_failures(failures: Sequence[tuple[str, ReviewEngineError]]) -> str:
+    """체인의 모든 모델 실패를 한 줄씩 나열한다.
+
+    마지막 오류만 남기면 체인 끝의 영구 실패(미지원 모델 등)가 앞 모델의 실제 원인을
+    덮어 버린다. `_is_model_limit_error` 같은 상위 분류도 전체 문장을 훑으므로, 어느
+    모델에서든 한도 신호가 있었다면 정확히 분류된다.
+    """
+    lines = []
+    for model, error in failures:
+        detail = str(error)
+        if len(detail) > _MODEL_FAILURE_LINE_MAX_CHARS:
+            detail = detail[:_MODEL_FAILURE_LINE_MAX_CHARS] + "…"
+        # 모델명을 `[...]` 로 감싼다. 사유 문장에 콜론이 흔해서 `model: detail` 로는
+        # 상위 계층이 모델명을 되짚어 낼 수 없다.
+        lines.append(f"[{model}] {detail}")
+    return "errors: " + " | ".join(lines)
