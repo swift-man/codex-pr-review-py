@@ -21,10 +21,18 @@ from codex_review.model_utils import ReasoningEffort
 
 
 class _FakeProc:
-    def __init__(self, returncode: int, stdout: bytes = b"", stderr: bytes = b"") -> None:
+    def __init__(
+        self,
+        returncode: int,
+        stdout: bytes = b"",
+        stderr: bytes = b"",
+        *,
+        pid: int | None = None,
+    ) -> None:
         self.returncode = returncode
         self._stdout = stdout
         self._stderr = stderr
+        self.pid = pid
 
     async def communicate(self, input: bytes | None = None) -> tuple[bytes, bytes]:
         return self._stdout, self._stderr
@@ -36,8 +44,14 @@ class _FakeProc:
         pass
 
 
-def _patch_subprocess(monkeypatch: pytest.MonkeyPatch, result: Any) -> None:
-    async def fake_create(*_args: Any, **_kwargs: Any) -> Any:
+def _patch_subprocess(
+    monkeypatch: pytest.MonkeyPatch,
+    result: Any,
+    captured_kwargs: list[dict[str, Any]] | None = None,
+) -> None:
+    async def fake_create(*_args: Any, **kwargs: Any) -> Any:
+        if captured_kwargs is not None:
+            captured_kwargs.append(kwargs)
         if isinstance(result, Exception):
             raise result
         return result
@@ -119,16 +133,62 @@ async def test_verify_auth_passes_when_logged_in_on_stderr(monkeypatch: pytest.M
 
 
 async def test_verify_auth_raises_when_not_logged_in(monkeypatch: pytest.MonkeyPatch) -> None:
-    _patch_subprocess(monkeypatch, _FakeProc(1, stderr=b"Not logged in"))
+    events: list[str] = []
+    group_kills: list[int] = []
+
+    class _FailedAuthProc(_FakeProc):
+        def kill(self) -> None:
+            events.append("kill")
+
+        async def wait(self) -> int:
+            events.append("wait")
+            return -9
+
+    monkeypatch.setattr(
+        "codex_review.infrastructure._subprocess.os.killpg",
+        lambda pid, _sig: group_kills.append(pid),
+    )
+    _patch_subprocess(
+        monkeypatch,
+        _FailedAuthProc(1, stderr=b"Not logged in", pid=1234),
+    )
     with pytest.raises(CodexAuthError) as exc:
         await _engine().verify_auth()
     assert "codex login" in str(exc.value)
+    # 그룹 종료와 별개로 직접 자식 종료도 항상 보장한다 — 래퍼가 그룹 밖으로 빠져나간
+    # 경우에도 확실히 죽이기 위해서다.
+    assert events == ["kill", "wait"]
+    assert group_kills == [1234]
 
 
 async def test_verify_auth_raises_on_unexpected_stdout(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_subprocess(monkeypatch, _FakeProc(0, stdout=b"Some unrelated output\n"))
     with pytest.raises(CodexAuthError):
         await _engine().verify_auth()
+
+
+async def test_auth_and_review_start_in_new_process_sessions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    auth_kwargs: list[dict[str, Any]] = []
+    _patch_subprocess(
+        monkeypatch,
+        _FakeProc(0, stdout=b"Logged in using ChatGPT\n"),
+        auth_kwargs,
+    )
+    await _engine().verify_auth()
+
+    pr, dump = _sample_review_input()
+    review_kwargs: list[dict[str, Any]] = []
+    _patch_subprocess(
+        monkeypatch,
+        _FakeProc(0, stdout=b'{"summary":"ok","event":"COMMENT","comments":[]}\n'),
+        review_kwargs,
+    )
+    await _engine().review(pr, dump)
+
+    assert auth_kwargs[0]["start_new_session"] is True
+    assert review_kwargs[0]["start_new_session"] is True
 
 
 async def test_verify_auth_raises_when_binary_missing(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -177,6 +237,30 @@ async def test_verify_auth_kills_subprocess_on_cancellation(
         await _engine().verify_auth()
 
     assert events == ["kill", "wait"], "취소 시 kill → wait 순으로 정리돼야 한다"
+
+
+async def test_verify_auth_kills_subprocess_on_unexpected_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    class _UnexpectedErrorProc(_FakeProc):
+        async def communicate(self, input: bytes | None = None) -> tuple[bytes, bytes]:
+            raise MemoryError("simulated allocation failure")
+
+        def kill(self) -> None:
+            events.append("kill")
+
+        async def wait(self) -> int:
+            events.append("wait")
+            return -9
+
+    _patch_subprocess(monkeypatch, _UnexpectedErrorProc(0))
+
+    with pytest.raises(MemoryError):
+        await _engine().verify_auth()
+
+    assert events == ["kill", "wait"]
 
 
 # ---------------------------------------------------------------------------
@@ -239,6 +323,113 @@ async def test_review_logs_full_stderr_and_raises_concise_summary(
     assert "model 'gpt-5.5' not available" in full_log
     assert "rc=1" in full_log
     assert "model=gpt-5.5" in full_log
+
+
+async def test_review_kills_subprocess_before_raising_on_nonzero_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    group_kills: list[int] = []
+
+    class _FailedReviewProc(_FakeProc):
+        def kill(self) -> None:
+            events.append("kill")
+
+        async def wait(self) -> int:
+            events.append("wait")
+            return -9
+
+    _patch_subprocess(
+        monkeypatch,
+        _FailedReviewProc(1, stderr=b"Error: model unavailable\n", pid=1234),
+    )
+    monkeypatch.setattr(
+        "codex_review.infrastructure._subprocess.os.killpg",
+        lambda pid, _sig: group_kills.append(pid),
+    )
+    pr, dump = _sample_review_input()
+
+    with pytest.raises(ReviewEngineError):
+        await CodexCliEngine(binary="codex", model="gpt-5.5").review(pr, dump)
+
+    assert events == ["kill", "wait"]
+    assert group_kills == [1234]
+
+
+async def test_review_cleans_up_the_process_group_on_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """정상 종료 경로도 세션을 정리해야 한다.
+
+    래퍼가 종료 코드 0 으로 끝나도 세션에 남은 네이티브 자식은 고아다. 실패 분기만
+    정리하면 정상 종료가 대부분인 운영에서 오히려 더 많이 샌다.
+    """
+    group_kills: list[int] = []
+
+    class _OkProc(_FakeProc):
+        async def wait(self) -> int:
+            return 0
+
+    monkeypatch.setattr(
+        "codex_review.infrastructure._subprocess.os.killpg",
+        lambda pid, _sig: group_kills.append(pid),
+    )
+    _patch_subprocess(
+        monkeypatch,
+        _OkProc(0, stdout=b'{"summary":"ok","event":"COMMENT","comments":[]}\n', pid=4321),
+    )
+    pr, dump = _sample_review_input()
+
+    result = await CodexCliEngine(binary="codex", model="gpt-5.5").review(pr, dump)
+
+    assert result.summary == "ok"
+    assert group_kills == [4321]
+
+
+async def test_verify_auth_cleans_up_the_process_group_on_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    group_kills: list[int] = []
+
+    class _OkProc(_FakeProc):
+        async def wait(self) -> int:
+            return 0
+
+    monkeypatch.setattr(
+        "codex_review.infrastructure._subprocess.os.killpg",
+        lambda pid, _sig: group_kills.append(pid),
+    )
+    _patch_subprocess(
+        monkeypatch, _OkProc(0, stdout=b"Logged in using ChatGPT\n", pid=4321)
+    )
+
+    assert "Logged in" in await _engine().verify_auth()
+    assert group_kills == [4321]
+
+
+async def test_review_kills_subprocess_on_unexpected_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    class _UnexpectedErrorProc(_FakeProc):
+        async def communicate(self, input: bytes | None = None) -> tuple[bytes, bytes]:
+            raise RuntimeError("simulated communicate failure")
+
+        def kill(self) -> None:
+            events.append("kill")
+
+        async def wait(self) -> int:
+            events.append("wait")
+            return -9
+
+    _patch_subprocess(monkeypatch, _UnexpectedErrorProc(0))
+    pr, dump = _sample_review_input()
+
+    with pytest.raises(RuntimeError):
+        await CodexCliEngine(binary="codex", model="gpt-5.5").review(pr, dump)
+
+    assert events == ["kill", "wait"]
 
 
 async def test_review_tries_fallback_model_after_primary_failure(
