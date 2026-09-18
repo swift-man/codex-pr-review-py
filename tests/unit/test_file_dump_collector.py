@@ -10,7 +10,7 @@ from codex_review.infrastructure import file_dump_collector
 from codex_review.infrastructure.codex_prompt import _format_file
 from codex_review.infrastructure.file_dump_collector import (
     FileDumpCollector,
-    _estimate_full_prompt_file_chars,
+    estimate_full_prompt_file_chars,
 )
 
 
@@ -234,7 +234,7 @@ def test_full_prompt_file_estimate_matches_six_digit_line_numbers() -> None:
         is_changed=True,
     )
 
-    assert _estimate_full_prompt_file_chars(
+    assert estimate_full_prompt_file_chars(
         entry.path,
         entry.content,
         is_changed=entry.is_changed,

@@ -3,7 +3,9 @@ from typing import Any
 
 import pytest
 
+from codex_review.application.review_pr_use_case import _is_model_limit_error
 from codex_review.domain import (
+    DUMP_MODE_DIFF,
     FileDump,
     FileEntry,
     PullRequest,
@@ -15,6 +17,9 @@ from codex_review.infrastructure.codex_cli_engine import (
     CODEX_CLI_MAX_INPUT_CHARS,
     CodexAuthError,
     CodexCliEngine,
+)
+from codex_review.infrastructure.file_dump_collector import (
+    estimate_full_prompt_file_chars,
 )
 from codex_review.interfaces import ReviewEngineError
 from codex_review.model_utils import ReasoningEffort
@@ -462,6 +467,136 @@ async def test_review_tries_fallback_model_after_primary_failure(
         "gpt-5.3-codex-spark",
         "gpt-5.5",
     ]
+
+
+async def test_fallback_model_receives_snapshot_trimmed_to_its_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts: list[tuple[str, int]] = []
+    pr, _ = _sample_review_input()
+    dump = FileDump(
+        entries=(
+            FileEntry(path="a.py", content="a" * 150, size_bytes=150, is_changed=True),
+            FileEntry(path="b.py", content="b" * 150, size_bytes=150, is_changed=False),
+        ),
+        total_chars=300,
+    )
+
+    monkeypatch.setattr(
+        "codex_review.infrastructure.codex_cli_engine.build_prompt",
+        lambda _pr, candidate, **_kwargs: "x" * (
+            20 + sum(item.size_bytes for item in candidate.entries)
+        ),
+    )
+
+    async def fake_review(
+        _prompt: str,
+        candidate: FileDump,
+        *,
+        model: str,
+        timeout_sec: float,
+    ) -> ReviewResult:
+        attempts.append((model, len(candidate.entries)))
+        if model == "primary":
+            raise ReviewEngineError("primary unavailable")
+        return ReviewResult(summary="ok", event=ReviewEvent.COMMENT)
+
+    engine = CodexCliEngine(
+        binary="codex",
+        model="primary",
+        fallback_models=("fallback",),
+        model_input_budgets={"primary": 100, "fallback": 50},
+    )
+    engine._review_with_model = fake_review  # type: ignore[method-assign]
+
+    result = await engine.review(pr, dump)
+
+    assert result.summary == "ok"
+    assert attempts == [("primary", 2), ("fallback", 1)]
+
+
+def test_model_budget_does_not_drop_changed_entries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pr, _ = _sample_review_input()
+    dump = FileDump(
+        entries=(
+            FileEntry(path="changed.py", content="가" * 150, size_bytes=450, is_changed=True),
+            FileEntry(path="context.py", content="b" * 150, size_bytes=150, is_changed=False),
+        ),
+        total_chars=300,
+    )
+    monkeypatch.setattr(
+        "codex_review.infrastructure.codex_cli_engine.build_prompt",
+        lambda _pr, candidate, **_kwargs: "x" * (
+            20 + sum(len(item.content) for item in candidate.entries)
+        ),
+    )
+
+    engine = CodexCliEngine(
+        binary="codex",
+        model="primary",
+        model_input_budgets={"primary": 50},
+    )
+
+    candidate = engine._dump_for_model(pr, dump, "primary", history=None)
+
+    assert [entry.path for entry in candidate.entries] == ["changed.py"]
+    assert candidate.budget_trimmed == ("context.py",)
+    # total_chars 는 FileDumpCollector 와 같은 단위(프롬프트 문자 추정치) 를 유지해야
+    # "invoking codex: chars=..." 로그가 축소 여부에 따라 단위를 바꾸지 않는다.
+    assert candidate.total_chars == estimate_full_prompt_file_chars(
+        "changed.py", "가" * 150, is_changed=True
+    )
+
+
+def test_last_model_is_attempted_even_when_budget_cannot_be_met() -> None:
+    """diff 모드 dump 는 전 항목이 변경 파일이라 잘라낼 게 없다.
+
+    마지막 모델까지 예산을 이유로 건너뛰면 리뷰 경로가 통째로 사라지므로, 남은 모델이
+    없을 때는 우리 추정 예산을 넘겨도 실제 호출을 시도해야 한다.
+    """
+    pr, _ = _sample_review_input()
+    diff_dump = FileDump(
+        entries=(
+            FileEntry(path="a.py", content="x" * 600_000, size_bytes=600_000, is_changed=True),
+        ),
+        total_chars=600_000,
+        mode=DUMP_MODE_DIFF,
+    )
+    engine = CodexCliEngine(
+        binary="codex",
+        model="primary",
+        fallback_models=("last",),
+        model_input_budgets={"primary": 121_600, "last": 121_600},
+    )
+
+    with pytest.raises(ReviewEngineError, match="token limit"):
+        engine._dump_for_model(pr, diff_dump, "primary", history=None, allow_skip=True)
+
+    candidate = engine._dump_for_model(pr, diff_dump, "last", history=None, allow_skip=False)
+    assert [entry.path for entry in candidate.entries] == ["a.py"]
+
+
+def test_budget_skip_error_is_classified_as_a_model_limit_failure() -> None:
+    """건너뛰기 사유 메시지는 use case 의 모델 한도 분류에 걸려야 한다.
+
+    분류에 실패하면 head_sha 중복 방지를 타지 못해 같은 실패 코멘트가 재전달마다 쌓인다.
+    """
+    pr, _ = _sample_review_input()
+    dump = FileDump(
+        entries=(
+            FileEntry(path="a.py", content="x" * 600_000, size_bytes=600_000, is_changed=True),
+        ),
+        total_chars=600_000,
+        mode=DUMP_MODE_DIFF,
+    )
+    engine = CodexCliEngine(binary="codex", model="m", model_input_budgets={"m": 1_000})
+
+    with pytest.raises(ReviewEngineError) as excinfo:
+        engine._dump_for_model(pr, dump, "m", history=None, allow_skip=True)
+
+    assert _is_model_limit_error(excinfo.value)
 
 
 async def test_review_tries_reserve_then_spark_when_model_limits_are_reached(

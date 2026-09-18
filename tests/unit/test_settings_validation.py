@@ -38,6 +38,7 @@ _ALL_ALIASES = (
     "CODEX_MODEL_CONTEXT_WINDOW",
     "CODEX_TIMEOUT_SEC",
     "CODEX_MAX_INPUT_TOKENS",
+    "CODEX_MODEL_INPUT_BUDGETS",
     "REPO_CACHE_DIR",
     "FILE_MAX_BYTES",
     "DATA_FILE_MAX_BYTES",
@@ -86,6 +87,11 @@ def test_defaults_are_all_valid(monkeypatch: pytest.MonkeyPatch) -> None:
     assert s.codex_timeout_sec == 600
     assert s.git_timeout_sec == 120
     assert s.codex_max_input_tokens == 828_400
+    assert s.codex_model_input_budgets == {
+        "gpt-5.6-sol": 828_400,
+        "gpt-reserve": 258_400,
+        "gpt-5.3-codex-spark": 121_600,
+    }
     assert s.review_queue_maxsize is None
 
 
@@ -166,6 +172,67 @@ def test_codex_input_budget_defaults_to_primary_context(
     )
 
     assert settings.codex_max_input_tokens == 121_600
+
+
+def test_model_scoped_input_budgets_are_validated_and_projected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings(
+        monkeypatch,
+        CODEX_MODEL="gpt-6-astra",
+        CODEX_MODEL_FALLBACKS="gpt-reserve,gpt-5.3-codex-spark",
+        CODEX_MODEL_CONTEXT_WINDOW="872000",
+        CODEX_MAX_INPUT_TOKENS="828400",
+        CODEX_MODEL_INPUT_BUDGETS=(
+            "gpt-6-astra=828400,gpt-reserve=258400,gpt-5.3-codex-spark=121600"
+        ),
+    )
+    assert settings.codex_model_input_budgets["gpt-reserve"] == 258400
+
+
+def test_unknown_custom_fallback_falls_back_to_the_global_input_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """카탈로그에 없는 fallback 도 예산 맵에 반드시 들어가야 한다.
+
+    비어 있으면 엔진이 축소를 건너뛰어, 수집 예산만큼 커진 스냅샷이 그대로 전달된다.
+    """
+    settings = _settings(
+        monkeypatch,
+        CODEX_MODEL_FALLBACKS="acme-internal-model",
+        CODEX_MAX_INPUT_TOKENS="300000",
+    )
+    assert settings.codex_model_input_budgets == {
+        "gpt-5.6-sol": 300_000,
+        "acme-internal-model": 300_000,
+    }
+
+
+def test_model_scoped_input_budget_rejects_unknown_or_oversized_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(ValidationError, match="primary/fallback model sequence"):
+        _settings(monkeypatch, CODEX_MODEL_INPUT_BUDGETS="unconfigured=100")
+    with pytest.raises(ValidationError, match="유효 입력 한도 121600"):
+        _settings(
+            monkeypatch,
+            CODEX_MODEL_INPUT_BUDGETS="gpt-5.3-codex-spark=121601",
+        )
+    with pytest.raises(ValidationError, match="between 1 and 10000000"):
+        _settings(
+            monkeypatch,
+            CODEX_MODEL_INPUT_BUDGETS="gpt-5.3-codex-spark=10000001",
+        )
+
+
+def test_model_scoped_input_budget_rejects_duplicate_models(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(ValidationError, match="duplicate model"):
+        _settings(
+            monkeypatch,
+            CODEX_MODEL_INPUT_BUDGETS="gpt-5.6-sol=100,gpt-5.6-sol=200",
+        )
 
 
 def test_explicit_codex_input_budget_cannot_exceed_primary_context(
@@ -547,6 +614,10 @@ def test_create_app_wires_runtime_review_dependencies(
     # 만 남아야 한다. `_settings()` 헬퍼는 `_ALL_ALIASES` 환경 변수 정리 + 필수값 주입.
     _settings(
         monkeypatch, GITHUB_APP_SLUG="codex-review-bot[bot]",
+        CODEX_MODEL="gpt-5.3-codex-spark",
+        CODEX_MODEL_FALLBACKS="gpt-reserve",
+        CODEX_MAX_INPUT_TOKENS="100000",
+        CODEX_MODEL_INPUT_BUDGETS="gpt-5.3-codex-spark=100000,gpt-reserve=258400",
         CODEX_REASONING_EFFORT="xhigh", CODEX_FALLBACK_REASONING_EFFORT="max",
     )
 
@@ -619,5 +690,6 @@ def test_create_app_wires_runtime_review_dependencies(
     assert review_captured.get("max_input_chars") == (
         codex_cli_engine.CODEX_CLI_COLLECTOR_MAX_CHARS
     )
+    assert review_captured.get("max_input_tokens") == 258400
     assert engine_captured["reasoning_effort"] == "xhigh"
     assert engine_captured["fallback_reasoning_effort"] == "max"
