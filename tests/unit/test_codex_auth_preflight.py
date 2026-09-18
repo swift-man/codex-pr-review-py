@@ -155,7 +155,9 @@ async def test_verify_auth_raises_when_not_logged_in(monkeypatch: pytest.MonkeyP
     with pytest.raises(CodexAuthError) as exc:
         await _engine().verify_auth()
     assert "codex login" in str(exc.value)
-    assert events == ["wait"]
+    # 그룹 종료와 별개로 직접 자식 종료도 항상 보장한다 — 래퍼가 그룹 밖으로 빠져나간
+    # 경우에도 확실히 죽이기 위해서다.
+    assert events == ["kill", "wait"]
     assert group_kills == [1234]
 
 
@@ -350,8 +352,59 @@ async def test_review_kills_subprocess_before_raising_on_nonzero_exit(
     with pytest.raises(ReviewEngineError):
         await CodexCliEngine(binary="codex", model="gpt-5.5").review(pr, dump)
 
-    assert events == ["wait"]
+    assert events == ["kill", "wait"]
     assert group_kills == [1234]
+
+
+async def test_review_cleans_up_the_process_group_on_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """정상 종료 경로도 세션을 정리해야 한다.
+
+    래퍼가 종료 코드 0 으로 끝나도 세션에 남은 네이티브 자식은 고아다. 실패 분기만
+    정리하면 정상 종료가 대부분인 운영에서 오히려 더 많이 샌다.
+    """
+    group_kills: list[int] = []
+
+    class _OkProc(_FakeProc):
+        async def wait(self) -> int:
+            return 0
+
+    monkeypatch.setattr(
+        "codex_review.infrastructure._subprocess.os.killpg",
+        lambda pid, _sig: group_kills.append(pid),
+    )
+    _patch_subprocess(
+        monkeypatch,
+        _OkProc(0, stdout=b'{"summary":"ok","event":"COMMENT","comments":[]}\n', pid=4321),
+    )
+    pr, dump = _sample_review_input()
+
+    result = await CodexCliEngine(binary="codex", model="gpt-5.5").review(pr, dump)
+
+    assert result.summary == "ok"
+    assert group_kills == [4321]
+
+
+async def test_verify_auth_cleans_up_the_process_group_on_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    group_kills: list[int] = []
+
+    class _OkProc(_FakeProc):
+        async def wait(self) -> int:
+            return 0
+
+    monkeypatch.setattr(
+        "codex_review.infrastructure._subprocess.os.killpg",
+        lambda pid, _sig: group_kills.append(pid),
+    )
+    _patch_subprocess(
+        monkeypatch, _OkProc(0, stdout=b"Logged in using ChatGPT\n", pid=4321)
+    )
+
+    assert "Logged in" in await _engine().verify_auth()
+    assert group_kills == [4321]
 
 
 async def test_review_kills_subprocess_on_unexpected_error(

@@ -58,17 +58,20 @@ async def kill_and_reap(
     종료한다. 일반 subprocess는 기존처럼 직접 자식만 종료한다.
     """
     pid = getattr(proc, "pid", None)
-    group_killed = False
     if process_group and type(pid) is int and pid > 0 and hasattr(os, "killpg"):
         try:
+            # 한계: `communicate()` 가 반환된 뒤에 호출되면 리더 pid 는 이미 수거돼
+            # 커널이 되돌려 받은 상태다. 그룹에 멤버가 남아 있는 동안에는 pid 가 고정돼
+            # 우리 고아만 정확히 맞지만, 그 사이 그룹이 완전히 비면 같은 pid 를 새로 받은
+            # 그룹 리더를 때릴 여지가 극히 좁게 남는다 (gemini PR #56 Minor).
             os.killpg(pid, signal.SIGKILL)
-            group_killed = True
         except (AttributeError, OSError):
-            # killpg가 없는 플랫폼이나 이미 사라진 그룹에서는 직접 자식을 종료한다.
+            # killpg가 없는 플랫폼이나 이미 사라진 그룹 — 아래 직접 종료로 충분하다.
             logger.debug("could not kill subprocess process group pid=%s", pid)
 
-    if not group_killed:
-        with contextlib.suppress(ProcessLookupError):
-            # race: 이미 정상 종료됐을 수 있음 — 무시하고 reap 만 수행.
-            proc.kill()
+    # 그룹 종료 성공 여부와 무관하게 직접 자식 종료를 항상 보장한다. 래퍼가 스스로
+    # 세션을 옮겨 그룹 밖에 있어도 여기서 확실히 죽는다 (gemini/mlx PR #56 Major).
+    with contextlib.suppress(ProcessLookupError):
+        # race: 이미 정상 종료됐을 수 있음 — 무시하고 reap 만 수행.
+        proc.kill()
     await safe_reap(proc, timeout=timeout)

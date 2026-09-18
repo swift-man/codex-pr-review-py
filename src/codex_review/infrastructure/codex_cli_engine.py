@@ -90,10 +90,13 @@ class CodexCliEngine:
             await kill_and_reap(proc, process_group=True)
             raise
 
+        # 래퍼가 어떤 코드로 끝났든 세션에 남은 네이티브 자식은 전부 고아다. 성공 분기만
+        # 빼놓으면 정상 종료가 대부분인 실제 운영에서 오히려 더 많이 샌다.
+        await kill_and_reap(proc, process_group=True)
+
         # codex CLI 는 TTY 가 아닐 때 상태 메시지를 stderr 로 보내므로 두 스트림 모두 확인.
         combined = (stdout.decode(errors="replace") + stderr.decode(errors="replace")).strip()
         if proc.returncode != 0 or "Logged in" not in combined:
-            await kill_and_reap(proc, process_group=True)
             raise CodexAuthError(
                 "Codex CLI 가 로그인되어 있지 않습니다.\n"
                 f"출력: {combined or '(empty)'}\n"
@@ -232,8 +235,11 @@ class CodexCliEngine:
             await kill_and_reap(proc, process_group=True)
             raise
 
+        # 성공 종료도 마찬가지다. `communicate()` 가 돌아온 시점에 래퍼는 이미 끝났고,
+        # 세션에 남아 있는 프로세스는 모델 연결을 붙잡은 고아뿐이다.
+        await kill_and_reap(proc, process_group=True)
+
         if proc.returncode != 0:
-            await kill_and_reap(proc, process_group=True)
             err = stderr.decode(errors="replace").strip()
             # 전체 stderr 는 별도 ERROR 로그로 — multi-line 그대로 보존되어 운영 진단이
             # 즉시 가능하다. 이전엔 stderr 가 RuntimeError 메시지에 들어가 traceback
