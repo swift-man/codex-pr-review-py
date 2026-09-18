@@ -12,6 +12,7 @@ import pytest
 from pydantic import ValidationError
 
 from codex_review.application.review_pr_use_case import (
+    _MODEL_LIMIT_ERROR_PHRASES,
     _is_model_limit_error,
     _unsupported_models,
 )
@@ -767,3 +768,54 @@ def test_model_input_budgets_tolerates_trailing_commas(
         "gpt-5.6-sol": 828_400,
         "gpt-reserve": 258_400,
     }
+
+
+def test_limit_keyword_past_the_message_truncation_is_still_classified() -> None:
+    """표시용 메시지는 사유를 잘라 내므로, 한도 판정은 원문도 함께 봐야 한다.
+
+    오분류되면 중복 게시 방지 마커까지 빠져 같은 코멘트가 재전달마다 쌓인다.
+    """
+    detail = "codex exec failed (rc=1): " + "x" * 400 + " exceeds the maximum context"
+    exc = ReviewEngineError(
+        "codex exec fallback exhausted (models=a -> b); errors: [a] codex exec failed …",
+        model_failures=(("gpt-6-astra", detail),),
+    )
+
+    assert not any(p in str(exc).casefold() for p in _MODEL_LIMIT_ERROR_PHRASES)
+    assert _is_model_limit_error(exc)
+
+
+def test_single_model_unsupported_advice_omits_the_other_models_hint() -> None:
+    """모델을 하나만 시도했으면 "다른 모델의 실패 사유" 라는 안내는 성립하지 않는다."""
+    from codex_review.application.review_pr_use_case import (
+        _FAILURE_FULL_ONLY,
+        _engine_failure_comment_body,
+    )
+    from codex_review.domain import FileDump, FileEntry, PullRequest, RepoRef
+
+    pr = PullRequest(
+        repo=RepoRef("o", "r"), number=1, title="t", body="", head_sha="abc",
+        head_ref="f", base_sha="d", base_ref="main", clone_url="https://e/x.git",
+        changed_files=("a.py",), installation_id=7, is_draft=False,
+    )
+    dump = FileDump(
+        entries=(FileEntry(path="a.py", content="x", size_bytes=1, is_changed=True),),
+        total_chars=1,
+    )
+    single = ReviewEngineError(
+        "codex exec failed (rc=1, model=solo): ERROR: model is not supported",
+        model_failures=(("solo", "ERROR: model is not supported"),),
+    )
+    multi = ReviewEngineError(
+        "codex exec fallback exhausted (models=first -> solo); errors: …",
+        model_failures=(
+            ("first", "rate limited"),
+            ("solo", "ERROR: model is not supported"),
+        ),
+    )
+
+    body_single = _engine_failure_comment_body(pr, dump, single, _FAILURE_FULL_ONLY, True)
+    body_multi = _engine_failure_comment_body(pr, dump, multi, _FAILURE_FULL_ONLY, True)
+
+    assert "다른 모델의 실패 사유" not in body_single
+    assert "다른 모델의 실패 사유" in body_multi

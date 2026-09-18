@@ -883,6 +883,15 @@ async def test_timeout_budget_exhaustion_keeps_earlier_model_failures(
     """타임아웃 예산 소진 경로도 앞 모델의 실패 사유를 잃으면 안 된다."""
     pr, dump = _sample_review_input()
 
+    class _FakeLoop:
+        def __init__(self) -> None:
+            self._time = 0.0
+
+        def time(self) -> float:
+            return self._time
+
+    fake_loop = _FakeLoop()
+
     async def fake_review(
         _prompt: str,
         _dump: FileDump,
@@ -890,14 +899,15 @@ async def test_timeout_budget_exhaustion_keeps_earlier_model_failures(
         model: str,
         timeout_sec: float,
     ) -> ReviewResult:
-        # 첫 모델이 예산을 다 써 버리게 만들어, 두 번째 모델을 시도하기 전에
-        # 타임아웃 예산 소진 경로로 빠지도록 한다.
-        await asyncio.sleep(1.01)
+        # 첫 모델이 예산을 다 써 버리게 만들어, 두 번째 모델을 시도하기 전에 타임아웃
+        # 예산 소진 경로로 빠지도록 한다. 실제 sleep 없이 가상 시계만 앞당긴다.
+        fake_loop._time = 9.0
         raise ReviewEngineError(f"{model} hit its context window")
 
     engine = CodexCliEngine(
-        binary="codex", model="first", fallback_models=("second",), timeout_sec=1
+        binary="codex", model="first", fallback_models=("second",), timeout_sec=5
     )
+    monkeypatch.setattr(asyncio, "get_running_loop", lambda: fake_loop)
     engine._review_with_model = fake_review  # type: ignore[method-assign]
 
     with pytest.raises(ReviewEngineError) as exc_info:

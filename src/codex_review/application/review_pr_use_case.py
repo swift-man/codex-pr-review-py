@@ -615,9 +615,21 @@ _MODEL_LIMIT_ERROR_PHRASES = (
 )
 
 
-def _is_model_limit_error(exc: Exception) -> bool:
-    message = str(exc).casefold()
-    return any(phrase in message for phrase in _MODEL_LIMIT_ERROR_PHRASES)
+def _is_model_limit_error(exc: BaseException) -> bool:
+    """한도 초과 실패인지 판정한다.
+
+    `str(exc)` 만 보면 안 된다 — 엔진이 표시용 메시지를 만들 때 모델별 사유를 길이
+    상한으로 자르므로, 한도 문구가 그 뒤에 있으면 통째로 사라진다. 잘리지 않은
+    `model_failures` 원문을 함께 훑어야 오분류로 중복 게시 방지까지 놓치지 않는다
+    (gemini PR #58).
+    """
+    haystacks = [str(exc).casefold()]
+    haystacks.extend(detail.casefold() for _, detail in getattr(exc, "model_failures", ()))
+    return any(
+        phrase in haystack
+        for haystack in haystacks
+        for phrase in _MODEL_LIMIT_ERROR_PHRASES
+    )
 
 
 def _unsupported_models(exc: BaseException) -> tuple[str, ...]:
@@ -740,8 +752,13 @@ def _engine_failure_message(
             "**조치 제안**\n"
             f"1. `CODEX_MODEL` / `CODEX_MODEL_FALLBACKS` 에서 {joined} 제거 후 재기동.\n"
             "2. 해당 모델이 꼭 필요하면 그 모델을 지원하는 인증 방식으로 전환.\n"
-            "3. 위 오류 목록에서 **다른 모델의 실패 사유** 도 함께 확인 "
-            "(미지원 모델이 체인 끝에 있으면 앞 모델의 진짜 원인이 가려집니다).\n"
+            # 시도한 모델이 하나뿐이면 "다른 모델의 사유" 라는 게 존재하지 않는다.
+            + (
+                "3. 위 오류 목록에서 **다른 모델의 실패 사유** 도 함께 확인 "
+                "(미지원 모델이 체인 끝에 있으면 앞 모델의 진짜 원인이 가려집니다).\n"
+                if len(getattr(exc, "model_failures", ())) > 1
+                else ""
+            )
         )
     advice = (
         "1. `CODEX_MODEL_INPUT_BUDGETS`(미설정 시 `CODEX_MAX_INPUT_TOKENS`) 를 모델 실제 "
